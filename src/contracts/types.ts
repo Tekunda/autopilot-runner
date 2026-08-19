@@ -157,6 +157,7 @@ export interface Snippet {
 
 export interface SubtaskState {
   id: string;
+  title?: string;
   status: TicketStatus;
   prMerged: boolean;
 }
@@ -165,6 +166,8 @@ export interface TicketState {
   tenantId: string;
   repoId: string;
   ticketId: string;
+  title?: string;
+  description?: string;
   status: TicketStatus;
   subtasks: SubtaskState[];
   prs: string[];
