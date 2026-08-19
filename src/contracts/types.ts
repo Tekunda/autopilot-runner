@@ -1,0 +1,196 @@
+// v0 domain types for the Delivery Autopilot engine.
+// Pure data shapes — no behavior. See AGENTS.md for the source of truth.
+
+export type Stage = 'enrich' | 'plan' | 'build' | 'review' | 'fix' | 'gate';
+
+export type ModelTier = 'fast' | 'standard' | 'deep';
+
+export type StageOutcome = 'pass' | 'fail' | 'error';
+
+export type CheckStatus = 'pass' | 'fail' | 'pending';
+
+export type TicketStatus =
+  | 'new'
+  | 'refining'
+  | 'enriching'
+  | 'planning'
+  | 'building'
+  | 'reviewing'
+  | 'fixing'
+  | 'blocked'
+  | 'done';
+
+export interface GatePolicy {
+  requireHumanApproval: boolean;
+  requiredChecks: string[];
+}
+
+// A `gate` stage's entitled gates, delivered JIT inside the signed grant so the runner
+// never holds gate/pack logic of its own (AGENTS.md "split plane", issue #129):
+//   - `generic` names one of the runner's own bundled, commodity gates (src/gates/generic/*
+//     -- npm-audit thresholds, forbidden-path predicates; no licensed IP), optionally
+//     narrowed by signed `config` (severity thresholds, path lists, ...) that -- being part
+//     of the signed payload -- overrides anything the unsigned runner-side GateTarget.config
+//     tries to set for that same gate id.
+//   - `prompt` carries a licensed pack gate's full JIT instruction. The runner has zero
+//     pack-specific code: it only feeds `prompt` to the tenant's own AgentModel (see
+//     src/runner/prompt-gate.ts) and parses the pass/fail verdict generically. This is how
+//     pack gates ship (SEO cannibalization, cover-title, docs coverage, security review,
+//     ...) -- their analysis is judgment, delivered fresh per grant, never resident in the
+//     runner's own source.
+export type GateSpec =
+  | { kind: 'generic'; id: string; config?: Record<string, unknown> }
+  | { kind: 'prompt'; id: string; prompt: string };
+
+export interface CheckResult {
+  name: string;
+  status: CheckStatus;
+  detailsUrl?: string;
+}
+
+// Exactly one of stepPrompt (an inline instruction) or ref (a pointer to a
+// stored prompt/spec) is present per grant, matching the `stepPrompt|ref`
+// shape in AGENTS.md.
+export type ExecutionGrant = {
+  tenantId: string;
+  repoId: string;
+  ticketId: string;
+  stage: Stage;
+  modelTier: ModelTier;
+  gatePolicy: GatePolicy;
+  expiresAt: string; // ISO 8601
+  sig: string;
+  // The licensed pack this grant authorizes, when the grant is for a pack
+  // invocation rather than a plain stage. Part of the signed payload, so a
+  // hand-forged/tampered pack field fails verifyGrant like any other field.
+  pack?: string;
+  // The entitled gates this grant authorizes, for a `gate` stage -- resolved
+  // server-side from the tenant's entitlement/packs (never from
+  // tenant-editable config), so the runner runs exactly what's paid for and
+  // nothing else. Part of the signed payload like every other field: a
+  // tampered/added spec fails verifyGrant, and a gate id absent here never
+  // runs even if it's registered runner-side. See AGENTS.md and issues #106, #129.
+  gateSpecs?: GateSpec[];
+} & ({ stepPrompt: string; ref?: never } | { ref: string; stepPrompt?: never });
+
+export interface StageResult {
+  outcome: StageOutcome;
+  checks: CheckResult[];
+  prUrl?: string;
+  logDigest: string;
+}
+
+export interface StatusTelemetry {
+  grantId: string;
+  result: StageOutcome;
+  checks: CheckResult[];
+  prUrl?: string;
+  logDigest: string;
+}
+
+// Input to CodingExecutor.prepare(): the stage's prompt and target, before the
+// vendor's own coding-agent Action step (e.g. claude-code-action, run as a `uses:`
+// step in the runner workflow -- see AGENTS.md, "split plane") has done any work.
+// `prompt` is the same stepPrompt/ref the grant carries -- see CodingExecutor in
+// contracts/adapters.ts.
+export interface CodingExecutorInput {
+  stage: Stage;
+  prompt: string;
+  repoId: string;
+  baseRef: string;
+  // The deterministic branch (src/runner/prepare-stage.ts's codingBranchName()) the
+  // vendor Action step must commit and push its work to. Adapters fold this into the
+  // translated prompt/inputs however their vendor tool expects -- there is no generic
+  // "target branch" field most coding-agent Actions accept (issue #113).
+  branchName: string;
+}
+
+// What prepare() computes for the vendor's own coding-agent Action step's inputs
+// (e.g. claude-code-action's `prompt`). Pure translation, no I/O -- the actual
+// coding work happens in that step, outside this process.
+export interface CodingActionInputs {
+  prompt: string;
+}
+
+// The vendor Action step's own conclusion, plus the runner's *confirmed* branch --
+// fed to CodingExecutor.finalize() once the step is done. `branchName` is never the
+// vendor step's own self-reported branch output (unreliable: e.g. claude-code-action
+// leaves it unset outside its entity-triggered auto-branch mode); finalizeCodingStage
+// (src/runner/finalize-stage.ts) sets it only once it has confirmed, via VCSHost, that
+// the deterministic branch it told the agent to use actually landed on the remote with
+// commits beyond base (issue #113). An absent branchName is a valid no-op (the model
+// made no changes), not a failure.
+export interface CodingActionOutput {
+  stage: Stage;
+  repoId: string;
+  conclusion: string;
+  branchName?: string;
+}
+
+// Only telemetry crosses back out of a CodingExecutor -- never source/diff/prompt,
+// same boundary StageResult observes for CIRunner. `branchName` (not a PR url) is
+// as far as this adapter goes -- opening the PR from it is the runner's job via
+// VCSHost, deterministically, never this adapter's (AGENTS.md, "deterministic
+// control, LLM only for judgment").
+export interface ExecutorResult {
+  outcome: StageOutcome;
+  checks: CheckResult[];
+  branchName?: string;
+  logDigest: string;
+}
+
+export interface Completion {
+  text: string;
+  modelTier: ModelTier;
+  usage?: {
+    inputTokens: number;
+    outputTokens: number;
+  };
+}
+
+export interface Snippet {
+  ref: string;
+  title: string;
+  content: string;
+  sourceUrl?: string;
+}
+
+export interface SubtaskState {
+  id: string;
+  status: TicketStatus;
+  prMerged: boolean;
+}
+
+export interface TicketState {
+  tenantId: string;
+  repoId: string;
+  ticketId: string;
+  status: TicketStatus;
+  subtasks: SubtaskState[];
+  prs: string[];
+  lastEventAt: string; // ISO 8601
+  // Consecutive fail count for the ticket's *current* judgment stage
+  // (enrich/plan -- no PR exists yet for a `fix` stage to work against).
+  // The orchestrator retries the same stage while this is under the
+  // configured cap, then blocks; a stage change (pass or a non-judgment
+  // stage) resets it. See orchestrator.ts `advance()` and issue #123.
+  judgmentAttempts?: number;
+  // Set by the orchestrator when `advance()` blocks a ticket, so a human
+  // has a concrete reason without re-deriving it from telemetry.
+  blockedReason?: string;
+}
+
+// `mergeable` abstracts the host's merge-readiness signal for the watchdog's
+// keep-merges-live routine: 'clean' can be merged now, 'dirty' has a
+// conflict, 'behind' needs the base branch merged into it first, and
+// 'unknown' covers every other host-specific state (still computing,
+// blocked on checks/reviews, draft, ...) that isn't actionable by itself.
+// Optional -- adapters that don't surface mergeability simply omit it.
+export type PRMergeability = 'clean' | 'dirty' | 'behind' | 'unknown';
+
+export interface PRStatus {
+  number: number;
+  state: 'open' | 'closed' | 'merged';
+  merged: boolean;
+  mergeable?: PRMergeability;
+}

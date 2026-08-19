@@ -1,0 +1,120 @@
+// The thin runner's `gate` stage (issues #106, #129): verifies the signed grant, builds a
+// GateContext runner-side (no control-plane assumption -- gates run runner-side now, see
+// gates/types.ts), and runs exactly the gates named by the grant's signed `gateSpecs` -- a
+// gate absent there never runs. `{kind:'generic'}` specs run through the runner's own
+// bundled GateRegistry (./gate-registry.ts, commodity gates only); `{kind:'prompt'}` specs
+// -- licensed pack gates -- run generically through the tenant's AgentModel (./prompt-gate.ts),
+// with zero pack-specific code in this process. Which specs land in the grant at all is
+// decided entirely server-side by issueGateGrant (control-plane/grant.ts) from the tenant's
+// entitlement. Resolves entirely within this one call, the same way judgment-only stages
+// resolve within prepareStage() -- there is no vendor coding-agent Action step and no
+// finalize phase for a gate stage.
+
+import type { AgentModel, VCSHost } from '../contracts/adapters.ts';
+import type { CheckResult, CheckStatus, ExecutionGrant, GateSpec, StatusTelemetry } from '../contracts/types.ts';
+import { verifyGrant, type KeyInput } from '../control-plane/grant-verify.ts';
+import type { GateRegistry } from '../gates/registry.ts';
+import type { GateContext, GateResult } from '../gates/types.ts';
+import { digestFor, grantId, rejectedTelemetry } from './prepare-stage.ts';
+import { runPromptGateSpec } from './prompt-gate.ts';
+
+// Runner-side PR targeting for the gate run: which PR/diff to run the
+// entitled gates against. Unlike `gateSpecs`, this is routing data, not
+// authorization, so it never needs to be signed -- same as the CIRunner
+// dispatch target not being part of the grant either.
+export interface GateTarget {
+  prNumber: number;
+  branch: string;
+  baseRef: string;
+  changedFiles: string[];
+  config?: Record<string, unknown>;
+}
+
+export interface RunGateStageDeps {
+  vcsHost: VCSHost;
+  registry: GateRegistry;
+  /** Runs any `{kind:'prompt'}` gate specs (licensed pack gates) -- see ./prompt-gate.ts. */
+  agentModel: AgentModel;
+  target: GateTarget;
+  /** Public key used to verify the grant's signature. */
+  verifyKey: KeyInput;
+  /** Clock override for tests; defaults to the current time. */
+  now?: Date;
+}
+
+// GateStatus has a `skip` a CheckStatus has no room for; the closest honest
+// mapping is `pending` -- a skipped gate was never evaluated, not passed.
+function toCheckStatus(status: GateResult['status']): CheckStatus {
+  if (status === 'fail') return 'fail';
+  if (status === 'skip') return 'pending';
+  return 'pass';
+}
+
+function toChecks(results: GateResult[]): CheckResult[] {
+  return results.map((result) => ({
+    name: result.id,
+    status: toCheckStatus(result.status),
+    ...(result.detailsUrl ? { detailsUrl: result.detailsUrl } : {}),
+  }));
+}
+
+function isGenericSpec(spec: GateSpec): spec is Extract<GateSpec, { kind: 'generic' }> {
+  return spec.kind === 'generic';
+}
+
+function isPromptSpec(spec: GateSpec): spec is Extract<GateSpec, { kind: 'prompt' }> {
+  return spec.kind === 'prompt';
+}
+
+// Verify the grant, run exactly the gates named by its signed `gateSpecs`, and report the
+// resulting checks as StatusTelemetry -- only results/checks cross back, never source or
+// diffs (AGENTS.md, "split plane").
+export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps): Promise<StatusTelemetry> {
+  const verification = verifyGrant(grant, deps.verifyKey, deps.now ?? new Date());
+  if (!verification.ok) {
+    return rejectedTelemetry(grant, verification.reason);
+  }
+  if (grant.stage !== 'gate') {
+    return rejectedTelemetry(grant, `runGateStage called with a "${grant.stage}" grant, expected "gate"`);
+  }
+
+  const specs = grant.gateSpecs ?? [];
+  const genericSpecs = specs.filter(isGenericSpec);
+  const promptSpecs = specs.filter(isPromptSpec);
+
+  // A generic spec's signed `config` is authorization-adjacent policy (severity thresholds,
+  // forbidden-path lists, ...) -- it overrides the runner-supplied, unsigned
+  // GateTarget.config for that same gate id, never the other way around.
+  const config: Record<string, unknown> = { ...(deps.target.config ?? {}) };
+  for (const spec of genericSpecs) {
+    if (spec.config !== undefined) config[spec.id] = spec.config;
+  }
+
+  const ctx: GateContext = {
+    repoId: grant.repoId,
+    prNumber: deps.target.prNumber,
+    branch: deps.target.branch,
+    baseRef: deps.target.baseRef,
+    changedFiles: deps.target.changedFiles,
+    vcsHost: deps.vcsHost,
+    config,
+  };
+
+  const genericReport = await deps.registry.run(
+    genericSpecs.map((spec) => spec.id),
+    ctx,
+  );
+  const promptResults = await Promise.all(
+    promptSpecs.map((spec) => runPromptGateSpec(spec, ctx, deps.agentModel)),
+  );
+
+  const results = [...genericReport.results, ...promptResults];
+  const ok = results.every((result) => result.status !== 'fail');
+
+  return {
+    grantId: grantId(grant),
+    result: ok ? 'pass' : 'fail',
+    checks: toChecks(results),
+    logDigest: digestFor(grant.repoId, grant.ticketId, grant.stage, String(specs.length)),
+  };
+}
