@@ -37,9 +37,16 @@ function promptWithBranchInstruction(input: { prompt: string; branchName: string
   return [
     input.prompt,
     '',
-    `Make changes only in the current checkout. Do not create or switch branches, commit, ` +
-      `or push. The runner will publish any changes to "${input.branchName}" from ` +
-      `${input.baseRef} after you finish. If no change is needed, leave the tree unchanged.`,
+    `This is a BUILD/FIX stage: you must IMPLEMENT the task by creating and editing files ` +
+      `in the current checkout. First explore the repository to learn its existing structure ` +
+      `and conventions (use Glob/Grep/Read), then make the changes with Edit/Write. Keep going ` +
+      `until the task is fully implemented -- do not stop after only exploring. Producing no ` +
+      `file changes is a FAILURE unless the task is already fully implemented in the current ` +
+      `tree; if you believe it already is, say so explicitly.`,
+    '',
+    `Make changes only in the current checkout. Do not create or switch branches, commit, or ` +
+      `push. The runner will publish your changes to "${input.branchName}" from ` +
+      `${input.baseRef} after you finish.`,
   ].join('\n');
 }
 
