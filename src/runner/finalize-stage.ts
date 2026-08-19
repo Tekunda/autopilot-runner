@@ -74,6 +74,27 @@ export async function finalizeCodingStage(
   }
 
   const branchName = codingBranchName(grant);
+
+  // A `fix` stage updates the PR under test in place: the vendor step pushed
+  // its self-heal onto that PR's existing head branch (codingBranchName returns
+  // it for a fix grant), so there is no fresh branch to confirm against base
+  // and no new PR to open -- the fix loop re-gates the same PR. Only a `build`
+  // stage produces a new branch + PR.
+  if (grant.stage === 'fix') {
+    const result = await deps.codingExecutor.finalize({
+      stage: grant.stage,
+      repoId: grant.repoId,
+      conclusion: outcome.conclusion,
+      branchName,
+    });
+    return {
+      grantId: grantId(grant),
+      result: result.outcome,
+      checks: result.checks,
+      logDigest: result.logDigest,
+    };
+  }
+
   // Mirror prepare-stage: the grant's server-set baseBranch (ticket integration
   // branch) wins, so the subtask PR opens against it -- never the live default.
   const baseRef = grant.baseBranch ?? deps.baseRef ?? DEFAULT_BASE_REF;

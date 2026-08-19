@@ -207,4 +207,9 @@ export interface PRStatus {
   state: 'open' | 'closed' | 'merged';
   merged: boolean;
   mergeable?: PRMergeability;
+  // The PR's head branch name, used to look up the PR's own CI checks
+  // (listChecks resolves a branch to its head commit's check-runs) before a
+  // merge -- e.g. re-verifying a promotion PR's required checks at merge time.
+  // Optional: adapters that don't surface it simply omit it.
+  headRef?: string;
 }

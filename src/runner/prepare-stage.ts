@@ -63,6 +63,13 @@ export function digestFor(...parts: string[]): string {
 // title over the opaque ticket UUID, with the grant's short id kept as a unique,
 // collision-proof suffix (two tickets can share a title).
 export function codingBranchName(grant: ExecutionGrant): string {
+  // A `fix` stage self-heals the PR already under test: it pushes its changes
+  // onto that PR's existing head branch (carried as the grant's baseBranch by
+  // the subtask pipeline) so the re-gate re-checks the same PR, rather than
+  // deriving a fresh branch the gated PR never receives (a fix that lands
+  // nowhere would exhaust the loop despite the agent doing real work). A
+  // `build` stage always gets a fresh, per-grant branch to open its PR from.
+  if (grant.stage === 'fix' && grant.baseBranch) return grant.baseBranch;
   const label = slugify(grant.ticketTitle ?? '') || slugify(grant.ticketId) || 'ticket';
   return `autopilot/${label}-${grant.stage}-${grantId(grant).slice(0, 8)}`;
 }

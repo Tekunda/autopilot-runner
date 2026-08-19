@@ -1,18 +1,13 @@
-name: 'Delivery Autopilot Thin Runner'
+name: 'Delivery Autopilot Runner'
 description: >-
-  The single generic runner the control plane dispatches per stage. Verifies a signed
-  execution grant and reports status telemetry back — never source, never a diff. For
-  agent stages, the selected official Claude Code or Codex Action runs against a
-  deterministic checkout of the customer repo with read-only access for judgment and
-  workspace access for coding; this action verifies the grant and opens resulting PRs
-  deterministically via VCSHost. For a `gate` stage, it runs exactly the
-  gates named in the grant's signed gateSpecs -- generic specs via this action's own bundled
-  gate code, prompt specs (licensed pack gates) via the AgentModel adapter with zero
-  pack-specific code of its own -- against the checked-out tree, and reports the resulting
-  GateReport. No engine/pack logic lives here; see src/runner/prepare-stage.ts,
-  src/runner/finalize-stage.ts, src/runner/run-gate-stage.ts, src/runner/prompt-gate.ts, and
-  src/runner/action-entry.ts.
+  Runs one stage of Delivery Autopilot inside your own GitHub Actions: it verifies a
+  signed instruction, runs the official Claude Code or Codex Action against a checkout of
+  your repo, opens the resulting pull request, and reports status back. Your source code
+  never leaves your CI.
 author: 'Tekunda'
+branding:
+  icon: 'git-pull-request'
+  color: 'purple'
 
 inputs:
   grant:

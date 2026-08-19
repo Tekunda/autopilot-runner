@@ -19,6 +19,7 @@ interface GhPullDetail {
   merged: boolean;
   mergeable: boolean | null;
   mergeable_state: string;
+  head: { ref: string };
 }
 
 interface GhCheckRun {
@@ -139,6 +140,7 @@ export class GitHubVCSHost implements VCSHost {
       state: mapPRState(pr.state, pr.merged),
       merged: pr.merged,
       mergeable: mapMergeability(pr.mergeable_state),
+      headRef: pr.head.ref,
     };
   }
 
