@@ -2,12 +2,12 @@
 
 The GitHub Action that lets [Delivery Autopilot](https://tekunda.com) take a ticket from
 your tracker all the way to a reviewed pull request. Your work is planned, built, checked,
-and self-healed by an AI pipeline that runs entirely inside your own GitHub Actions, so your
-code never leaves your infrastructure.
+and self-healed by an AI pipeline that runs inside your own GitHub Actions.
 
-Delivery Autopilot runs as a hosted service that reads your tickets and coordinates the
-work. The actual building happens here, in your CI, using your own credentials. This
-repository is that piece: a single Action you reference from a workflow in your repo.
+**This Action requires an active Delivery Autopilot subscription from Tekunda.** It does
+nothing on its own. The hosted Delivery Autopilot service reads your tickets and dispatches
+this Action to do the work. Without a subscription, there is nothing to trigger it and it
+will not run. [Contact us](https://tekunda.com/contact) to get set up.
 
 ## How it works
 
@@ -15,9 +15,9 @@ repository is that piece: a single Action you reference from a workflow in your 
 Your repository (your GitHub Actions)          Delivery Autopilot (hosted service)
 .....................................          ...................................
                                        reads your tickets, decides the next step,
-  Autopilot Runner workflow  <-- run --      and sends a signed, single-use instruction
+  Autopilot Runner workflow  <-- run --      and sends a signed, short-lived instruction
     1. checks out your repository
-    2. the AI writes the code (your key)      your source code is never sent to us
+    2. the AI writes the code (your key)
     3. runs the configured quality checks
     4. opens the pull request
     5. reports status back -------------->    advances the ticket, seeing only pass/fail,
@@ -25,8 +25,18 @@ Your repository (your GitHub Actions)          Delivery Autopilot (hosted servic
 ```
 
 Each step is authorized by a signed instruction that this Action verifies before doing any
-work. The only things that ever leave your repository are the pull request itself and a
-short status update. Your source code and your diffs stay with you.
+work.
+
+## Where your code goes
+
+Your source is checked out only inside your own CI, on GitHub's runners. **It is never sent
+to Tekunda's servers.** Delivery Autopilot never clones your repository; it sees only the
+pass/fail result, the pull request link, and a short log summary.
+
+There is one exception you should know about: the AI coding step runs in your CI under your
+own model credential, and to write code it sends the code context it needs to **your chosen
+model provider** (Anthropic or OpenAI). That call goes from your CI directly to that
+provider, not to Tekunda. You choose the provider and supply the credential.
 
 ## Setup
 
@@ -64,7 +74,7 @@ It sets up the workflow and connection for you, and you just add your AI credent
          id-token: write
        steps:
          - name: Run stage via Delivery Autopilot
-           uses: Tekunda/autopilot-runner@PINNED_SHA   # pin to a full commit SHA
+           uses: Tekunda/autopilot-runner@v1
            with:
              grant: ${{ inputs.grant }}
              gate-target: ${{ inputs.gate-target }}
@@ -74,8 +84,8 @@ It sets up the workflow and connection for you, and you just add your AI credent
              vcs-host-config: '{"provider":"github","token":"${{ secrets.GH_PAT }}"}'
    ```
 
-   Replace `PINNED_SHA` with a full commit SHA of this repository (not a moving tag). We tell
-   you which one to use.
+   Pinning to `@v1` gets you minor and patch updates automatically. A future `v2` would be a
+   breaking change you opt into by repinning.
 
 2. Add three repository secrets (Settings, then Secrets and variables, then Actions):
 
@@ -93,17 +103,21 @@ It sets up the workflow and connection for you, and you just add your AI credent
    doing and for which ticket, for example *"Autopilot build: Add SOC 2 badge"*, so you can
    follow along at a glance.
 
-## What this means for your security
+## Security and credentials
 
-- **Your code stays with you.** Delivery Autopilot works through GitHub's APIs and never
-  clones your repository. Your code is only ever checked out here, inside your own CI. Only
-  the pull request and a short status update come back.
-- **Verified instructions.** Every step is authorized by a signed, single-use instruction
-  that this Action checks before running anything.
-- **Your credentials, your account.** The AI runs under your own token, and your keys are
-  never stored by the service.
-- **Pin what you run.** Reference this repository by commit SHA so you always run exactly
-  the version you reviewed.
+- **Your code is checked out only in your CI.** Delivery Autopilot works through GitHub's
+  APIs and never clones your repository. Your source is never sent to Tekunda's servers.
+  Only the pull request and a short status update come back to the service. The AI coding
+  step does send code context to your chosen model provider (Anthropic or OpenAI), as
+  described in [Where your code goes](#where-your-code-goes).
+- **Verified instructions.** Every step is authorized by a signed instruction that this
+  Action checks before running anything. Each instruction is short-lived and expires, so a
+  captured one cannot be replayed later.
+- **Your credentials, your account.** The AI runs under your own token from your CI secrets.
+  Separately, the Delivery Autopilot service stores your tracker and model credentials
+  encrypted so it can operate your pipeline.
+- **Control what you run.** Reference this repository by the `@v1` tag to receive compatible
+  updates, or pin to a full commit SHA if you want to run one exact reviewed version.
 
 ## Support
 
