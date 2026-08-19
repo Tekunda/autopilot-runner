@@ -2,10 +2,10 @@ name: 'Delivery Autopilot Thin Runner'
 description: >-
   The single generic runner the control plane dispatches per stage. Verifies a signed
   execution grant and reports status telemetry back — never source, never a diff. For
-  coding stages (build, fix), the actual coding happens in the vendor's own coding-agent
-  Action step (claude-code-action by default) against a deterministic checkout of the
-  customer repo; this action only verifies the grant, hands that step its prompt, and opens
-  the resulting PR deterministically via VCSHost. For a `gate` stage, it runs exactly the
+  agent stages, the selected official Claude Code or Codex Action runs against a
+  deterministic checkout of the customer repo with read-only access for judgment and
+  workspace access for coding; this action verifies the grant and opens resulting PRs
+  deterministically via VCSHost. For a `gate` stage, it runs exactly the
   gates named in the grant's signed gateSpecs -- generic specs via this action's own bundled
   gate code, prompt specs (licensed pack gates) via the AgentModel adapter with zero
   pack-specific code of its own -- against the checked-out tree, and reports the resulting
@@ -22,10 +22,10 @@ inputs:
     description: 'Ed25519 public key (PEM) used to verify the grant signature.'
     required: true
   agent-model-config:
-    description: 'JSON config for the AgentModel adapter (provider + the customer''s own credentials). Used for judgment-only stages and for {kind:"prompt"} gate specs (licensed pack gates) in a `gate` stage.'
+    description: 'JSON config for the AgentModel adapter. Used only for {kind:"prompt"} gate specs in a `gate` stage.'
     required: true
   coding-executor-config:
-    description: 'JSON config for the CodingExecutor adapter (provider + the customer''s own credentials). Only used for coding stages (build, fix).'
+    description: 'Selected vendor Action config: claude-code with OAuth, or codex with an OpenAI API key. Used for judgment and coding stages.'
     required: true
   vcs-host-config:
     description: 'JSON config for the VCSHost adapter (provider + the customer''s own git host token). Used to check out the customer repo and to open the PR a coding stage produces.'
@@ -59,10 +59,9 @@ runs:
       working-directory: ${{ github.action_path }}
       run: npm ci
 
-    # Verifies the grant and, for a coding stage, translates its prompt into the vendor
-    # Action step's inputs below -- no git operations, no I/O beyond that (src/runner/
-    # prepare-stage.ts). Judgment-only stages (and a rejected grant) resolve telemetry
-    # right here, and every later step is skipped. A `gate` stage grant never reaches
+    # Verifies the grant and translates its prompt into the selected vendor Action step's
+    # inputs below -- no git operations, no I/O beyond that (src/runner/prepare-stage.ts).
+    # A rejected grant resolves telemetry here and every later step is skipped. A `gate` stage grant never reaches
     # this step at all -- see "Run gates" below.
     - name: Prepare stage
       id: prepare
@@ -73,14 +72,13 @@ runs:
         INPUT_MODE: prepare
         INPUT_GRANT: ${{ inputs.grant }}
         INPUT_VERIFY-KEY: ${{ inputs.verify-key }}
-        INPUT_AGENT-MODEL-CONFIG: ${{ inputs.agent-model-config }}
         INPUT_CODING-EXECUTOR-CONFIG: ${{ inputs.coding-executor-config }}
         INPUT_BASE-REF: ${{ github.event.repository.default_branch }}
       run: node src/runner/action-entry.ts
 
     # Deterministic Autopilot code, not the model (AGENTS.md, "deterministic control, LLM
     # only for judgment"): checks out the customer repo so there's a tree to work on --
-    # at the grant's base ref for a coding stage the vendor Action step below will edit,
+    # at the grant's base ref for a vendor Action stage (read-only judgment or coding),
     # or at the gate target's own branch for a `gate` stage, since some gates (e.g. `cve`)
     # run real tooling against the checked-out tree, not just diff metadata.
     - name: Checkout customer repo
@@ -111,24 +109,53 @@ runs:
       run: node src/runner/action-entry.ts
 
     # The ONLY non-deterministic, non-ours step (issue #70's settled execution boundary):
-    # the vendor's own coding-agent Action does the actual editing. Its own `branch_name`
-    # output is NOT trusted for this: claude-code-action only auto-branches in its
-    # entity-triggered (issue/PR comment) modes, and `workflow_dispatch`/prompt mode never
-    # is one -- it edits the tree but leaves branch_name unset (issue #113). So the prepare
-    # step's prompt (built by CodingExecutor.prepare()) already instructs the agent to
-    # commit and push to steps.prepare.outputs.branch-name itself; `claude_args` here just
-    # grants it the tools (Bash, for git) to follow through. `base_branch` tells it what
-    # it's branching from, matching the checkout above.
-    - name: Code with claude-code-action
+    # the selected vendor Action performs read-only judgment or edits the checkout. Git
+    # control stays in the deterministic step below, shared by both vendors (issue #113).
+    - name: Run with claude-code-action
       id: claude
-      if: steps.prepare.outputs.resolved == 'false'
+      if: steps.prepare.outputs.resolved == 'false' && fromJSON(inputs.coding-executor-config).provider == 'claude-code'
       uses: anthropics/claude-code-action@v1
       with:
-        claude_code_oauth_token: ${{ fromJSON(inputs.coding-executor-config).oauthToken }}
+        claude_code_oauth_token: ${{ fromJSON(inputs.coding-executor-config).oauthToken || '' }}
+        anthropic_api_key: ${{ fromJSON(inputs.coding-executor-config).apiKey || '' }}
         github_token: ${{ fromJSON(inputs.vcs-host-config).token }}
         prompt: ${{ steps.prepare.outputs.prompt }}
         base_branch: ${{ steps.prepare.outputs.base-ref }}
-        claude_args: '--allowedTools "Bash,Edit,Read,Write,Glob,Grep"'
+        claude_args: ${{ steps.prepare.outputs.stage-kind == 'coding' && '--allowedTools "Bash,Edit,Read,Write,Glob,Grep"' || '--allowedTools "Read,Glob,Grep"' }}
+
+    - name: Run with codex-action
+      id: codex
+      if: steps.prepare.outputs.resolved == 'false' && fromJSON(inputs.coding-executor-config).provider == 'codex'
+      uses: openai/codex-action@v1
+      with:
+        openai-api-key: ${{ fromJSON(inputs.coding-executor-config).apiKey }}
+        responses-api-endpoint: ${{ fromJSON(inputs.coding-executor-config).responsesApiEndpoint || '' }}
+        prompt: ${{ steps.prepare.outputs.prompt }}
+        model: ${{ fromJSON(inputs.coding-executor-config).model || '' }}
+        effort: ${{ fromJSON(inputs.coding-executor-config).effort || '' }}
+        permission-profile: ${{ steps.prepare.outputs.stage-kind == 'coding' && ':workspace' || ':read-only' }}
+        allow-bots: true
+
+    - name: Commit and push coding result
+      if: >-
+        steps.prepare.outputs.stage-kind == 'coding' &&
+        (steps.claude.conclusion == 'success' || steps.codex.conclusion == 'success')
+      shell: bash
+      env:
+        BRANCH_NAME: ${{ steps.prepare.outputs.branch-name }}
+        BASE_REF: ${{ steps.prepare.outputs.base-ref }}
+        STAGE: ${{ fromJSON(inputs.grant).stage }}
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git switch -C "$BRANCH_NAME"
+        git add -A
+        if ! git diff --cached --quiet; then
+          git commit -m "Delivery Autopilot: $STAGE"
+        fi
+        if [ "$(git rev-parse HEAD)" != "$(git rev-parse "origin/$BASE_REF")" ]; then
+          git push origin "HEAD:refs/heads/$BRANCH_NAME"
+        fi
 
     # Deterministic Autopilot code again: confirms, via VCSHost, that the deterministic
     # branch prepare told the agent to use actually landed on the remote with commits
@@ -153,6 +180,6 @@ runs:
         INPUT_VERIFY-KEY: ${{ inputs.verify-key }}
         INPUT_CODING-EXECUTOR-CONFIG: ${{ inputs.coding-executor-config }}
         INPUT_VCS-HOST-CONFIG: ${{ inputs.vcs-host-config }}
-        INPUT_ACTION-CONCLUSION: ${{ steps.claude.outputs.conclusion }}
+        INPUT_ACTION-CONCLUSION: ${{ fromJSON(inputs.coding-executor-config).provider == 'claude-code' && steps.claude.conclusion || steps.codex.conclusion }}
         INPUT_BASE-REF: ${{ github.event.repository.default_branch }}
       run: node src/runner/action-entry.ts

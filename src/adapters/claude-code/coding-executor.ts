@@ -1,6 +1,6 @@
 // claude-code CodingExecutor adapter -- the default, ship-first CodingExecutor provider
-// (src/contracts/adapters.ts). The actual coding work (editing, committing, producing a
-// branch) happens in `anthropics/claude-code-action`, run as its own `uses:` step in the
+// (src/contracts/adapters.ts). The actual coding work (editing the checkout) happens in
+// the selected vendor Action, run as its own `uses:` step in the
 // runner workflow against an already-checked-out customer repo -- never in this process,
 // never in our adapters (AGENTS.md, "split plane"). This adapter only translates the
 // stage's prompt into that step's inputs (prepare) and that step's raw outputs back into
@@ -8,11 +8,9 @@
 // the PR from the resulting branch is the runner's own job via VCSHost, deterministically
 // -- never this adapter's (AGENTS.md, "deterministic control, LLM only for judgment").
 //
-// prepare() folds an explicit git instruction into the prompt naming the exact branch to
-// push to (input.branchName, computed deterministically by src/runner/prepare-stage.ts):
-// claude-code-action has no dedicated "target branch" input in `workflow_dispatch`/prompt
-// mode, and doesn't auto-branch there either -- action.yml grants the agent Bash via
-// `claude_args` so it can act on this instruction itself (issue #113).
+// prepare() tells the agent to leave git control to action.yml, which deterministically
+// commits and pushes the exact branch computed by src/runner/prepare-stage.ts. This keeps
+// branch control out of both Claude and Codex (issue #113).
 
 import { createHash } from 'node:crypto';
 
@@ -39,17 +37,16 @@ function promptWithBranchInstruction(input: { prompt: string; branchName: string
   return [
     input.prompt,
     '',
-    `When you are done, use git directly to commit your changes and push them to a new ` +
-      `branch named exactly "${input.branchName}", created from the current branch ` +
-      `(${input.baseRef}). Do not commit or push directly to ${input.baseRef}. If you made ` +
-      `no changes, do not create the branch and do not push anything.`,
+    `Make changes only in the current checkout. Do not create or switch branches, commit, ` +
+      `or push. The runner will publish any changes to "${input.branchName}" from ` +
+      `${input.baseRef} after you finish. If no change is needed, leave the tree unchanged.`,
   ].join('\n');
 }
 
 // No config is read here: prepare()/finalize() are pure functions of their own
 // arguments. ClaudeCodeExecutorConfig still exists as the documented shape of
 // action.yml's `coding-executor-config` JSON input (see registry.ts).
-export function createClaudeCodeExecutor(): CodingExecutor {
+export function createActionCodingExecutor(): CodingExecutor {
   return {
     async prepare(input): Promise<CodingActionInputs> {
       return { prompt: promptWithBranchInstruction(input) };
@@ -79,3 +76,5 @@ export function createClaudeCodeExecutor(): CodingExecutor {
     },
   };
 }
+
+export const createClaudeCodeExecutor = createActionCodingExecutor;

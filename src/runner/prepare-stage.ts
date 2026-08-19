@@ -3,9 +3,9 @@
 // run separately in the runner workflow -- see action.yml) has done any work.
 //
 // Verifies the signed ExecutionGrant, then branches on stage kind:
-//   - Judgment-only stages (enrich, plan, review): the model's own completion *is* the
-//     stage, so a successful AgentModel.invoke() resolves the stage right here -- no
-//     vendor Action step needed, no finalize phase to run afterward.
+//   - Judgment stages (enrich, plan, review): hand the signed prompt to the selected
+//     vendor Action with read-only repository access, then let finalize map its conclusion
+//     to telemetry.
 //   - Coding stages (build, fix): there's real work for the vendor Action step to do, so
 //     this computes the deterministic branch that step must push to (codingBranchName())
 //     and translates the grant's prompt into that step's inputs via CodingExecutor.prepare(),
@@ -16,12 +16,11 @@
 
 import { createHash } from 'node:crypto';
 
-import type { AgentModel, CodingExecutor } from '../contracts/adapters.ts';
+import type { CodingExecutor } from '../contracts/adapters.ts';
 import type { ExecutionGrant, Stage, StatusTelemetry } from '../contracts/types.ts';
 import { verifyGrant, type KeyInput } from '../control-plane/grant-verify.ts';
 
 export interface PrepareStageDeps {
-  agentModel: AgentModel;
   codingExecutor: CodingExecutor;
   /** Customer repository's default branch, supplied by the runner workflow. */
   baseRef?: string;
@@ -38,6 +37,7 @@ export const DEFAULT_BASE_REF = 'main';
 
 export type PreparedStage =
   | { kind: 'resolved'; telemetry: StatusTelemetry }
+  | { kind: 'judgment'; repoId: string; baseRef: string; prompt: string }
   | { kind: 'coding'; repoId: string; baseRef: string; branchName: string; prompt: string };
 
 // A grant carries no id of its own -- its signature already uniquely
@@ -74,8 +74,7 @@ export function rejectedTelemetry(grant: ExecutionGrant, reason: string | undefi
   };
 }
 
-// Verify the grant, then either resolve a judgment-only stage outright or prepare a
-// coding stage's vendor Action step inputs. A bad/expired grant is rejected before
+// Verify the grant, then prepare the selected vendor Action step. A bad/expired grant is rejected before
 // any adapter is touched.
 export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps): Promise<PreparedStage> {
   const verification = verifyGrant(grant, deps.verifyKey, deps.now ?? new Date());
@@ -99,23 +98,10 @@ export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps
     return { kind: 'coding', repoId: grant.repoId, baseRef, branchName, prompt: prepared.prompt };
   }
 
-  // The model does the actual work for the stage; its output is judgment,
-  // not status, so it never leaves the runner -- only this pass/error
-  // outcome crosses back to the control plane.
-  await deps.agentModel.invoke(prompt, {
-    tenantId: grant.tenantId,
-    repoId: grant.repoId,
-    ticketId: grant.ticketId,
-    stage: grant.stage,
-  });
-
   return {
-    kind: 'resolved',
-    telemetry: {
-      grantId: grantId(grant),
-      result: 'pass',
-      checks: [],
-      logDigest: digestFor(grant.repoId, grant.ticketId, grant.stage),
-    },
+    kind: 'judgment',
+    repoId: grant.repoId,
+    baseRef: deps.baseRef ?? DEFAULT_BASE_REF,
+    prompt,
   };
 }

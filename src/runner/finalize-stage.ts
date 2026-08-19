@@ -1,13 +1,10 @@
-// The thin runner's finalize phase: runs after the coding-stage vendor Action step (a
-// `uses:` step, e.g. anthropics/claude-code-action, run separately in the runner workflow
-// -- see action.yml) has produced its own raw conclusion output. Only reachable for grants
-// prepareStage() (./prepare-stage.ts) returned `kind: 'coding'` for.
+// The thin runner's finalize phase runs after the selected vendor Action has produced its
+// conclusion. Judgment stages map that conclusion directly to telemetry; coding stages
+// additionally confirm the deterministic remote branch and open the PR.
 //
-// Recomputes the same deterministic branch name prepareStage() told the agent to push to
-// (codingBranchName()) and confirms it directly against VCSHost -- present on the remote
-// with commits beyond base -- rather than trusting the vendor Action step to self-report
-// one: claude-code-action leaves its own `branch_name` output unset outside its
-// entity-triggered auto-branch mode, which a `workflow_dispatch` run never is (issue #113).
+// Recomputes the same deterministic branch name action.yml publishes after the agent edits
+// the checkout (codingBranchName()) and confirms it directly against VCSHost -- present on
+// the remote with commits beyond base -- rather than trusting a vendor output (issue #113).
 // Maps the confirmed outcome to an ExecutorResult via CodingExecutor.finalize(), then --
 // if a branch resulted -- opens the PR from it deterministically via VCSHost, never the
 // model (AGENTS.md, "deterministic control, LLM only for judgment"; issue #70's settled
@@ -19,7 +16,7 @@ import type { CodingExecutor } from '../contracts/adapters.ts';
 import type { VCSHost } from '../contracts/adapters.ts';
 import type { ExecutionGrant, StatusTelemetry } from '../contracts/types.ts';
 import { verifyGrant, type KeyInput } from '../control-plane/grant-verify.ts';
-import { codingBranchName, DEFAULT_BASE_REF, grantId, rejectedTelemetry } from './prepare-stage.ts';
+import { codingBranchName, DEFAULT_BASE_REF, digestFor, grantId, rejectedTelemetry } from './prepare-stage.ts';
 
 export interface FinalizeStageDeps {
   codingExecutor: CodingExecutor;
@@ -37,6 +34,22 @@ export interface FinalizeStageDeps {
 // codingBranchName(grant), confirmed against VCSHost below, never from the vendor step.
 export interface ActionOutcome {
   conclusion: string;
+}
+
+export function finalizeJudgmentStage(
+  grant: ExecutionGrant,
+  outcome: ActionOutcome,
+  deps: Pick<FinalizeStageDeps, 'verifyKey' | 'now'>,
+): StatusTelemetry {
+  const verification = verifyGrant(grant, deps.verifyKey, deps.now ?? new Date());
+  if (!verification.ok) return rejectedTelemetry(grant, verification.reason);
+
+  return {
+    grantId: grantId(grant),
+    result: outcome.conclusion === 'success' ? 'pass' : 'error',
+    checks: [],
+    logDigest: digestFor(grant.repoId, grant.ticketId, grant.stage, outcome.conclusion),
+  };
 }
 
 function prTitleFor(grant: ExecutionGrant): string {

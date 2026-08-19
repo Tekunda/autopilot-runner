@@ -1,9 +1,9 @@
 // GitHub Action entry point for the thin runner — the only code that executes inside the
-// customer's CI (AGENTS.md, "split plane"). action.yml invokes this twice per coding stage
+// customer's CI (AGENTS.md, "split plane"). action.yml invokes this twice per agent stage
 // (once each for `mode: prepare` and `mode: finalize`), with the vendor's own coding-agent
-// Action step (e.g. claude-code-action) run as its own `uses:` step in between — see
-// action.yml for the full step topology. Judgment-only stages resolve entirely within the
-// prepare call; finalize never runs for them.
+// Action step (Claude Code or Codex) run as its own `uses:` step in between — see
+// action.yml for the full step topology. Judgment stages use read-only access; coding stages
+// use workspace write access and the deterministic branch contract.
 //
 // Reads inputs off the action's env, runs the requested phase via prepareStage()/
 // finalizeCodingStage() (./prepare-stage.ts, ./finalize-stage.ts), and reports
@@ -24,9 +24,9 @@ import {
   type VCSHostConfig,
 } from './adapters.ts';
 import type { GateRegistry } from '../gates/registry.ts';
-import { finalizeCodingStage, type ActionOutcome } from './finalize-stage.ts';
+import { finalizeCodingStage, finalizeJudgmentStage, type ActionOutcome } from './finalize-stage.ts';
 import { createRunnerGateRegistry } from './gate-registry.ts';
-import { DEFAULT_BASE_REF, prepareStage, type PreparedStage } from './prepare-stage.ts';
+import { CODING_STAGES, DEFAULT_BASE_REF, prepareStage, type PreparedStage } from './prepare-stage.ts';
 import { runGateStage, type GateTarget } from './run-gate-stage.ts';
 
 export class ActionInputError extends Error {}
@@ -37,7 +37,6 @@ export type ActionInputs =
       grant: ExecutionGrant;
       verifyKey: string;
       baseRef: string;
-      agentModel: AgentModelConfig;
       codingExecutor: CodingExecutorConfig;
     }
   | {
@@ -87,7 +86,6 @@ export function parseInputs(env: NodeJS.ProcessEnv = process.env): ActionInputs 
       grant,
       verifyKey,
       baseRef: env['INPUT_BASE-REF'] || DEFAULT_BASE_REF,
-      agentModel: requireJsonEnv<AgentModelConfig>(env, 'INPUT_AGENT-MODEL-CONFIG'),
       codingExecutor: requireJsonEnv<CodingExecutorConfig>(env, 'INPUT_CODING-EXECUTOR-CONFIG'),
     };
   }
@@ -119,7 +117,7 @@ export function parseInputs(env: NodeJS.ProcessEnv = process.env): ActionInputs 
 }
 
 export interface RunActionDeps {
-  /** Override the AgentModel adapter; defaults to building one from inputs.agentModel (prepare and gate modes). */
+  /** Override the AgentModel adapter; defaults to building one from inputs.agentModel in gate mode. */
   agentModel?: AgentModel;
   /** Override the CodingExecutor adapter; defaults to building one from inputs.codingExecutor. */
   codingExecutor?: CodingExecutor;
@@ -164,9 +162,7 @@ export async function runActionEntry(inputs: ActionInputs, deps: RunActionDeps =
   const codingExecutor = deps.codingExecutor ?? createCodingExecutor(inputs.codingExecutor);
 
   if (inputs.mode === 'prepare') {
-    const agentModel = deps.agentModel ?? createAgentModel(inputs.agentModel);
     const prepared = await prepareStage(inputs.grant, {
-      agentModel,
       codingExecutor,
       baseRef: inputs.baseRef,
       verifyKey: inputs.verifyKey,
@@ -175,14 +171,15 @@ export async function runActionEntry(inputs: ActionInputs, deps: RunActionDeps =
     return { mode: 'prepare', prepared };
   }
 
-  const vcsHost = deps.vcsHost ?? createVCSHost(inputs.vcsHost);
-  const telemetry = await finalizeCodingStage(inputs.grant, inputs.actionOutcome, {
-    codingExecutor,
-    vcsHost,
-    baseRef: inputs.baseRef,
-    verifyKey: inputs.verifyKey,
-    now: deps.now,
-  });
+  const telemetry = CODING_STAGES.has(inputs.grant.stage)
+    ? await finalizeCodingStage(inputs.grant, inputs.actionOutcome, {
+        codingExecutor,
+        vcsHost: deps.vcsHost ?? createVCSHost(inputs.vcsHost),
+        baseRef: inputs.baseRef,
+        verifyKey: inputs.verifyKey,
+        now: deps.now,
+      })
+    : finalizeJudgmentStage(inputs.grant, inputs.actionOutcome, { verifyKey: inputs.verifyKey, now: deps.now });
   return { mode: 'finalize', telemetry };
 }
 
@@ -200,14 +197,15 @@ export function defaultWriteOutput(name: string, value: string): void {
 // anything beyond the StatusTelemetry shape (no source, no diff; see AGENTS.md).
 //
 // `resolved`/`prompt` let action.yml decide, from the prepare step's outputs alone,
-// whether to run the vendor coding-agent Action step and the finalize step at all —
-// judgment-only stages (and a rejected grant) resolve telemetry in prepare and skip both.
+// whether to run the selected vendor Action step and the finalize step at all. A rejected
+// grant resolves telemetry in prepare and skips both.
 export function reportResult(result: ActionResult, writeOutput: OutputWriter = defaultWriteOutput): void {
-  if (result.mode === 'prepare' && result.prepared.kind === 'coding') {
+  if (result.mode === 'prepare' && result.prepared.kind !== 'resolved') {
     writeOutput('resolved', 'false');
+    writeOutput('stage-kind', result.prepared.kind);
     writeOutput('prompt', result.prepared.prompt);
     writeOutput('base-ref', result.prepared.baseRef);
-    writeOutput('branch-name', result.prepared.branchName);
+    if (result.prepared.kind === 'coding') writeOutput('branch-name', result.prepared.branchName);
     return;
   }
 

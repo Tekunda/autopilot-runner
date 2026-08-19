@@ -10,13 +10,16 @@
 import type { AgentModel, CodingExecutor, VCSHost } from '../contracts/adapters.ts';
 import { createClaudeCodeExecutor, type ClaudeCodeExecutorConfig } from '../adapters/claude-code/coding-executor.ts';
 import { createClaudeAgentModel, type ClaudeAgentModelConfig } from '../adapters/claude/agent-model.ts';
+import { createCodexExecutor, type CodexExecutorConfig } from '../adapters/codex/coding-executor.ts';
 import type { GitHubClientConfig } from '../adapters/github/rest.ts';
 import { GitHubVCSHost } from '../adapters/github/vcs-host.ts';
 import { createOpenAIAgentModel, type OpenAIAgentModelConfig } from '../adapters/openai/agent-model.ts';
 
 export type VCSHostConfig = { provider: 'github' } & GitHubClientConfig;
 
-export type CodingExecutorConfig = { provider: 'claude-code' } & ClaudeCodeExecutorConfig;
+export type CodingExecutorConfig =
+  | ({ provider: 'claude-code' } & ClaudeCodeExecutorConfig)
+  | ({ provider: 'codex' } & CodexExecutorConfig);
 
 export type AgentModelConfig =
   | ({ provider: 'claude' } & ClaudeAgentModelConfig)
@@ -38,7 +41,11 @@ export function createVCSHost(config: VCSHostConfig): VCSHost {
 export function createCodingExecutor(config: CodingExecutorConfig): CodingExecutor {
   switch (config.provider) {
     case 'claude-code':
+      if (!config.oauthToken && !config.apiKey) throw new Error('runner adapters: claude-code requires oauthToken or apiKey');
       return createClaudeCodeExecutor();
+    case 'codex':
+      if (!config.apiKey) throw new Error('runner adapters: codex requires apiKey');
+      return createCodexExecutor();
     default:
       return unknownProvider('codingExecutor', (config as { provider: string }).provider);
   }
