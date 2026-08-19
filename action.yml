@@ -119,6 +119,7 @@ runs:
         claude_code_oauth_token: ${{ fromJSON(inputs.coding-executor-config).oauthToken || '' }}
         anthropic_api_key: ${{ fromJSON(inputs.coding-executor-config).apiKey || '' }}
         github_token: ${{ fromJSON(inputs.vcs-host-config).token }}
+        allowed_bots: 'delivery-autopilot'
         prompt: ${{ steps.prepare.outputs.prompt }}
         base_branch: ${{ steps.prepare.outputs.base-ref }}
         claude_args: ${{ steps.prepare.outputs.stage-kind == 'coding' && '--allowedTools "Bash,Edit,Read,Write,Glob,Grep"' || '--allowedTools "Read,Glob,Grep"' }}
