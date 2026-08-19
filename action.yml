@@ -1,9 +1,5 @@
 name: 'Delivery Autopilot Runner'
-description: >-
-  Runs one stage of Delivery Autopilot inside your own GitHub Actions: it verifies a
-  signed instruction, runs the official Claude Code or Codex Action against a checkout of
-  your repo, opens the resulting pull request, and reports status back. Your source code
-  never leaves your CI.
+description: 'Runs signed Delivery Autopilot stages in your GitHub Actions using the official Claude Code or Codex action.'
 author: 'Tekunda'
 branding:
   icon: 'git-pull-request'
