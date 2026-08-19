@@ -53,11 +53,14 @@ export function finalizeJudgmentStage(
 }
 
 function prTitleFor(grant: ExecutionGrant): string {
-  return `Delivery Autopilot: ${grant.stage}`;
+  return grant.ticketTitle
+    ? `${grant.ticketTitle} (${grant.stage})`
+    : `Delivery Autopilot: ${grant.stage}`;
 }
 
 function prBodyFor(grant: ExecutionGrant): string {
-  return `Opened by Delivery Autopilot for the ${grant.stage} stage.`;
+  const heading = grant.ticketTitle ? `**${grant.ticketTitle}**\n\n` : '';
+  return `${heading}Opened by Delivery Autopilot for the ${grant.stage} stage (ticket \`${grant.ticketId}\`).`;
 }
 
 export async function finalizeCodingStage(
@@ -71,7 +74,9 @@ export async function finalizeCodingStage(
   }
 
   const branchName = codingBranchName(grant);
-  const baseRef = deps.baseRef ?? DEFAULT_BASE_REF;
+  // Mirror prepare-stage: the grant's server-set baseBranch (ticket integration
+  // branch) wins, so the subtask PR opens against it -- never the live default.
+  const baseRef = grant.baseBranch ?? deps.baseRef ?? DEFAULT_BASE_REF;
   const [branchSha, baseSha] = await Promise.all([
     deps.vcsHost.getBranchSha(grant.repoId, branchName),
     deps.vcsHost.getBranchSha(grant.repoId, baseRef),

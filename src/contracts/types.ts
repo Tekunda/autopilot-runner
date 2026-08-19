@@ -60,6 +60,17 @@ export type ExecutionGrant = {
   gatePolicy: GatePolicy;
   expiresAt: string; // ISO 8601
   sig: string;
+  // The branch a coding stage (build/fix) must base its work on and open its PR
+  // against -- set server-side to the ticket's integration branch so subtask
+  // work never targets the customer's live default branch directly. The only
+  // merge onto the protected base is the human-gated promotion (promote.ts).
+  // Absent -> the runner falls back to the repo's default branch. Part of the
+  // signed payload like every other field, so a tampered base fails verifyGrant.
+  baseBranch?: string;
+  // The ticket's human-readable title, carried so the runner can name branches
+  // and PRs after it (a slug of this + a short id) instead of an opaque ticket
+  // UUID. Metadata only (already present in the stepPrompt); never a secret.
+  ticketTitle?: string;
   // The licensed pack this grant authorizes, when the grant is for a pack
   // invocation rather than a plain stage. Part of the signed payload, so a
   // hand-forged/tampered pack field fails verifyGrant like any other field.

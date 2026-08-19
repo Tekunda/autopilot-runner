@@ -18,6 +18,7 @@ import { createHash } from 'node:crypto';
 
 import type { CodingExecutor } from '../contracts/adapters.ts';
 import type { ExecutionGrant, Stage, StatusTelemetry } from '../contracts/types.ts';
+import { slugify } from '../control-plane/branch-names.ts';
 import { verifyGrant, type KeyInput } from '../control-plane/grant-verify.ts';
 
 export interface PrepareStageDeps {
@@ -57,12 +58,13 @@ export function digestFor(...parts: string[]): string {
 // which claude-code-action leaves unset outside its entity-triggered auto-branch mode
 // (issue #113). Not signed/part of the grant itself: deriving it from the grant's own
 // signature (via grantId) makes it unique per issued grant without adding a field.
+// The deterministic coding-stage branch name, reproducible from the grant alone by
+// both the prepare and finalize processes. Prefers a readable slug of the ticket
+// title over the opaque ticket UUID, with the grant's short id kept as a unique,
+// collision-proof suffix (two tickets can share a title).
 export function codingBranchName(grant: ExecutionGrant): string {
-  const ticket = grant.ticketId
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-  return `autopilot/${ticket || 'ticket'}-${grant.stage}-${grantId(grant).slice(0, 8)}`;
+  const label = slugify(grant.ticketTitle ?? '') || slugify(grant.ticketId) || 'ticket';
+  return `autopilot/${label}-${grant.stage}-${grantId(grant).slice(0, 8)}`;
 }
 
 export function rejectedTelemetry(grant: ExecutionGrant, reason: string | undefined): StatusTelemetry {
@@ -83,9 +85,12 @@ export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps
   }
 
   const prompt = grant.stepPrompt ?? grant.ref ?? '';
+  // The grant's server-set baseBranch (the ticket's integration branch) wins over
+  // the runner workflow's repo-default baseRef, so subtask coding never bases on --
+  // or opens a PR against -- the customer's live default branch.
+  const baseRef = grant.baseBranch ?? deps.baseRef ?? DEFAULT_BASE_REF;
 
   if (CODING_STAGES.has(grant.stage)) {
-    const baseRef = deps.baseRef ?? DEFAULT_BASE_REF;
     const branchName = codingBranchName(grant);
     const prepared = await deps.codingExecutor.prepare({
       stage: grant.stage,
@@ -101,7 +106,7 @@ export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps
   return {
     kind: 'judgment',
     repoId: grant.repoId,
-    baseRef: deps.baseRef ?? DEFAULT_BASE_REF,
+    baseRef,
     prompt,
   };
 }
