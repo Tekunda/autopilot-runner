@@ -19,6 +19,9 @@ export interface GitHubClientConfig {
   fetchImpl?: typeof fetch;
   /** Injectable for tests; defaults to the real GitHub API. */
   baseUrl?: string;
+  /** Per-request timeout in ms; defaults to 30s. A stalled request aborts rather than
+   *  hanging the drive loop. */
+  timeoutMs?: number;
 }
 
 export class GitHubApiError extends Error {
@@ -30,10 +33,17 @@ export class GitHubApiError extends Error {
   }
 }
 
+// Per-request timeout. Like the Notion client, every control-plane GitHub call must be
+// bounded so a stalled connection can't hang the drive loop forever. Individual calls
+// (dispatch, branch/PR ops, one poll of a run's status) are all short; the CIRunner's own
+// 15-minute wait for a run to finish is a sequence of these bounded requests, not one.
+const DEFAULT_TIMEOUT_MS = 30_000;
+
 export class GitHubClient {
   private readonly fetchImpl: typeof fetch;
   private readonly baseUrl: string;
   private readonly resolveToken: TokenProvider;
+  private readonly timeoutMs: number;
 
   constructor(config: GitHubClientConfig) {
     if (!config.token && !config.tokenProvider) {
@@ -42,6 +52,7 @@ export class GitHubClient {
     this.resolveToken = config.tokenProvider ?? (async () => config.token as string);
     this.fetchImpl = config.fetchImpl ?? fetch;
     this.baseUrl = config.baseUrl ?? 'https://api.github.com';
+    this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   }
 
   async request<T>(method: string, path: string, body?: unknown): Promise<T | undefined> {
@@ -55,6 +66,7 @@ export class GitHubClient {
         ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(this.timeoutMs),
     });
 
     const text = await res.text();
