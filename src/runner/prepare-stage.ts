@@ -23,6 +23,8 @@ import { verifyGrant, type KeyInput } from '../control-plane/grant-verify.ts';
 export interface PrepareStageDeps {
   agentModel: AgentModel;
   codingExecutor: CodingExecutor;
+  /** Customer repository's default branch, supplied by the runner workflow. */
+  baseRef?: string;
   /** Public key used to verify the grant's signature. */
   verifyKey: KeyInput;
   /** Clock override for tests; defaults to the current time. */
@@ -84,16 +86,17 @@ export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps
   const prompt = grant.stepPrompt ?? grant.ref ?? '';
 
   if (CODING_STAGES.has(grant.stage)) {
+    const baseRef = deps.baseRef ?? DEFAULT_BASE_REF;
     const branchName = codingBranchName(grant);
     const prepared = await deps.codingExecutor.prepare({
       stage: grant.stage,
       prompt,
       repoId: grant.repoId,
-      baseRef: DEFAULT_BASE_REF,
+      baseRef,
       branchName,
     });
 
-    return { kind: 'coding', repoId: grant.repoId, baseRef: DEFAULT_BASE_REF, branchName, prompt: prepared.prompt };
+    return { kind: 'coding', repoId: grant.repoId, baseRef, branchName, prompt: prepared.prompt };
   }
 
   // The model does the actual work for the stage; its output is judgment,

@@ -75,6 +75,7 @@ runs:
         INPUT_VERIFY-KEY: ${{ inputs.verify-key }}
         INPUT_AGENT-MODEL-CONFIG: ${{ inputs.agent-model-config }}
         INPUT_CODING-EXECUTOR-CONFIG: ${{ inputs.coding-executor-config }}
+        INPUT_BASE-REF: ${{ github.event.repository.default_branch }}
       run: node src/runner/action-entry.ts
 
     # Deterministic Autopilot code, not the model (AGENTS.md, "deterministic control, LLM
@@ -153,4 +154,5 @@ runs:
         INPUT_CODING-EXECUTOR-CONFIG: ${{ inputs.coding-executor-config }}
         INPUT_VCS-HOST-CONFIG: ${{ inputs.vcs-host-config }}
         INPUT_ACTION-CONCLUSION: ${{ steps.claude.outputs.conclusion }}
+        INPUT_BASE-REF: ${{ github.event.repository.default_branch }}
       run: node src/runner/action-entry.ts

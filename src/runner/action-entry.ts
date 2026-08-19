@@ -26,7 +26,7 @@ import {
 import type { GateRegistry } from '../gates/registry.ts';
 import { finalizeCodingStage, type ActionOutcome } from './finalize-stage.ts';
 import { createRunnerGateRegistry } from './gate-registry.ts';
-import { prepareStage, type PreparedStage } from './prepare-stage.ts';
+import { DEFAULT_BASE_REF, prepareStage, type PreparedStage } from './prepare-stage.ts';
 import { runGateStage, type GateTarget } from './run-gate-stage.ts';
 
 export class ActionInputError extends Error {}
@@ -36,6 +36,7 @@ export type ActionInputs =
       mode: 'prepare';
       grant: ExecutionGrant;
       verifyKey: string;
+      baseRef: string;
       agentModel: AgentModelConfig;
       codingExecutor: CodingExecutorConfig;
     }
@@ -43,6 +44,7 @@ export type ActionInputs =
       mode: 'finalize';
       grant: ExecutionGrant;
       verifyKey: string;
+      baseRef: string;
       codingExecutor: CodingExecutorConfig;
       vcsHost: VCSHostConfig;
       actionOutcome: ActionOutcome;
@@ -84,6 +86,7 @@ export function parseInputs(env: NodeJS.ProcessEnv = process.env): ActionInputs 
       mode,
       grant,
       verifyKey,
+      baseRef: env['INPUT_BASE-REF'] || DEFAULT_BASE_REF,
       agentModel: requireJsonEnv<AgentModelConfig>(env, 'INPUT_AGENT-MODEL-CONFIG'),
       codingExecutor: requireJsonEnv<CodingExecutorConfig>(env, 'INPUT_CODING-EXECUTOR-CONFIG'),
     };
@@ -94,6 +97,7 @@ export function parseInputs(env: NodeJS.ProcessEnv = process.env): ActionInputs 
       mode,
       grant,
       verifyKey,
+      baseRef: env['INPUT_BASE-REF'] || DEFAULT_BASE_REF,
       codingExecutor: requireJsonEnv<CodingExecutorConfig>(env, 'INPUT_CODING-EXECUTOR-CONFIG'),
       vcsHost: requireJsonEnv<VCSHostConfig>(env, 'INPUT_VCS-HOST-CONFIG'),
       actionOutcome: { conclusion: requireEnv(env, 'INPUT_ACTION-CONCLUSION') },
@@ -164,6 +168,7 @@ export async function runActionEntry(inputs: ActionInputs, deps: RunActionDeps =
     const prepared = await prepareStage(inputs.grant, {
       agentModel,
       codingExecutor,
+      baseRef: inputs.baseRef,
       verifyKey: inputs.verifyKey,
       now: deps.now,
     });
@@ -174,6 +179,7 @@ export async function runActionEntry(inputs: ActionInputs, deps: RunActionDeps =
   const telemetry = await finalizeCodingStage(inputs.grant, inputs.actionOutcome, {
     codingExecutor,
     vcsHost,
+    baseRef: inputs.baseRef,
     verifyKey: inputs.verifyKey,
     now: deps.now,
   });

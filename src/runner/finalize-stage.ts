@@ -24,6 +24,8 @@ import { codingBranchName, DEFAULT_BASE_REF, grantId, rejectedTelemetry } from '
 export interface FinalizeStageDeps {
   codingExecutor: CodingExecutor;
   vcsHost: VCSHost;
+  /** Customer repository's default branch, supplied by the runner workflow. */
+  baseRef?: string;
   /** Public key used to verify the grant's signature. */
   verifyKey: KeyInput;
   /** Clock override for tests; defaults to the current time. */
@@ -56,9 +58,10 @@ export async function finalizeCodingStage(
   }
 
   const branchName = codingBranchName(grant);
+  const baseRef = deps.baseRef ?? DEFAULT_BASE_REF;
   const [branchSha, baseSha] = await Promise.all([
     deps.vcsHost.getBranchSha(grant.repoId, branchName),
-    deps.vcsHost.getBranchSha(grant.repoId, DEFAULT_BASE_REF),
+    deps.vcsHost.getBranchSha(grant.repoId, baseRef),
   ]);
   // The branch must exist on the remote *and* differ from base -- a branch created but
   // never committed to (or never pushed at all) is the same valid no-op as no branch.
@@ -75,7 +78,7 @@ export async function finalizeCodingStage(
   if (result.branchName) {
     const pr = await deps.vcsHost.openPR(grant.repoId, {
       branch: result.branchName,
-      base: DEFAULT_BASE_REF,
+      base: baseRef,
       title: prTitleFor(grant),
       body: prBodyFor(grant),
     });
