@@ -1,46 +1,44 @@
-# Delivery Autopilot — Thin Runner
+# Delivery Autopilot — Runner
 
-The **public, IP-free runner** for [Delivery Autopilot](https://tekunda.com). It takes a
-ticket from your tracker to a verified, reviewed pull request — planned, built, gated, and
-self-healed by an agent pipeline — while **your source code never leaves your CI**.
+The GitHub Action that lets [Delivery Autopilot](https://tekunda.com) take a ticket from
+your tracker all the way to a reviewed pull request — planned, built, checked, and
+self-healed by an AI pipeline — **entirely inside your own GitHub Actions, so your code
+never leaves your infrastructure.**
 
-This repository holds **no product logic**: no engine, no prompts, no gate or pack
-algorithms. It is a single generic GitHub Action that the Delivery Autopilot **control
-plane** (Tekunda's closed, hosted service) dispatches once per stage. Because it is
-IP-free, it is safe to run in your own repository and safe to publish here.
+Delivery Autopilot runs as a hosted service that reads your tickets and coordinates the
+work. The actual building happens here, in your CI, using your own credentials. This
+repository is that piece: a single Action you reference from a workflow in your repo.
 
-## How it works (the split plane)
+## How it works
 
 ```
-Your repo (your GitHub Actions)              Tekunda control plane (our servers)
-──────────────────────────────              ───────────────────────────────────
-                                    ┌── reads your tickets, checks entitlement,
-                                    │     issues a SIGNED, single-use grant
-  runner.yml  ◀──── dispatch ───────┘     (which stage, the JIT prompt, the policy)
-   • checks out YOUR repo (your token)
-   • runs the vendor coding agent          the grant is the ONLY thing that crosses in
-     (Claude Code, your OAuth key)
-   • runs the JIT gate specs from the grant
-   • opens the PR
-   • reports status telemetry ─────────▶   advances state; NEVER sees your source
-     (pass/fail, PR url, log digest)         or a diff
+Your repository (your GitHub Actions)          Delivery Autopilot (hosted service)
+─────────────────────────────────────          ───────────────────────────────────
+                                       ┌── reads your tickets, decides the next step,
+  Autopilot Runner workflow  ◀── run ──┘     and sends a signed, single-use instruction
+    • checks out your repository
+    • the AI writes the code (your key)        your source code is never sent to us
+    • runs the configured quality checks
+    • opens the pull request
+    • reports status back ──────────────▶      advances the ticket; only sees pass/fail,
+      (pass/fail, PR link)                       the PR link, and a short log summary
 ```
 
-Only a **signed execution grant** crosses in and **status telemetry** crosses back —
-**never your source code, never a diff, never a secret.** The runner verifies every
-grant's signature against your configured public key before doing anything.
+Each step is authorized by a signed instruction that this Action verifies before doing any
+work. The only things that ever leave your repository are the pull request itself and a
+short status update — **never your source code and never a diff.**
 
 ## Setup
 
 ### Option A — GitHub App (recommended)
 
-Install the **Delivery Autopilot** GitHub App on the repositories you want it to drive.
-The App provisions the `runner.yml` workflow and wires the control plane to your repo. You
-only supply your model credential (below). *(Ask Tekunda for your install link.)*
+Install the **Delivery Autopilot** GitHub App on the repositories you want it to work on.
+It sets up the workflow and connection for you; you just add your AI credential (below).
+[Contact us](mailto:hello@tekunda.com) for your install link.
 
-### Option B — Manual
+### Option B — Add the workflow yourself
 
-1. **Add the workflow.** Create `.github/workflows/runner.yml` in your repo:
+1. **Create `.github/workflows/runner.yml`** in your repository:
 
    ```yaml
    name: Autopilot Runner
@@ -50,10 +48,10 @@ only supply your model credential (below). *(Ask Tekunda for your install link.)
      workflow_dispatch:
        inputs:
          grant:
-           description: Signed ExecutionGrant JSON issued by the control plane.
+           description: Signed instruction issued by Delivery Autopilot.
            required: true
          gate-target:
-           description: GateTarget JSON — gate stages only.
+           description: Quality-check target — checking steps only.
            required: false
            default: '{}'
 
@@ -61,12 +59,12 @@ only supply your model credential (below). *(Ask Tekunda for your install link.)
      run-stage:
        runs-on: ubuntu-latest
        permissions:
-         contents: write        # create the coding branch + open the PR (never reads source server-side)
+         contents: write        # create the working branch and open the pull request
          pull-requests: write
          id-token: write
        steps:
          - name: Run stage via Delivery Autopilot
-           uses: Tekunda/autopilot-runner@<PINNED_SHA>   # always pin to a full commit SHA
+           uses: Tekunda/autopilot-runner@<PINNED_SHA>   # pin to a full commit SHA
            with:
              grant: ${{ inputs.grant }}
              gate-target: ${{ inputs.gate-target }}
@@ -76,36 +74,37 @@ only supply your model credential (below). *(Ask Tekunda for your install link.)
              vcs-host-config: '{"provider":"github","token":"${{ secrets.GH_PAT }}"}'
    ```
 
-   Pin `@<PINNED_SHA>` to a full commit SHA of this repo (never a moving tag) — Tekunda
-   tells you which SHA your control plane targets.
+   Pin `@<PINNED_SHA>` to a full commit SHA of this repository (not a moving tag) — we tell
+   you which one to use.
 
 2. **Add three repository secrets** (Settings → Secrets and variables → Actions):
 
    | Secret | What it is |
    |---|---|
-   | `AUTOPILOT_GRANT_VERIFY_KEY` | The control plane's **Ed25519 public** key (PEM). Verifies grant signatures. Tekunda gives you this — it is public, not sensitive. |
-   | `CLAUDE_CODE_OAUTH_TOKEN` | **Your** Claude Code OAuth / subscription token. Runs the coding and judgment stages under your own account. |
-   | `GH_PAT` | A GitHub token with `contents:write` + `pull-requests:write` on this repo. Used to check out the repo and open PRs. A fine-grained PAT scoped to this repo is ideal. |
+   | `AUTOPILOT_GRANT_VERIFY_KEY` | A public key we give you, used to verify each instruction is genuinely from Delivery Autopilot. Not sensitive. |
+   | `CLAUDE_CODE_OAUTH_TOKEN` | **Your** Claude subscription (OAuth) token. The AI builds under your own account. |
+   | `GH_PAT` | A GitHub token that can write to this repository and open pull requests. A fine-grained token scoped to just this repo is ideal. |
 
-   > Prefer a coding subscription (OAuth) over a raw API key — it's the first-class path.
-   > An OpenAI/Codex setup is also supported via `coding-executor-config`.
+   > A Claude subscription (OAuth) is the recommended path. An OpenAI/Codex setup is also
+   > supported via `coding-executor-config`.
 
-3. **That's it.** You do **not** trigger this workflow yourself — the control plane
-   dispatches it per stage. Each run shows up in **Actions** labeled by its stage and
-   ticket, e.g. *"Autopilot build: Add SOC 2 badge"*, so `plan` / `build` / `gate` / `fix`
-   are distinguishable at a glance.
+3. **That's it.** You don't run this workflow yourself — Delivery Autopilot triggers it as
+   it works through a ticket. Each run appears in your **Actions** tab labeled by what it's
+   doing and for which ticket, e.g. *"Autopilot build: Add SOC 2 badge"*, so you can follow
+   along at a glance.
 
-## Security
+## What this means for your security
 
-- **IP-free & pinned.** This repo contains no proprietary logic; pin it by SHA so you run
-  exactly the reviewed code.
-- **Your source stays yours.** The control plane operates purely over APIs and never clones
-  your repo. Checkout happens only here, inside your CI. Only telemetry crosses back.
-- **Signed grants.** Every stage is authorized by a single-use, signature-verified grant;
-  a tampered or unentitled grant is rejected before any work runs.
-- **Your credentials, your account.** Coding runs under your own `CLAUDE_CODE_OAUTH_TOKEN`;
-  no model keys are shared with or stored by the control plane in the grant.
+- **Your code stays with you.** Delivery Autopilot works through GitHub's APIs and never
+  clones your repository. Your code is only ever checked out here, inside your own CI. Only
+  the pull request and a short status update come back.
+- **Verified instructions.** Every step is authorized by a signed, single-use instruction
+  that this Action checks before running anything.
+- **Your credentials, your account.** The AI runs under your own token; your keys are never
+  stored by the service.
+- **Pin what you run.** Reference this repository by commit SHA so you always run exactly
+  the version you reviewed.
 
 ## Support
 
-Questions or an install link: **hello@tekunda.com**.
+Questions or an install link: **hello@tekunda.com**
