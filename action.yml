@@ -104,6 +104,12 @@ runs:
     # control stays in the deterministic step below, shared by both vendors (issue #113).
     - name: Run with claude-code-action
       id: claude
+      # A non-zero exit (notably a hit turn limit: error_max_turns) must NOT fail the job:
+      # the deterministic Commit and Finalize steps below are the authoritative outcome (they
+      # commit whatever the agent produced and open the PR the gate judges). Without this the
+      # whole run concludes "failure", the control plane's CIRunner reads that run conclusion,
+      # and a real, PR-producing build is scored as failed.
+      continue-on-error: true
       if: steps.prepare.outputs.resolved == 'false' && fromJSON(inputs.coding-executor-config).provider == 'claude-code'
       uses: anthropics/claude-code-action@v1
       with:
@@ -122,6 +128,8 @@ runs:
 
     - name: Run with codex-action
       id: codex
+      # See the claude step: a non-zero coding exit must not fail the job; Finalize decides.
+      continue-on-error: true
       if: steps.prepare.outputs.resolved == 'false' && fromJSON(inputs.coding-executor-config).provider == 'codex'
       uses: openai/codex-action@v1
       with:
