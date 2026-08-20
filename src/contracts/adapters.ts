@@ -4,6 +4,7 @@
 
 import type {
   CheckResult,
+  CheckStatus,
   CodingActionInputs,
   CodingActionOutput,
   CodingExecutorInput,
@@ -49,6 +50,36 @@ export interface VCSHost {
   // opening a PR from it, rather than trusting a vendor coding-agent Action step's own
   // self-reported branch name (src/runner/finalize-stage.ts, issue #113).
   getBranchSha(repoId: string, branch: string): Promise<string | undefined>;
+  // The open PR whose head is `headBranch`, if there is one. A rebuild of the same
+  // subtask reuses its existing PR instead of opening a second one for the same work
+  // (src/runner/finalize-stage.ts) -- the live trace accumulated duplicate build PRs
+  // because every build attempt opened a fresh PR from a fresh branch.
+  findOpenPR(repoId: string, headBranch: string): Promise<{ url: string; number: number } | undefined>;
+  // Close an open PR without merging it. Used to retire a superseded/abandoned build
+  // PR so a blocked ticket doesn't leave an orphan open forever.
+  closePR(repoId: string, prNumber: number): Promise<void>;
+  // Delete a branch from the remote. Used to clean up a per-subtask build branch once
+  // its work is merged or its subtask is terminally blocked, so stale `autopilot/*`
+  // branches don't accumulate in the customer's repo. Deleting a branch that isn't
+  // there is a no-op, never an error.
+  deleteBranch(repoId: string, branch: string): Promise<void>;
+  // Publish an Autopilot result as a check on `ref` (a PR head branch or commit sha),
+  // so a gate's verdict is visible on the PR itself instead of only in control-plane
+  // telemetry. Requires the host app to hold check-write permission; adapters whose
+  // credential lacks it should surface the failure to the caller, which treats
+  // publishing as best-effort.
+  publishCheck(repoId: string, ref: string, check: PublishedCheck): Promise<void>;
+}
+
+// One Autopilot-authored check on a PR: the gate/stage name, its verdict, and a short
+// human-readable summary. Deliberately smaller than any host's native check payload --
+// only what every host can represent.
+export interface PublishedCheck {
+  name: string;
+  status: CheckStatus;
+  title?: string;
+  summary?: string;
+  detailsUrl?: string;
 }
 
 export interface CIRunner {

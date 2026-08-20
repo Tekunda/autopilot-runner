@@ -1,6 +1,6 @@
 // GitHub implementation of the VCSHost contract (src/contracts/adapters.ts).
 
-import type { VCSHost } from '../../contracts/adapters.ts';
+import type { PublishedCheck, VCSHost } from '../../contracts/adapters.ts';
 import type { CheckResult, PRStatus } from '../../contracts/types.ts';
 import { GitHubClient, type GitHubClientConfig } from './rest.ts';
 
@@ -151,6 +151,47 @@ export class GitHubVCSHost implements VCSHost {
   async getBranchSha(repoId: string, branch: string): Promise<string | undefined> {
     const ref = await this.client.requestOptional<GhRef>('GET', `/repos/${repoId}/git/ref/heads/${branch}`);
     return ref?.object.sha;
+  }
+
+  // GitHub's `head` filter is `owner:branch`; the owner is the repo's own owner for
+  // every branch Autopilot pushes (we never fork).
+  async findOpenPR(repoId: string, headBranch: string): Promise<{ url: string; number: number } | undefined> {
+    const owner = repoId.split('/')[0];
+    const head = encodeURIComponent(`${owner}:${headBranch}`);
+    const pulls = await this.client.requestOptional<GhPull[]>(
+      'GET',
+      `/repos/${repoId}/pulls?state=open&head=${head}&per_page=1`,
+    );
+    const pr = pulls?.[0];
+    return pr ? { url: pr.html_url, number: pr.number } : undefined;
+  }
+
+  async closePR(repoId: string, prNumber: number): Promise<void> {
+    await this.client.request('PATCH', `/repos/${repoId}/pulls/${prNumber}`, { state: 'closed' });
+  }
+
+  // A branch that's already gone is the desired end state, so a 404 from the delete is
+  // success, not an error (requestOptional swallows it).
+  async deleteBranch(repoId: string, branch: string): Promise<void> {
+    await this.client.requestOptional('DELETE', `/repos/${repoId}/git/refs/heads/${branch}`);
+  }
+
+  // Publishes a check-run on the ref's head commit. Needs the App's `checks: write`
+  // permission -- with only `checks: read` this call fails and the caller (which treats
+  // publishing as best-effort) reports the failure rather than silently dropping it.
+  async publishCheck(repoId: string, ref: string, check: PublishedCheck): Promise<void> {
+    const sha = (await this.getBranchSha(repoId, ref)) ?? ref;
+    await this.client.request('POST', `/repos/${repoId}/check-runs`, {
+      name: check.name,
+      head_sha: sha,
+      status: check.status === 'pending' ? 'in_progress' : 'completed',
+      ...(check.status === 'pending' ? {} : { conclusion: check.status === 'pass' ? 'success' : 'failure' }),
+      ...(check.detailsUrl ? { details_url: check.detailsUrl } : {}),
+      output: {
+        title: check.title ?? check.name,
+        summary: check.summary ?? '',
+      },
+    });
   }
 }
 

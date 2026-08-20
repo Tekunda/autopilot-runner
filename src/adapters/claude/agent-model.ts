@@ -2,6 +2,7 @@
 // BYO-AI: the API key is the customer's own, supplied via config. Never hardcoded,
 // never logged. See AGENTS.md ("Secrets never leave") and contracts/adapters.ts.
 
+import { resolveModel } from '../../config/model-tiers.ts';
 import type { AgentModel } from '../../contracts/adapters.ts';
 import type { Completion, ModelTier } from '../../contracts/types.ts';
 import { fetchWithRetry, type RetryFetchOptions } from '../shared/retry-fetch.ts';
@@ -65,13 +66,17 @@ export function createClaudeAgentModel(config: ClaudeAgentModelConfig): AgentMod
   const credential = resolveCredential(config);
 
   const {
-    model = DEFAULT_MODEL,
     modelTier = 'standard',
     maxTokens = DEFAULT_MAX_TOKENS,
     baseUrl = DEFAULT_BASE_URL,
     fetch: fetchImpl = fetch,
     retry,
   } = config;
+
+  // The tier selects the model unless the customer configured one explicitly --
+  // previously every tier fell through to the same Sonnet default, so `deep` never
+  // reached Opus (see src/config/model-tiers.ts).
+  const model = resolveModel('claude', modelTier, config.model) ?? DEFAULT_MODEL;
 
   return {
     async invoke(stepPrompt: string, context: Record<string, unknown>): Promise<Completion> {

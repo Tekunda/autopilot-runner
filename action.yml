@@ -113,7 +113,12 @@ runs:
         allowed_bots: 'delivery-autopilot'
         prompt: ${{ steps.prepare.outputs.prompt }}
         base_branch: ${{ steps.prepare.outputs.base-ref }}
-        claude_args: ${{ steps.prepare.outputs.stage-kind == 'coding' && '--allowedTools "Bash,Edit,Read,Write,Glob,Grep" --max-turns 80' || '--allowedTools "Read,Glob,Grep"' }}
+        # `--model` carries the grant's signed modelTier (prepare resolves it via
+        # src/config/model-tiers.ts): a "deep" stage runs on the deep model instead of
+        # claude-code-action's own default. Empty only for an unmapped provider.
+        claude_args: >-
+          ${{ steps.prepare.outputs.stage-kind == 'coding' && '--allowedTools "Bash,Edit,Read,Write,Glob,Grep" --max-turns 80' || '--allowedTools "Read,Glob,Grep"' }}
+          ${{ steps.prepare.outputs.model && format('--model {0}', steps.prepare.outputs.model) || '' }}
 
     - name: Run with codex-action
       id: codex
@@ -123,8 +128,11 @@ runs:
         openai-api-key: ${{ fromJSON(inputs.coding-executor-config).apiKey }}
         responses-api-endpoint: ${{ fromJSON(inputs.coding-executor-config).responsesApiEndpoint || '' }}
         prompt: ${{ steps.prepare.outputs.prompt }}
-        model: ${{ fromJSON(inputs.coding-executor-config).model || '' }}
-        effort: ${{ fromJSON(inputs.coding-executor-config).effort || '' }}
+        # Same tier resolution as the Claude step: prepare has already applied the
+        # customer's own configured model when there is one, so this output is the
+        # single source of truth for which model runs.
+        model: ${{ steps.prepare.outputs.model || fromJSON(inputs.coding-executor-config).model || '' }}
+        effort: ${{ fromJSON(inputs.coding-executor-config).effort || steps.prepare.outputs.effort || '' }}
         permission-profile: ${{ steps.prepare.outputs.stage-kind == 'coding' && ':workspace' || ':read-only' }}
         allow-bots: true
 

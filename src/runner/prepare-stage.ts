@@ -17,6 +17,7 @@
 import { createHash } from 'node:crypto';
 
 import type { CodingExecutor } from '../contracts/adapters.ts';
+import { effortForTier, resolveModel } from '../config/model-tiers.ts';
 import type { ExecutionGrant, Stage, StatusTelemetry } from '../contracts/types.ts';
 import { slugify } from '../control-plane/branch-names.ts';
 import { verifyGrant, type KeyInput } from '../control-plane/grant-verify.ts';
@@ -27,6 +28,15 @@ export interface PrepareStageDeps {
   baseRef?: string;
   /** Public key used to verify the grant's signature. */
   verifyKey: KeyInput;
+  /**
+   * The selected vendor Action's provider id (`claude-code` | `codex` | ...), used
+   * to turn the grant's signed `modelTier` into a concrete model id for that
+   * vendor's step. Absent -> no model is emitted and the vendor's own default
+   * applies (which is exactly the tier-is-ignored behaviour this fixes).
+   */
+  executorProvider?: string;
+  /** Customer-configured model id, which wins over the tier mapping. */
+  configuredModel?: string;
   /** Clock override for tests; defaults to the current time. */
   now?: Date;
 }
@@ -36,10 +46,13 @@ export const CODING_STAGES: ReadonlySet<Stage> = new Set(['build', 'fix']);
 // v0 drives a single default branch; per-ticket base refs are future work.
 export const DEFAULT_BASE_REF = 'main';
 
+// `model`/`effort` carry the grant's signed modelTier through to the vendor Action
+// step's own inputs (action.yml), which is what actually makes a "deep" build stage
+// run on the deep model instead of the vendor's default.
 export type PreparedStage =
   | { kind: 'resolved'; telemetry: StatusTelemetry }
-  | { kind: 'judgment'; repoId: string; baseRef: string; prompt: string }
-  | { kind: 'coding'; repoId: string; baseRef: string; branchName: string; prompt: string };
+  | { kind: 'judgment'; repoId: string; baseRef: string; prompt: string; model?: string; effort?: string }
+  | { kind: 'coding'; repoId: string; baseRef: string; branchName: string; prompt: string; model?: string; effort?: string };
 
 // A grant carries no id of its own -- its signature already uniquely
 // fingerprints the issued grant, so hash it into a stable telemetry id.
@@ -51,17 +64,26 @@ export function digestFor(...parts: string[]): string {
   return `sha256:${createHash('sha256').update(parts.join(' ')).digest('hex')}`;
 }
 
+// The stable identity of the work a coding grant belongs to: the tenant's repo and the
+// (sub)ticket being implemented, NOT the individual grant. Every rebuild of the same
+// subtask hashes to the same suffix, so it reuses one branch instead of leaving a fresh
+// `autopilot/<slug>-build-<newhash>` orphan behind on each attempt -- the accumulation
+// the 2026-08-19 review found on the customer repo (three orphan build branches and a
+// duplicate build PR for one ticket).
+function subtaskBranchKey(grant: ExecutionGrant): string {
+  return createHash('sha256')
+    .update([grant.tenantId, grant.repoId, grant.ticketId, grant.stage].join('/'))
+    .digest('hex');
+}
+
 // The branch a coding stage's vendor Action step must push its work to, computed
 // deterministically from the grant alone so prepareStage() and finalizeCodingStage()
 // (./finalize-stage.ts) -- separate processes sharing nothing but the grant -- always
 // agree on it without either trusting the vendor step's own self-reported branch name,
 // which claude-code-action leaves unset outside its entity-triggered auto-branch mode
-// (issue #113). Not signed/part of the grant itself: deriving it from the grant's own
-// signature (via grantId) makes it unique per issued grant without adding a field.
-// The deterministic coding-stage branch name, reproducible from the grant alone by
-// both the prepare and finalize processes. Prefers a readable slug of the ticket
-// title over the opaque ticket UUID, with the grant's short id kept as a unique,
-// collision-proof suffix (two tickets can share a title).
+// (issue #113). Prefers a readable slug of the ticket title over the opaque ticket
+// UUID, with a short hash of the subtask's identity as a collision-proof suffix (two
+// tickets can share a title).
 export function codingBranchName(grant: ExecutionGrant): string {
   // A `fix` stage self-heals the PR already under test: it pushes its changes
   // onto that PR's existing head branch (carried as the grant's baseBranch by
@@ -71,7 +93,7 @@ export function codingBranchName(grant: ExecutionGrant): string {
   // `build` stage always gets a fresh, per-grant branch to open its PR from.
   if (grant.stage === 'fix' && grant.baseBranch) return grant.baseBranch;
   const label = slugify(grant.ticketTitle ?? '') || slugify(grant.ticketId) || 'ticket';
-  return `autopilot/${label}-${grant.stage}-${grantId(grant).slice(0, 8)}`;
+  return `autopilot/${label}-${grant.stage}-${subtaskBranchKey(grant).slice(0, 8)}`;
 }
 
 export function rejectedTelemetry(grant: ExecutionGrant, reason: string | undefined): StatusTelemetry {
@@ -97,6 +119,14 @@ export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps
   // or opens a PR against -- the customer's live default branch.
   const baseRef = grant.baseBranch ?? deps.baseRef ?? DEFAULT_BASE_REF;
 
+  // The grant's signed tier decides the model for this stage; a customer-configured
+  // model still wins (BYO config is never overridden). An unmapped provider yields
+  // undefined and the vendor's own default applies.
+  const model = deps.executorProvider
+    ? resolveModel(deps.executorProvider, grant.modelTier, deps.configuredModel)
+    : deps.configuredModel;
+  const effort = effortForTier(grant.modelTier);
+
   if (CODING_STAGES.has(grant.stage)) {
     const branchName = codingBranchName(grant);
     const prepared = await deps.codingExecutor.prepare({
@@ -107,7 +137,15 @@ export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps
       branchName,
     });
 
-    return { kind: 'coding', repoId: grant.repoId, baseRef, branchName, prompt: prepared.prompt };
+    return {
+      kind: 'coding',
+      repoId: grant.repoId,
+      baseRef,
+      branchName,
+      prompt: prepared.prompt,
+      ...(model ? { model } : {}),
+      effort,
+    };
   }
 
   return {
@@ -115,5 +153,7 @@ export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps
     repoId: grant.repoId,
     baseRef,
     prompt,
+    ...(model ? { model } : {}),
+    effort,
   };
 }

@@ -115,12 +115,20 @@ export async function finalizeCodingStage(
 
   let prUrl: string | undefined;
   if (result.branchName) {
-    const pr = await deps.vcsHost.openPR(grant.repoId, {
-      branch: result.branchName,
-      base: baseRef,
-      title: prTitleFor(grant),
-      body: prBodyFor(grant),
-    });
+    // A rebuild of the same subtask pushes to the same deterministic branch
+    // (codingBranchName is keyed on the subtask, not the grant), so an open PR for
+    // that branch already represents this work: reuse it rather than opening a second
+    // build PR for one subtask. GitHub would reject the duplicate anyway; the live
+    // trace accumulated duplicates because each attempt used a fresh branch.
+    const existing = await deps.vcsHost.findOpenPR(grant.repoId, result.branchName);
+    const pr =
+      existing ??
+      (await deps.vcsHost.openPR(grant.repoId, {
+        branch: result.branchName,
+        base: baseRef,
+        title: prTitleFor(grant),
+        body: prBodyFor(grant),
+      }));
     prUrl = pr.url;
   }
 

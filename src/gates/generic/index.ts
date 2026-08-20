@@ -3,18 +3,27 @@
 // later (issue #78) — this only wires up the five generic ones. See #77.
 
 import type { GateRegistry } from '../registry.ts';
+import type { Gate } from '../types.ts';
 import { createCveGate } from './cve.ts';
 import { createRiskGate } from './risk.ts';
 import { createRollupGuardGate } from './rollup-guard.ts';
 import { createStructureGate } from './structure.ts';
 import { createTestPolicyGate } from './test-policy.ts';
 
+// The generic gate set itself, as data. The runner registers it into its own
+// GateRegistry (registerGenericGates below); the control plane feeds the same
+// list into its PackRegistry so `issueGateGrant` actually signs a
+// `{kind:'generic'}` spec for each one. Both sides must be built from this one
+// list -- a control plane whose PackRegistry has no generic gates issues an
+// empty `gateSpecs`, and the runner then correctly executes nothing.
+export function genericGates(): Gate[] {
+  return [createStructureGate(), createCveGate(), createRiskGate(), createTestPolicyGate(), createRollupGuardGate()];
+}
+
 export function registerGenericGates(registry: GateRegistry): void {
-  registry.register(createStructureGate());
-  registry.register(createCveGate());
-  registry.register(createRiskGate());
-  registry.register(createTestPolicyGate());
-  registry.register(createRollupGuardGate());
+  for (const gate of genericGates()) {
+    registry.register(gate);
+  }
 }
 
 export * from './cve.ts';

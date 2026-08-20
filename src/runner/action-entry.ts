@@ -166,6 +166,10 @@ export async function runActionEntry(inputs: ActionInputs, deps: RunActionDeps =
       codingExecutor,
       baseRef: inputs.baseRef,
       verifyKey: inputs.verifyKey,
+      executorProvider: inputs.codingExecutor.provider,
+      ...('model' in inputs.codingExecutor && inputs.codingExecutor.model
+        ? { configuredModel: inputs.codingExecutor.model }
+        : {}),
       now: deps.now,
     });
     return { mode: 'prepare', prepared };
@@ -205,6 +209,11 @@ export function reportResult(result: ActionResult, writeOutput: OutputWriter = d
     writeOutput('stage-kind', result.prepared.kind);
     writeOutput('prompt', result.prepared.prompt);
     writeOutput('base-ref', result.prepared.baseRef);
+    // The stage's resolved model/effort for the vendor Action step (action.yml) --
+    // this is where the grant's signed modelTier stops being a label and actually
+    // selects a model.
+    if (result.prepared.model) writeOutput('model', result.prepared.model);
+    if (result.prepared.effort) writeOutput('effort', result.prepared.effort);
     if (result.prepared.kind === 'coding') writeOutput('branch-name', result.prepared.branchName);
     return;
   }

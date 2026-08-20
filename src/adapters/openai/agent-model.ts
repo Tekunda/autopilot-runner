@@ -2,6 +2,7 @@
 // BYO-AI: the API key is the customer's own, supplied via config. Never hardcoded,
 // never logged. See AGENTS.md ("Secrets never leave") and contracts/adapters.ts.
 
+import { resolveModel } from '../../config/model-tiers.ts';
 import type { AgentModel } from '../../contracts/adapters.ts';
 import type { Completion, ModelTier } from '../../contracts/types.ts';
 import { fetchWithRetry, type RetryFetchOptions } from '../shared/retry-fetch.ts';
@@ -47,13 +48,16 @@ export function createOpenAIAgentModel(config: OpenAIAgentModelConfig): AgentMod
 
   const {
     apiKey,
-    model = DEFAULT_MODEL,
     modelTier = 'standard',
     maxTokens = DEFAULT_MAX_TOKENS,
     baseUrl = DEFAULT_BASE_URL,
     fetch: fetchImpl = fetch,
     retry,
   } = config;
+
+  // Tier -> model, with an explicitly configured model still winning
+  // (src/config/model-tiers.ts).
+  const model = resolveModel('openai', modelTier, config.model) ?? DEFAULT_MODEL;
 
   return {
     async invoke(stepPrompt: string, context: Record<string, unknown>): Promise<Completion> {

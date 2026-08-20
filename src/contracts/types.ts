@@ -171,6 +171,12 @@ export interface SubtaskState {
   title?: string;
   status: TicketStatus;
   prMerged: boolean;
+  // The subtask's own build PR and the branch it was built on, recorded so a
+  // re-drive can reuse (never duplicate) that PR, clean the branch up on a terminal
+  // outcome, and write the PR link back to the tracker. Absent until its build stage
+  // has produced one.
+  prUrl?: string;
+  branch?: string;
 }
 
 export interface TicketState {
@@ -192,6 +198,24 @@ export interface TicketState {
   // Set by the orchestrator when `advance()` blocks a ticket, so a human
   // has a concrete reason without re-deriving it from telemetry.
   blockedReason?: string;
+  // The deployment of this ticket's promoted change, once its promotion PR has
+  // merged. A ticket is complete when its deployment is observed, not when its PR
+  // merges (see deploy-watch.ts): while this is `pending`, the ticket stays in
+  // `reviewing` and neither the drive loop nor the reconciler may complete it.
+  // `unverified` records that the host never reported a deployment result -- the
+  // ticket is finished, but Autopilot did not see the deploy succeed.
+  deployment?: {
+    /** The promoted branch whose head carries the deployment. */
+    ref: string;
+    /** When the wait started (ISO 8601). */
+    startedAt: string;
+    status: 'pending' | 'passed' | 'failed' | 'unverified';
+    detail?: string;
+  };
+  // The last promotion-hold notice emitted for this ticket, so a ticket that sits
+  // ready-but-unmergeable (auto-merge disabled, unmet checks, a host merge refusal)
+  // is announced once per reason-change rather than on every 60s tick.
+  lastNotice?: string;
 }
 
 // `mergeable` abstracts the host's merge-readiness signal for the watchdog's
