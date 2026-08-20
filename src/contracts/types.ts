@@ -175,6 +175,13 @@ export interface Snippet {
 export interface SubtaskState {
   id: string;
   title?: string;
+  // The architect's per-subtask scope, carried from the plan so the build is dispatched
+  // for THIS slice only -- `plan` is the "what to change / where / how verified" note and
+  // `coverage` the files/globs this subtask owns. Without these a subtask build only knows
+  // its title and falls back to "do the whole parent ticket", which makes file-disjoint
+  // subtasks collide. Absent when the plan carried none.
+  plan?: string;
+  coverage?: string[];
   status: TicketStatus;
   prMerged: boolean;
   // The subtask's own build PR and the branch it was built on, recorded so a

@@ -166,7 +166,16 @@ runs:
           git commit -m "Delivery Autopilot: $STAGE"
         fi
         if [ "$(git rev-parse HEAD)" != "$(git rev-parse "origin/$BASE_REF")" ]; then
-          git push origin "HEAD:refs/heads/$BRANCH_NAME"
+          # Force-push: the coding branch is deterministic per (ticket, stage) and solely owned
+          # by Autopilot, so a fix-loop / retry re-run legitimately REPLACES a branch left by an
+          # earlier attempt. A plain push is rejected non-fast-forward when that branch already
+          # exists and wedges the ticket on every retry -- the exact failure the reference
+          # agent-implement.yml also guards against. Scoped to the autopilot/ namespace so a
+          # malformed branch name can never force-push a real branch (base, integration, ...).
+          case "$BRANCH_NAME" in
+            autopilot/*) git push --force origin "HEAD:refs/heads/$BRANCH_NAME" ;;
+            *) echo "refusing to force-push non-autopilot branch: $BRANCH_NAME" >&2; exit 1 ;;
+          esac
         fi
 
     # Deterministic Autopilot code again: confirms, via VCSHost, that the deterministic
