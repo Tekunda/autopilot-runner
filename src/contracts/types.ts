@@ -190,6 +190,14 @@ export interface SubtaskState {
   // has produced one.
   prUrl?: string;
   branch?: string;
+  // Consecutive failed build (coding) attempts for this subtask. The pipeline
+  // re-drives the build while this is under `fix.maxBuildRetries` before
+  // blocking the subtask for a human. Reset once a build produces a PR.
+  buildAttempts?: number;
+  // Why this subtask was blocked, when it was: an exhausted build/fix loop, a
+  // real merge conflict on its PR, or an error that isolated to it (never the
+  // whole ticket). Carried so a human sees a concrete reason.
+  blockedReason?: string;
 }
 
 export interface TicketState {

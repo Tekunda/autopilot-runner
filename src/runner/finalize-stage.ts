@@ -121,15 +121,39 @@ export async function finalizeCodingStage(
     // build PR for one subtask. GitHub would reject the duplicate anyway; the live
     // trace accumulated duplicates because each attempt used a fresh branch.
     const existing = await deps.vcsHost.findOpenPR(grant.repoId, result.branchName);
-    const pr =
-      existing ??
-      (await deps.vcsHost.openPR(grant.repoId, {
-        branch: result.branchName,
-        base: baseRef,
-        title: prTitleFor(grant),
-        body: prBodyFor(grant),
-      }));
-    prUrl = pr.url;
+    if (existing) {
+      prUrl = existing.url;
+    } else {
+      try {
+        const pr = await deps.vcsHost.openPR(grant.repoId, {
+          branch: result.branchName,
+          base: baseRef,
+          title: prTitleFor(grant),
+          body: prBodyFor(grant),
+        });
+        prUrl = pr.url;
+      } catch (err) {
+        // openPR can fail transiently -- a race with a sibling, or the integration base
+        // branch momentarily missing (422 "base does not exist"). The build's work is ALREADY
+        // pushed to result.branchName, so this must NOT crash finalize and orphan it: re-check
+        // for a PR another attempt raced to open, and otherwise surface the confirmed branch
+        // with NO prUrl and an `error` outcome so the control plane re-ensures the base branch
+        // and retries the PR-open next tick -- never a hollow "no-op done" that discards a real
+        // build (a branch-with-commits is not a no-op). See finalize/#113 + the merge/drive
+        // hardening in control-plane.ts.
+        const raced = await deps.vcsHost.findOpenPR(grant.repoId, result.branchName).catch(() => undefined);
+        if (raced) {
+          prUrl = raced.url;
+        } else {
+          return {
+            grantId: grantId(grant),
+            result: 'error',
+            checks: result.checks,
+            logDigest: digestFor(grant.repoId, grant.ticketId, grant.stage, 'pr-open-failed'),
+          };
+        }
+      }
+    }
   }
 
   return {
