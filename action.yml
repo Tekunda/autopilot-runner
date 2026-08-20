@@ -136,10 +136,16 @@ runs:
         permission-profile: ${{ steps.prepare.outputs.stage-kind == 'coding' && ':workspace' || ':read-only' }}
         allow-bots: true
 
+    # Runs even when the vendor coding step exited non-zero (notably a hit turn limit:
+    # claude-code-action returns error_max_turns / exit 1 after doing real work). Without
+    # `!cancelled()` a plain `if:` is implicitly `success()` and would skip here on that
+    # exit, DISCARDING every file the agent wrote. We commit whatever landed in the tree and
+    # let finalize + the gate judge it; a run that changed nothing still produces no branch.
     - name: Commit and push coding result
       if: >-
+        !cancelled() &&
         steps.prepare.outputs.stage-kind == 'coding' &&
-        (steps.claude.conclusion == 'success' || steps.codex.conclusion == 'success')
+        (steps.claude.conclusion != 'skipped' || steps.codex.conclusion != 'skipped')
       shell: bash
       env:
         BRANCH_NAME: ${{ steps.prepare.outputs.branch-name }}
