@@ -7,12 +7,10 @@
 // issueGateGrant (src/control-plane/grant.ts) from the tenant's entitlement.
 //
 // Licensed pack gates are NEVER registered here, and this module imports
-// nothing from src/packs (issue #129): a pack gate's analysis ships as a
-// `{kind:'prompt'}` JIT instruction inside the signed grant instead, and is
-// run generically via the tenant's own AgentModel (see ./prompt-gate.ts,
-// ./run-gate-stage.ts) -- the runner holds zero pack-specific code, so
-// there's nothing for a customer to read off their own runner beyond the
-// current invocation's own prompt text. See AGENTS.md and docs/architecture.md.
+// nothing from src/packs (issue #129). Prompt (licensed pack) gates are
+// disabled under the current stopgap, so the runner runs no model at all --
+// only these deterministic generic gates execute. The runner holds zero
+// pack-specific code. See AGENTS.md and docs/architecture.md.
 
 import { registerGenericGates } from '../gates/generic/index.ts';
 import { GateRegistry } from '../gates/registry.ts';

@@ -3,14 +3,13 @@
 // Until this existed, `modelTier` was a label: the 2026-08-19 live trace carried
 // `modelTier: "deep"` on its build grant and still initialized `claude-sonnet-5`,
 // because nothing ever turned the tier into a `--model` argument for the vendor
-// Action or into the direct AgentModel adapter's model id. Tier selection is the
-// product promise ("deep planning, cheap gates"), so it has to resolve to a real
-// model on both paths.
+// Action. Tier selection is the product promise ("deep planning, cheap gates"), so it
+// has to resolve to a real model for the dispatched vendor step.
 //
-// Vendors are named by the executor/agent-model provider ids used elsewhere
-// (`claude-code`/`claude`, `codex`/`openai`), so a caller can pass through whatever
-// provider it already holds. A customer-supplied explicit model always wins over the
-// tier mapping -- the tier is Autopilot's default, not an override of BYO config.
+// Vendors are named by the executor provider ids used elsewhere (`claude-code`/`claude`,
+// `codex`/`openai`), so a caller can pass through whatever provider it already holds. A
+// customer-supplied explicit model always wins over the tier mapping -- the tier is
+// Autopilot's default, not an override of BYO config.
 
 import type { ModelTier } from '../contracts/types.ts';
 

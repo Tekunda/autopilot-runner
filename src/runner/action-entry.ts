@@ -13,13 +13,11 @@
 
 import { appendFileSync } from 'node:fs';
 
-import type { AgentModel, CodingExecutor, VCSHost } from '../contracts/adapters.ts';
+import type { CodingExecutor, VCSHost } from '../contracts/adapters.ts';
 import type { ExecutionGrant, StatusTelemetry } from '../contracts/types.ts';
 import {
-  createAgentModel,
   createCodingExecutor,
   createVCSHost,
-  type AgentModelConfig,
   type CodingExecutorConfig,
   type VCSHostConfig,
 } from './adapters.ts';
@@ -53,8 +51,6 @@ export type ActionInputs =
       grant: ExecutionGrant;
       verifyKey: string;
       vcsHost: VCSHostConfig;
-      /** Runs any `{kind:'prompt'}` gate specs (licensed pack gates) -- see ./prompt-gate.ts. */
-      agentModel: AgentModelConfig;
       target: GateTarget;
     };
 
@@ -108,7 +104,6 @@ export function parseInputs(env: NodeJS.ProcessEnv = process.env): ActionInputs 
       grant,
       verifyKey,
       vcsHost: requireJsonEnv<VCSHostConfig>(env, 'INPUT_VCS-HOST-CONFIG'),
-      agentModel: requireJsonEnv<AgentModelConfig>(env, 'INPUT_AGENT-MODEL-CONFIG'),
       target: requireJsonEnv<GateTarget>(env, 'INPUT_GATE-TARGET'),
     };
   }
@@ -117,8 +112,6 @@ export function parseInputs(env: NodeJS.ProcessEnv = process.env): ActionInputs 
 }
 
 export interface RunActionDeps {
-  /** Override the AgentModel adapter; defaults to building one from inputs.agentModel in gate mode. */
-  agentModel?: AgentModel;
   /** Override the CodingExecutor adapter; defaults to building one from inputs.codingExecutor. */
   codingExecutor?: CodingExecutor;
   /** Override the VCSHost adapter; defaults to building one from inputs.vcsHost (finalize/gate). */
@@ -147,11 +140,9 @@ export async function runActionEntry(inputs: ActionInputs, deps: RunActionDeps =
   if (inputs.mode === 'gate') {
     const vcsHost = deps.vcsHost ?? createVCSHost(inputs.vcsHost);
     const registry = deps.gateRegistry ?? createRunnerGateRegistry();
-    const agentModel = deps.agentModel ?? createAgentModel(inputs.agentModel);
     const telemetry = await runGateStage(inputs.grant, {
       vcsHost,
       registry,
-      agentModel,
       target: inputs.target,
       verifyKey: inputs.verifyKey,
       now: deps.now,

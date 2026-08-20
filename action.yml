@@ -12,9 +12,6 @@ inputs:
   verify-key:
     description: 'Ed25519 public key (PEM) used to verify the grant signature.'
     required: true
-  agent-model-config:
-    description: 'JSON config for the AgentModel adapter. Used only for {kind:"prompt"} gate specs in a `gate` stage.'
-    required: true
   coding-executor-config:
     description: 'Selected vendor Action config: claude-code with OAuth, or codex with an OpenAI API key. Used for judgment and coding stages.'
     required: true
@@ -82,8 +79,8 @@ runs:
     # Runs only for a `gate` stage grant: verifies the grant, builds a GateContext from the
     # checked-out tree above, and runs exactly the gates named in the grant's signed
     # `gateSpecs` -- never a gate outside that set, even if it's registered runner-side (see
-    # src/runner/run-gate-stage.ts, issues #106, #129). `{kind:'prompt'}` specs (licensed
-    # pack gates) run through the AgentModel adapter, hence agent-model-config here too.
+    # src/runner/run-gate-stage.ts, issues #106, #129). Only deterministic `{kind:'generic'}`
+    # gates run under the current stopgap; there is no model in this step.
     # Resolves telemetry right here; no vendor Action step and no finalize phase follow it.
     - name: Run gates
       id: gate
@@ -95,7 +92,6 @@ runs:
         INPUT_GRANT: ${{ inputs.grant }}
         INPUT_VERIFY-KEY: ${{ inputs.verify-key }}
         INPUT_VCS-HOST-CONFIG: ${{ inputs.vcs-host-config }}
-        INPUT_AGENT-MODEL-CONFIG: ${{ inputs.agent-model-config }}
         INPUT_GATE-TARGET: ${{ inputs.gate-target }}
       run: node src/runner/action-entry.ts
 
@@ -104,12 +100,6 @@ runs:
     # control stays in the deterministic step below, shared by both vendors (issue #113).
     - name: Run with claude-code-action
       id: claude
-      # A non-zero exit (notably a hit turn limit: error_max_turns) must NOT fail the job:
-      # the deterministic Commit and Finalize steps below are the authoritative outcome (they
-      # commit whatever the agent produced and open the PR the gate judges). Without this the
-      # whole run concludes "failure", the control plane's CIRunner reads that run conclusion,
-      # and a real, PR-producing build is scored as failed.
-      continue-on-error: true
       if: steps.prepare.outputs.resolved == 'false' && fromJSON(inputs.coding-executor-config).provider == 'claude-code'
       uses: anthropics/claude-code-action@v1
       with:
@@ -122,14 +112,15 @@ runs:
         # `--model` carries the grant's signed modelTier (prepare resolves it via
         # src/config/model-tiers.ts): a "deep" stage runs on the deep model instead of
         # claude-code-action's own default. Empty only for an unmapped provider.
+        # Three tool profiles keyed on the resolved stage-kind: coding edits and commits;
+        # architect is read-only judgment plus a single Write for plan.json (uploaded as an
+        # artifact below, never committed); every other judgment stage is strictly read-only.
         claude_args: >-
-          ${{ steps.prepare.outputs.stage-kind == 'coding' && '--allowedTools "Bash,Edit,Read,Write,Glob,Grep" --max-turns 80' || '--allowedTools "Read,Glob,Grep"' }}
+          ${{ steps.prepare.outputs.stage-kind == 'coding' && '--allowedTools "Bash,Edit,Read,Write,Glob,Grep" --max-turns 80' || (steps.prepare.outputs.stage-kind == 'architect' && '--allowedTools "Read,Glob,Grep,Write,Bash"' || '--allowedTools "Read,Glob,Grep"') }}
           ${{ steps.prepare.outputs.model && format('--model {0}', steps.prepare.outputs.model) || '' }}
 
     - name: Run with codex-action
       id: codex
-      # See the claude step: a non-zero coding exit must not fail the job; Finalize decides.
-      continue-on-error: true
       if: steps.prepare.outputs.resolved == 'false' && fromJSON(inputs.coding-executor-config).provider == 'codex'
       uses: openai/codex-action@v1
       with:
@@ -141,19 +132,26 @@ runs:
         # single source of truth for which model runs.
         model: ${{ steps.prepare.outputs.model || fromJSON(inputs.coding-executor-config).model || '' }}
         effort: ${{ fromJSON(inputs.coding-executor-config).effort || steps.prepare.outputs.effort || '' }}
-        permission-profile: ${{ steps.prepare.outputs.stage-kind == 'coding' && ':workspace' || ':read-only' }}
+        permission-profile: ${{ (steps.prepare.outputs.stage-kind == 'coding' || steps.prepare.outputs.stage-kind == 'architect') && ':workspace' || ':read-only' }}
         allow-bots: true
 
-    # Runs even when the vendor coding step exited non-zero (notably a hit turn limit:
-    # claude-code-action returns error_max_turns / exit 1 after doing real work). Without
-    # `!cancelled()` a plain `if:` is implicitly `success()` and would skip here on that
-    # exit, DISCARDING every file the agent wrote. We commit whatever landed in the tree and
-    # let finalize + the gate judge it; a run that changed nothing still produces no branch.
+    # The architect stage writes its file-disjoint subtask plan to plan.json in the
+    # checked-out tree (never committed -- architect is not a coding stage). Upload it as a
+    # workflow artifact so the control plane's CIRunner can download and parse it back into
+    # StageResult.subtasks (src/adapters/github-actions/ci-runner.ts). A run that produced no
+    # plan uploads nothing, which surfaces as a failed decomposition that blocks the ticket.
+    - name: Upload architect plan
+      if: steps.prepare.outputs.stage-kind == 'architect'
+      uses: actions/upload-artifact@v4
+      with:
+        name: plan
+        path: plan.json
+        if-no-files-found: ignore
+
     - name: Commit and push coding result
       if: >-
-        !cancelled() &&
         steps.prepare.outputs.stage-kind == 'coding' &&
-        (steps.claude.conclusion != 'skipped' || steps.codex.conclusion != 'skipped')
+        (steps.claude.conclusion == 'success' || steps.codex.conclusion == 'success')
       shell: bash
       env:
         BRANCH_NAME: ${{ steps.prepare.outputs.branch-name }}

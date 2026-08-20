@@ -8,7 +8,6 @@ import type {
   CodingActionInputs,
   CodingActionOutput,
   CodingExecutorInput,
-  Completion,
   ExecutionGrant,
   ExecutorResult,
   PRStatus,
@@ -99,10 +98,6 @@ export interface CIRunner {
 export interface CodingExecutor {
   prepare(input: CodingExecutorInput): Promise<CodingActionInputs>;
   finalize(output: CodingActionOutput): Promise<ExecutorResult>;
-}
-
-export interface AgentModel {
-  invoke(stepPrompt: string, context: Record<string, unknown>): Promise<Completion>;
 }
 
 // Read-only source used by the enrich/PO stage.

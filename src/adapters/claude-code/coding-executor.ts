@@ -60,14 +60,18 @@ export function createActionCodingExecutor(): CodingExecutor {
     },
 
     async finalize(output: CodingActionOutput): Promise<ExecutorResult> {
-      // What matters is whether the coding step left committed changes, not the vendor
-      // step's own exit code. A run that hit its turn limit (claude-code-action returns
-      // error_max_turns / a non-success conclusion) but produced a diff is a real build
-      // candidate: open the PR and let the gate + fix loop judge and continue it, rather
-      // than discarding the work. Only a run that changed nothing is a no-op (`fail`) --
-      // never a phantom PR (issue #70's settled execution boundary).
+      // No commit was made -- a valid no-op, not a phantom PR (issue #70's settled
+      // execution boundary), so this is `fail`, never `error`.
       if (!output.branchName) {
         return { outcome: 'fail', checks: [], logDigest: digestFor(output.repoId, output.stage, 'no-changes') };
+      }
+
+      if (output.conclusion !== 'success') {
+        return {
+          outcome: 'error',
+          checks: [],
+          logDigest: digestFor(output.repoId, output.stage, output.conclusion),
+        };
       }
 
       return {

@@ -52,6 +52,7 @@ export const DEFAULT_BASE_REF = 'main';
 export type PreparedStage =
   | { kind: 'resolved'; telemetry: StatusTelemetry }
   | { kind: 'judgment'; repoId: string; baseRef: string; prompt: string; model?: string; effort?: string }
+  | { kind: 'architect'; repoId: string; baseRef: string; prompt: string; model?: string; effort?: string }
   | { kind: 'coding'; repoId: string; baseRef: string; branchName: string; prompt: string; model?: string; effort?: string };
 
 // A grant carries no id of its own -- its signature already uniquely
@@ -126,6 +127,21 @@ export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps
     ? resolveModel(deps.executorProvider, grant.modelTier, deps.configuredModel)
     : deps.configuredModel;
   const effort = effortForTier(grant.modelTier);
+
+  // The architect stage is judgment-like -- read-only repo plus a single Write to the
+  // plan file (plan.json), no branch and no PR. action.yml gives its vendor step Write
+  // access (and uploads the plan artifact) on this kind, then finalize maps its
+  // conclusion to telemetry exactly like any other judgment stage.
+  if (grant.stage === 'architect') {
+    return {
+      kind: 'architect',
+      repoId: grant.repoId,
+      baseRef,
+      prompt,
+      ...(model ? { model } : {}),
+      effort,
+    };
+  }
 
   if (CODING_STAGES.has(grant.stage)) {
     const branchName = codingBranchName(grant);

@@ -1,7 +1,7 @@
 // v0 domain types for the Delivery Autopilot engine.
 // Pure data shapes — no behavior. See AGENTS.md for the source of truth.
 
-export type Stage = 'enrich' | 'plan' | 'build' | 'review' | 'fix' | 'gate';
+export type Stage = 'enrich' | 'plan' | 'architect' | 'build' | 'review' | 'fix' | 'gate';
 
 export type ModelTier = 'fast' | 'standard' | 'deep';
 
@@ -32,12 +32,9 @@ export interface GatePolicy {
 //     narrowed by signed `config` (severity thresholds, path lists, ...) that -- being part
 //     of the signed payload -- overrides anything the unsigned runner-side GateTarget.config
 //     tries to set for that same gate id.
-//   - `prompt` carries a licensed pack gate's full JIT instruction. The runner has zero
-//     pack-specific code: it only feeds `prompt` to the tenant's own AgentModel (see
-//     src/runner/prompt-gate.ts) and parses the pass/fail verdict generically. This is how
-//     pack gates ship (SEO cannibalization, cover-title, docs coverage, security review,
-//     ...) -- their analysis is judgment, delivered fresh per grant, never resident in the
-//     runner's own source.
+//   - `prompt` carried a licensed pack gate's full JIT instruction. Prompt gates are
+//     disabled under the current stopgap (only deterministic generic gates run), so this
+//     variant has no producer today; it is retained for the signed-payload shape.
 export type GateSpec =
   | { kind: 'generic'; id: string; config?: Record<string, unknown> }
   | { kind: 'prompt'; id: string; prompt: string };
@@ -84,11 +81,29 @@ export type ExecutionGrant = {
   gateSpecs?: GateSpec[];
 } & ({ stepPrompt: string; ref?: never } | { ref: string; stepPrompt?: never });
 
+// One planned subtask produced by the architect stage: the title that becomes its
+// tracker entry, the architect note written back to that entry, the file paths/globs
+// it owns (coverage, so nothing is silently dropped and work stays file-disjoint), and
+// its 0-based dependencies on other subtasks in the same plan (advisory ordering). This
+// is metadata only -- titles, prose, path globs -- never source, diff, or secret, so it
+// respects the split-plane boundary that only telemetry crosses back.
+export interface PlannedSubtask {
+  title: string;
+  plan?: string;
+  coverage?: string[];
+  blockedBy?: number[];
+}
+
 export interface StageResult {
   outcome: StageOutcome;
   checks: CheckResult[];
   prUrl?: string;
   logDigest: string;
+  // Only an `architect` stage populates this: the ordered subtask plan it produced,
+  // downloaded by the CIRunner from the run's `plan.json` artifact and persisted
+  // deterministically by the control plane (createSubtasks + linkBlockedBy). Absent for
+  // every other stage.
+  subtasks?: PlannedSubtask[];
 }
 
 export interface StatusTelemetry {
@@ -148,15 +163,6 @@ export interface ExecutorResult {
   checks: CheckResult[];
   branchName?: string;
   logDigest: string;
-}
-
-export interface Completion {
-  text: string;
-  modelTier: ModelTier;
-  usage?: {
-    inputTokens: number;
-    outputTokens: number;
-  };
 }
 
 export interface Snippet {
