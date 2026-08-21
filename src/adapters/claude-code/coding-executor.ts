@@ -61,9 +61,18 @@ export function createActionCodingExecutor(): CodingExecutor {
 
     async finalize(output: CodingActionOutput): Promise<ExecutorResult> {
       // No commit was made -- a valid no-op, not a phantom PR (issue #70's settled
-      // execution boundary), so this is `fail`, never `error`.
+      // execution boundary). WHY nothing changed decides the outcome: if the vendor agent
+      // still concluded SUCCESS, the subtask's work was already present -- a sibling landed
+      // it (benign coverage overlap), or a verify-only slice was satisfied at HEAD -- so this
+      // is `pass`. The control plane then marks such a no-op subtask done (subtask-pipeline.ts
+      // "build produced no changes -- already satisfied"), and the assembled acceptance walk
+      // is the backstop that catches a deliverable no subtask ever produced. Returning `fail`
+      // here instead made that no-op-done path unreachable and blocked a subtask whose work a
+      // sibling had already done. Only a no-op paired with a non-success conclusion (the agent
+      // could not complete it) is a real `fail`.
       if (!output.branchName) {
-        return { outcome: 'fail', checks: [], logDigest: digestFor(output.repoId, output.stage, 'no-changes') };
+        const outcome = output.conclusion === 'success' ? 'pass' : 'fail';
+        return { outcome, checks: [], logDigest: digestFor(output.repoId, output.stage, `no-changes-${outcome}`) };
       }
 
       if (output.conclusion !== 'success') {
