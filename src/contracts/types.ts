@@ -252,6 +252,11 @@ export interface TicketState {
   // set that lost or never persisted some of its planned children can't promote a
   // partial delivery. Undefined for non-decomposed tickets (no architect plan).
   plannedSubtaskCount?: number;
+  // How many times the acceptance walk found the assembled branch UNMET and the control
+  // plane dispatched a repair build to implement the missing criteria before re-verifying.
+  // Bounds the accept -> repair -> re-accept self-heal so a genuinely-unbuildable ticket
+  // blocks for a human instead of looping. Reset to 0 once acceptance passes.
+  acceptRepairAttempts?: number;
   prs: string[];
   lastEventAt: string; // ISO 8601
   // Consecutive fail count for the ticket's *current* judgment stage
