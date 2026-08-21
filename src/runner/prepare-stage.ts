@@ -128,11 +128,15 @@ export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps
     : deps.configuredModel;
   const effort = effortForTier(grant.modelTier);
 
-  // The architect stage is judgment-like -- read-only repo plus a single Write to the
-  // plan file (plan.json), no branch and no PR. action.yml gives its vendor step Write
-  // access (and uploads the plan artifact) on this kind, then finalize maps its
-  // conclusion to telemetry exactly like any other judgment stage.
-  if (grant.stage === 'architect') {
+  // The architect and accept stages share one execution shape -- read-only repo plus a
+  // single Write to the artifact file (plan.json), no branch and no PR. action.yml gives
+  // the vendor step Write access (and uploads the artifact) on this kind, then finalize
+  // maps its conclusion to telemetry like any other judgment stage. `accept` reuses the
+  // architect plumbing deliberately: it checks out the ticket's assembled integration
+  // branch (grant.baseBranch) and writes its acceptance verdict to plan.json, which the
+  // control plane parses per grant.stage -- so no runner/action.yml change is needed to
+  // add the acceptance walk.
+  if (grant.stage === 'architect' || grant.stage === 'accept') {
     return {
       kind: 'architect',
       repoId: grant.repoId,

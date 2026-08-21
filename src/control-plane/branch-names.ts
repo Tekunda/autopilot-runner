@@ -16,17 +16,23 @@ export function slugify(text: string, maxLen = 48): string {
     .replace(/-+$/g, '');
 }
 
-// A stable, short, ref-safe id derived from a ticket id -- the first 8 alphanumerics,
-// so `ticket/<slug>-<shortId>` stays unique even when two tickets share a title.
-export function shortTicketId(ticketId: string): string {
-  return ticketId.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 8) || 'ticket';
+// A stable, ref-safe key derived from a ticket id -- the FULL id, dashless and
+// lowercased. Must be the full id, never a prefix: trackers like Notion issue ids
+// sequentially, so a batch of tickets created together shares a long leading run
+// (e.g. `3c1ac5b0-4ad7-806f...` and `3c1ac5b0-4ad7-81f7...` share `3c1ac5b04ad7`).
+// A short prefix would collapse a whole batch onto one `ticket/<stem>` branch and
+// cross-wire their rollups; the full id keeps every ticket's branch unique and lets
+// a branch be matched back to its exact ticket for idempotent reuse. Mirrors
+// Website's `ticket/<slug>-<full-id>` scheme.
+export function ticketIdKey(ticketId: string): string {
+  return ticketId.toLowerCase().replace(/[^a-z0-9]/g, '') || 'ticket';
 }
 
-// `<slug-of-title>-<shortId>`, the readable stem the control plane's ticket and
-// integration branches share for one ticket. Falls back to the short id alone when
-// the title has no slug-able characters.
+// `<slug-of-title>-<ticketIdKey>`, the readable-yet-collision-proof stem the control
+// plane's ticket and integration branches share for one ticket. Falls back to the id
+// key alone when the title has no slug-able characters.
 export function ticketBranchStem(ticketId: string, title: string | undefined): string {
   const slug = slugify(title ?? '');
-  const short = shortTicketId(ticketId);
-  return slug ? `${slug}-${short}` : short;
+  const key = ticketIdKey(ticketId);
+  return slug ? `${slug}-${key}` : key;
 }

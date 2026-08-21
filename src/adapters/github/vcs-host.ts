@@ -20,6 +20,7 @@ interface GhPullDetail {
   mergeable: boolean | null;
   mergeable_state: string;
   head: { ref: string };
+  base: { ref: string };
 }
 
 interface GhCheckRun {
@@ -42,6 +43,18 @@ interface GhReview {
 interface GhBranchProtection {
   required_status_checks?: { contexts?: string[] };
   required_pull_request_reviews?: unknown;
+}
+
+// A single active rule from the repository-ruleset API
+// (`GET /repos/{repo}/rules/branches/{branch}`), which the legacy
+// branch-protection endpoint does NOT surface. A branch can be governed by a
+// ruleset, by classic protection, or both -- so both must be read and unioned.
+interface GhBranchRule {
+  type: string;
+  parameters?: {
+    required_status_checks?: { context: string }[];
+    required_approving_review_count?: number;
+  };
 }
 
 export class GitHubVCSHost implements VCSHost {
@@ -119,16 +132,36 @@ export class GitHubVCSHost implements VCSHost {
   }
 
   async protectedRules(repoId: string, branch: string): Promise<{ requiredChecks: string[]; requiresReview: boolean }> {
+    // A branch's required checks can come from classic branch protection OR a
+    // repository ruleset (e.g. Website's `test-qa-gate` ruleset requires `qa`).
+    // Reading only the legacy endpoint silently misses ruleset-required checks
+    // and lets a promotion merge past a gate the repo actually enforces -- so
+    // read both and union them. (live-readiness 2026-08-19 §4.)
     const protection = await this.client.requestOptional<GhBranchProtection>(
       'GET',
       `/repos/${repoId}/branches/${branch}/protection`,
     );
-    if (!protection) return { requiredChecks: [], requiresReview: false };
+    const rules =
+      (await this.client.requestOptional<GhBranchRule[]>(
+        'GET',
+        `/repos/${repoId}/rules/branches/${encodeURIComponent(branch)}`,
+      )) ?? [];
 
-    return {
-      requiredChecks: protection.required_status_checks?.contexts ?? [],
-      requiresReview: protection.required_pull_request_reviews != null,
-    };
+    const checks = new Set<string>(protection?.required_status_checks?.contexts ?? []);
+    let requiresReview = protection?.required_pull_request_reviews != null;
+
+    for (const rule of rules) {
+      if (rule.type === 'required_status_checks') {
+        for (const c of rule.parameters?.required_status_checks ?? []) {
+          if (c?.context) checks.add(c.context);
+        }
+      }
+      if (rule.type === 'pull_request' && (rule.parameters?.required_approving_review_count ?? 0) > 0) {
+        requiresReview = true;
+      }
+    }
+
+    return { requiredChecks: [...checks], requiresReview };
   }
 
   async getPR(repoId: string, prNumber: number): Promise<PRStatus> {
@@ -141,6 +174,7 @@ export class GitHubVCSHost implements VCSHost {
       merged: pr.merged,
       mergeable: mapMergeability(pr.mergeable_state),
       headRef: pr.head.ref,
+      ...(pr.base?.ref ? { baseRef: pr.base.ref } : {}),
     };
   }
 

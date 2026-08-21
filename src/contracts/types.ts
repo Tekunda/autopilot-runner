@@ -1,7 +1,7 @@
 // v0 domain types for the Delivery Autopilot engine.
 // Pure data shapes — no behavior. See AGENTS.md for the source of truth.
 
-export type Stage = 'enrich' | 'plan' | 'architect' | 'build' | 'review' | 'fix' | 'gate';
+export type Stage = 'enrich' | 'plan' | 'architect' | 'build' | 'review' | 'fix' | 'gate' | 'accept';
 
 export type ModelTier = 'fast' | 'standard' | 'deep';
 
@@ -23,6 +23,12 @@ export type TicketStatus =
 export interface GatePolicy {
   requireHumanApproval: boolean;
   requiredChecks: string[];
+  // The plan-review gate (PRD gate #2, the website's plan-review pause): when true, a
+  // decomposed ticket HOLDS after the architect writes its plan and does not build any
+  // subtask until a PO approves the plan (an approval reply on the tracker). Lets a human
+  // catch an under-scoped/wrong plan before it wastes builds. Per-tenant: resolved from the
+  // tenant's gates config like every other gate field. Optional; defaults to false (no hold).
+  requirePlanApproval?: boolean;
 }
 
 // A `gate` stage's entitled gates, delivered JIT inside the signed grant so the runner
@@ -94,6 +100,18 @@ export interface PlannedSubtask {
   blockedBy?: number[];
 }
 
+// The `accept` stage's verdict on the ASSEMBLED integration branch: does the
+// merged work actually satisfy every deliverable/acceptance criterion the ticket
+// requires? `met` is true only when nothing is missing; `unmet` lists, in plain
+// language, each deliverable that is absent or only stubbed (empty when met). This
+// is what catches an under-scoped architect plan even when the build is green --
+// e.g. a ticket that asked for an ROI calculator that no subtask ever built.
+// Metadata only (plain-language criteria), so it respects the split-plane boundary.
+export interface AcceptanceVerdict {
+  met: boolean;
+  unmet: string[];
+}
+
 export interface StageResult {
   outcome: StageOutcome;
   checks: CheckResult[];
@@ -104,6 +122,10 @@ export interface StageResult {
   // deterministically by the control plane (createSubtasks + linkBlockedBy). Absent for
   // every other stage.
   subtasks?: PlannedSubtask[];
+  // Only an `accept` stage populates this: the acceptance verdict on the assembled
+  // integration branch, downloaded by the CIRunner from the run's artifact. Absent
+  // for every other stage.
+  acceptance?: AcceptanceVerdict;
 }
 
 export interface StatusTelemetry {
@@ -182,6 +204,11 @@ export interface SubtaskState {
   // subtasks collide. Absent when the plan carried none.
   plan?: string;
   coverage?: string[];
+  // The subtask ids this one depends on (mapped from the architect plan's `blockedBy`
+  // indices). The drive loop won't build a subtask until every id here is `done`, so a
+  // plan with real ordering (e.g. an e2e that needs the page it tests) builds in order
+  // rather than racing. Absent/empty means independent -- driven in parallel with siblings.
+  blockedBy?: string[];
   status: TicketStatus;
   prMerged: boolean;
   // The subtask's own build PR and the branch it was built on, recorded so a
@@ -208,6 +235,16 @@ export interface TicketState {
   description?: string;
   status: TicketStatus;
   subtasks: SubtaskState[];
+  // Set once a PO has approved this decomposed ticket's plan under the plan-review gate
+  // (gates.requirePlanApproval). While false/absent and the gate is on, the ticket holds
+  // after decomposition and drives no subtask build. Ignored when the gate is off.
+  planApproved?: boolean;
+  // How many subtasks the architect's plan enumerated for this ticket. Recorded
+  // when the plan is persisted (dispatchArchitect) and checked by rollupGuard: a
+  // ticket may roll up only once every PLANNED subtask is present and done, so a
+  // set that lost or never persisted some of its planned children can't promote a
+  // partial delivery. Undefined for non-decomposed tickets (no architect plan).
+  plannedSubtaskCount?: number;
   prs: string[];
   lastEventAt: string; // ISO 8601
   // Consecutive fail count for the ticket's *current* judgment stage
@@ -257,4 +294,8 @@ export interface PRStatus {
   // merge -- e.g. re-verifying a promotion PR's required checks at merge time.
   // Optional: adapters that don't surface it simply omit it.
   headRef?: string;
+  // The PR's base branch name, used to discover the base branch's OWN required
+  // status checks (branch protection + rulesets) so a merge can't push past a
+  // gate the repo enforces. Optional; adapters that don't surface it omit it.
+  baseRef?: string;
 }

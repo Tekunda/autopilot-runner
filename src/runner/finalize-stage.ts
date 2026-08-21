@@ -132,7 +132,7 @@ export async function finalizeCodingStage(
           body: prBodyFor(grant),
         });
         prUrl = pr.url;
-      } catch (err) {
+      } catch {
         // openPR can fail transiently -- a race with a sibling, or the integration base
         // branch momentarily missing (422 "base does not exist"). The build's work is ALREADY
         // pushed to result.branchName, so this must NOT crash finalize and orphan it: re-check
