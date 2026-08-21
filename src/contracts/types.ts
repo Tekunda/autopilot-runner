@@ -74,6 +74,13 @@ export type ExecutionGrant = {
   // and PRs after it (a slug of this + a short id) instead of an opaque ticket
   // UUID. Metadata only (already present in the stepPrompt); never a secret.
   ticketTitle?: string;
+  // A short, high-entropy label for this grant's ticket (the uuid's last segment plus
+  // any `.N` subtask suffix), computed server-side at issuance (grant.ts). The runner
+  // names its workflow run "Autopilot <stage> <shortId>: <title>" from it, and the
+  // control plane correlates the completed run back by that same prefix -- so the CI UI
+  // shows the human title instead of a 36-char id crowding it out. Signed like every
+  // other field; absent on a legacy grant, where correlation falls back to ticketId.
+  shortId?: string;
   // The licensed pack this grant authorizes, when the grant is for a pack
   // invocation rather than a plain stage. Part of the signed payload, so a
   // hand-forged/tampered pack field fails verifyGrant like any other field.

@@ -116,7 +116,7 @@ runs:
         # architect is read-only judgment plus a single Write for plan.json (uploaded as an
         # artifact below, never committed); every other judgment stage is strictly read-only.
         claude_args: >-
-          ${{ steps.prepare.outputs.stage-kind == 'coding' && '--allowedTools "Bash,Edit,Read,Write,Glob,Grep" --max-turns 80' || (steps.prepare.outputs.stage-kind == 'architect' && '--allowedTools "Read,Glob,Grep,Write,Bash"' || '--allowedTools "Read,Glob,Grep"') }}
+          ${{ steps.prepare.outputs.stage-kind == 'coding' && '--allowedTools "Bash,Edit,Read,Write,Glob,Grep" --max-turns 200' || (steps.prepare.outputs.stage-kind == 'architect' && '--allowedTools "Read,Glob,Grep,Write,Bash"' || '--allowedTools "Read,Glob,Grep"') }}
           ${{ steps.prepare.outputs.model && format('--model {0}', steps.prepare.outputs.model) || '' }}
 
     - name: Run with codex-action

@@ -28,6 +28,19 @@ export function ticketIdKey(ticketId: string): string {
   return ticketId.toLowerCase().replace(/[^a-z0-9]/g, '') || 'ticket';
 }
 
+// A short, readable, effectively-unique label for a ticket id -- the LAST segment of
+// the uuid (its high-entropy tail; sequential trackers vary the tail, not the leading
+// run, so it stays unique across a batch -- see ticketIdKey), keeping any `.N` subtask
+// suffix. Used only for CI run-names and their correlation, where the full 36-char id
+// crowds the human title off the line; branch identity still uses the FULL ticketIdKey.
+export function shortTicketId(ticketId: string): string {
+  const dot = ticketId.indexOf('.');
+  const base = dot === -1 ? ticketId : ticketId.slice(0, dot);
+  const suffix = dot === -1 ? '' : ticketId.slice(dot);
+  const tail = base.split('-').pop() || base;
+  return `${tail}${suffix}`;
+}
+
 // `<slug-of-title>-<ticketIdKey>`, the readable-yet-collision-proof stem the control
 // plane's ticket and integration branches share for one ticket. Falls back to the id
 // key alone when the title has no slug-able characters.
