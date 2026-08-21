@@ -63,6 +63,45 @@ function prBodyFor(grant: ExecutionGrant): string {
   return `${heading}Opened by Delivery Autopilot for the ${grant.stage} stage (ticket \`${grant.ticketId}\`).`;
 }
 
+// Backoffs between PR-open attempts. The branch was just force-pushed with one token, but
+// openPR runs on a DIFFERENT token (the tenant VCS token, not the checkout token), and
+// GitHub's cross-token ref visibility is only eventually consistent -- for a second or two
+// after the push the PR-open token 404s the head/base ref. A single attempt then fails and
+// the control plane re-runs the entire ~12-minute agent build just to re-open the PR. So
+// retry openPR here first (the work is already pushed; opening the PR is cheap + idempotent).
+const PR_OPEN_BACKOFFS_MS = [400, 800, 1600, 3200];
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Open the build PR, tolerating the brief post-push window where the PR-open token can't see
+// the new ref yet. Retries with backoff; on every failure re-checks for a PR a sibling raced
+// to open (idempotent -- one subtask's deterministic branch has at most one PR). Returns the
+// PR url, or undefined once all attempts are spent -- the caller turns that into an `error`
+// outcome (branch confirmed, no PR) so a genuinely-missing base still falls through to the
+// control plane's re-ensure-and-retry path rather than being masked forever.
+async function openPrWithRetry(
+  vcsHost: VCSHost,
+  grant: ExecutionGrant,
+  branch: string,
+  base: string,
+): Promise<string | undefined> {
+  for (let attempt = 0; attempt <= PR_OPEN_BACKOFFS_MS.length; attempt++) {
+    try {
+      const pr = await vcsHost.openPR(grant.repoId, { branch, base, title: prTitleFor(grant), body: prBodyFor(grant) });
+      return pr.url;
+    } catch {
+      const raced = await vcsHost.findOpenPR(grant.repoId, branch).catch(() => undefined);
+      if (raced) return raced.url;
+      const backoff = PR_OPEN_BACKOFFS_MS[attempt];
+      if (backoff === undefined) return undefined; // attempts spent -- let the caller surface `error`
+      await sleep(backoff);
+    }
+  }
+  return undefined;
+}
+
 export async function finalizeCodingStage(
   grant: ExecutionGrant,
   outcome: ActionOutcome,
@@ -124,34 +163,21 @@ export async function finalizeCodingStage(
     if (existing) {
       prUrl = existing.url;
     } else {
-      try {
-        const pr = await deps.vcsHost.openPR(grant.repoId, {
-          branch: result.branchName,
-          base: baseRef,
-          title: prTitleFor(grant),
-          body: prBodyFor(grant),
-        });
-        prUrl = pr.url;
-      } catch {
-        // openPR can fail transiently -- a race with a sibling, or the integration base
-        // branch momentarily missing (422 "base does not exist"). The build's work is ALREADY
-        // pushed to result.branchName, so this must NOT crash finalize and orphan it: re-check
-        // for a PR another attempt raced to open, and otherwise surface the confirmed branch
-        // with NO prUrl and an `error` outcome so the control plane re-ensures the base branch
-        // and retries the PR-open next tick -- never a hollow "no-op done" that discards a real
-        // build (a branch-with-commits is not a no-op). See finalize/#113 + the merge/drive
-        // hardening in control-plane.ts.
-        const raced = await deps.vcsHost.findOpenPR(grant.repoId, result.branchName).catch(() => undefined);
-        if (raced) {
-          prUrl = raced.url;
-        } else {
-          return {
-            grantId: grantId(grant),
-            result: 'error',
-            checks: result.checks,
-            logDigest: digestFor(grant.repoId, grant.ticketId, grant.stage, 'pr-open-failed'),
-          };
-        }
+      // openPR can fail transiently -- the post-push cross-token ref-visibility race (see
+      // openPrWithRetry), a sibling racing the same branch, or the integration base branch
+      // momentarily missing. The build's work is ALREADY pushed to result.branchName, so this
+      // must NOT crash finalize and orphan it: retry the open with backoff, and only once the
+      // attempts are spent surface the confirmed branch with NO prUrl and an `error` outcome so
+      // the control plane re-ensures the base branch and retries next tick -- never a hollow
+      // "no-op done" that discards a real build. See finalize/#113 + control-plane.ts hardening.
+      prUrl = await openPrWithRetry(deps.vcsHost, grant, result.branchName, baseRef);
+      if (!prUrl) {
+        return {
+          grantId: grantId(grant),
+          result: 'error',
+          checks: result.checks,
+          logDigest: digestFor(grant.repoId, grant.ticketId, grant.stage, 'pr-open-failed'),
+        };
       }
     }
   }
