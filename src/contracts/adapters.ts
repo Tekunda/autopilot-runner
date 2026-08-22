@@ -68,6 +68,15 @@ export interface VCSHost {
   // branches don't accumulate in the customer's repo. Deleting a branch that isn't
   // there is a no-op, never an error.
   deleteBranch(repoId: string, branch: string): Promise<void>;
+  // Every actionable review + issue comment on a PR, so the control plane can react to
+  // corrective feedback (a `changes_requested` review, or a review/PR comment) from a
+  // human reviewer or an external review bot (e.g. Codex) and dispatch a fix -- the way
+  // the old agent-fix did. Returns reviews and issue comments together, newest-inclusive.
+  listPrFeedback(repoId: string, prNumber: number): Promise<PrFeedback[]>;
+  // The actor's permission on the repo ('admin' | 'write' | 'read' | 'none'). Used to
+  // gate whose PR feedback is allowed to drive a fix -- a write/admin human or a trusted
+  // review bot, never a drive-by comment from an unprivileged account.
+  collaboratorPermission(repoId: string, login: string): Promise<'admin' | 'write' | 'read' | 'none'>;
   // Publish an Autopilot result as a check on `ref` (a PR head branch or commit sha),
   // so a gate's verdict is visible on the PR itself instead of only in control-plane
   // telemetry. Requires the host app to hold check-write permission; adapters whose
@@ -88,6 +97,19 @@ export interface OpenPR {
    *  its head lives in the tenant repo -- a fork head is untrusted code that also
    *  wouldn't resolve in the tenant checkout. Empty if the head repo is gone. */
   headRepo: string;
+}
+
+// One piece of PR feedback: a review (possibly requesting changes) or an issue comment.
+// `id` is stable and monotonic per source, so the control plane can remember the highest
+// it has already acted on and only fix on genuinely new feedback.
+export interface PrFeedback {
+  id: number;
+  kind: 'review' | 'comment';
+  author: string;
+  authorIsBot: boolean;
+  body: string;
+  /** A review with state CHANGES_REQUESTED. Comments are never change-requests. */
+  requestsChanges: boolean;
 }
 
 // One Autopilot-authored check on a PR: the gate/stage name, its verdict, and a short

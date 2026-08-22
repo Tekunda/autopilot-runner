@@ -257,6 +257,21 @@ export interface TicketState {
   // Bounds the accept -> repair -> re-accept self-heal so a genuinely-unbuildable ticket
   // blocks for a human instead of looping. Reset to 0 once acceptance passes.
   acceptRepairAttempts?: number;
+  // Highest PR review/comment ids the control plane has already acted on, per source, so
+  // corrective feedback (a Codex or human `changes_requested`/comment) drives a fix exactly
+  // once. Persisted so a control-plane restart doesn't re-fix already-handled feedback.
+  feedbackCursor?: { reviewId: number; commentId: number };
+  // How many times a `fix` stage has been dispatched to auto-resolve a merge conflict on
+  // this ticket's PR. Bounds the conflict self-heal so a genuinely unresolvable conflict
+  // blocks for a human instead of looping. Reset once the PR merges.
+  conflictFixAttempts?: number;
+  // How many times the architect has been re-run because its plan dropped a required
+  // deliverable (the deterministic coverage gate). Bounds the re-architect loop before
+  // blocking for a human. Reset once a covering plan is accepted.
+  architectRetries?: number;
+  // The deliverables the last architect plan failed to cover, fed back into the next
+  // architect prompt so it stops dropping them. Cleared once coverage passes.
+  architectCoverageGaps?: string[];
   prs: string[];
   lastEventAt: string; // ISO 8601
   // Consecutive fail count for the ticket's *current* judgment stage

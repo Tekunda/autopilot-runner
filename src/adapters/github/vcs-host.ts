@@ -1,6 +1,6 @@
 // GitHub implementation of the VCSHost contract (src/contracts/adapters.ts).
 
-import type { OpenPR, PublishedCheck, VCSHost } from '../../contracts/adapters.ts';
+import type { OpenPR, PrFeedback, PublishedCheck, VCSHost } from '../../contracts/adapters.ts';
 import type { CheckResult, PRStatus } from '../../contracts/types.ts';
 import { GitHubClient, type GitHubClientConfig } from './rest.ts';
 
@@ -42,9 +42,21 @@ interface GhCheckRunsResponse {
 }
 
 interface GhReview {
-  user: { login: string } | null;
+  id?: number;
+  user: ({ login: string; type?: string }) | null;
   state: string;
+  body?: string;
   submitted_at: string | null;
+}
+
+interface GhIssueComment {
+  id: number;
+  user: ({ login: string; type?: string }) | null;
+  body?: string;
+}
+
+interface GhPermission {
+  permission: string;
 }
 
 interface GhBranchProtection {
@@ -136,6 +148,57 @@ export class GitHubVCSHost implements VCSHost {
     if (states.includes('CHANGES_REQUESTED')) return 'changes_requested';
     if (states.includes('APPROVED')) return 'approved';
     return 'pending';
+  }
+
+  async listPrFeedback(repoId: string, prNumber: number): Promise<PrFeedback[]> {
+    const reviews =
+      (await this.client.request<GhReview[]>('GET', `/repos/${repoId}/pulls/${prNumber}/reviews`)) ?? [];
+    const comments =
+      (await this.client.request<GhIssueComment[]>('GET', `/repos/${repoId}/issues/${prNumber}/comments`)) ?? [];
+    const out: PrFeedback[] = [];
+    for (const r of reviews) {
+      if (r.id === undefined) continue;
+      out.push({
+        id: r.id,
+        kind: 'review',
+        author: r.user?.login ?? '',
+        authorIsBot: (r.user?.type ?? '') === 'Bot',
+        body: r.body ?? '',
+        requestsChanges: r.state === 'CHANGES_REQUESTED',
+      });
+    }
+    for (const c of comments) {
+      out.push({
+        id: c.id,
+        kind: 'comment',
+        author: c.user?.login ?? '',
+        authorIsBot: (c.user?.type ?? '') === 'Bot',
+        body: c.body ?? '',
+        requestsChanges: false,
+      });
+    }
+    return out;
+  }
+
+  async collaboratorPermission(repoId: string, login: string): Promise<'admin' | 'write' | 'read' | 'none'> {
+    const res = await this.client.requestOptional<GhPermission>(
+      'GET',
+      `/repos/${repoId}/collaborators/${encodeURIComponent(login)}/permission`,
+    );
+    // GitHub's `permission` field is admin|write|read|none; the newer roles maintain/triage
+    // fold onto write/read for the purpose of "is this actor allowed to drive a fix".
+    switch (res?.permission) {
+      case 'admin':
+        return 'admin';
+      case 'write':
+      case 'maintain':
+        return 'write';
+      case 'read':
+      case 'triage':
+        return 'read';
+      default:
+        return 'none';
+    }
   }
 
   async protectedRules(repoId: string, branch: string): Promise<{ requiredChecks: string[]; requiresReview: boolean }> {
