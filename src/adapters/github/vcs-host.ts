@@ -151,10 +151,30 @@ export class GitHubVCSHost implements VCSHost {
   }
 
   async listPrFeedback(repoId: string, prNumber: number): Promise<PrFeedback[]> {
-    const reviews =
-      (await this.client.request<GhReview[]>('GET', `/repos/${repoId}/pulls/${prNumber}/reviews`)) ?? [];
-    const comments =
-      (await this.client.request<GhIssueComment[]>('GET', `/repos/${repoId}/issues/${prNumber}/comments`)) ?? [];
+    // Both endpoints default to oldest-first, 30/page -- so on a busy PR (many Codex
+    // re-reviews + human back-and-forth) the NEWEST feedback lands on a later page and a
+    // single fetch would miss it, never advancing the cursor. Paginate (bounded) so every
+    // review/comment is seen and the cursor's max-id reflects the latest.
+    const reviews: GhReview[] = [];
+    const comments: GhIssueComment[] = [];
+    for (let page = 1; page <= 20; page++) {
+      const batch =
+        (await this.client.request<GhReview[]>(
+          'GET',
+          `/repos/${repoId}/pulls/${prNumber}/reviews?per_page=100&page=${page}`,
+        )) ?? [];
+      reviews.push(...batch);
+      if (batch.length < 100) break;
+    }
+    for (let page = 1; page <= 20; page++) {
+      const batch =
+        (await this.client.request<GhIssueComment[]>(
+          'GET',
+          `/repos/${repoId}/issues/${prNumber}/comments?per_page=100&page=${page}`,
+        )) ?? [];
+      comments.push(...batch);
+      if (batch.length < 100) break;
+    }
     const out: PrFeedback[] = [];
     for (const r of reviews) {
       if (r.id === undefined) continue;
@@ -165,6 +185,7 @@ export class GitHubVCSHost implements VCSHost {
         authorIsBot: (r.user?.type ?? '') === 'Bot',
         body: r.body ?? '',
         requestsChanges: r.state === 'CHANGES_REQUESTED',
+        approved: r.state === 'APPROVED',
       });
     }
     for (const c of comments) {
@@ -175,6 +196,7 @@ export class GitHubVCSHost implements VCSHost {
         authorIsBot: (c.user?.type ?? '') === 'Bot',
         body: c.body ?? '',
         requestsChanges: false,
+        approved: false,
       });
     }
     return out;

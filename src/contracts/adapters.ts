@@ -110,6 +110,9 @@ export interface PrFeedback {
   body: string;
   /** A review with state CHANGES_REQUESTED. Comments are never change-requests. */
   requestsChanges: boolean;
+  /** A review with state APPROVED -- an approval, never a request to change anything, so it
+   *  must not drive a fix even if its body has substance ("looks correct, nice work"). */
+  approved: boolean;
 }
 
 // One Autopilot-authored check on a PR: the gate/stage name, its verdict, and a short

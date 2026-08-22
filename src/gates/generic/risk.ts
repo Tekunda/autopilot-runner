@@ -22,7 +22,7 @@ const DEFAULT_CONFIG: RiskGateConfig = {
   highRiskPathPrefixes: ['.github/workflows/', '.github/actions/'],
   maxChangedFiles: 40,
   largeChangeExemptPattern:
-    '(-snapshots/|\\.(png|jpe?g|gif|webp|avif|ico|svg|woff2?|ttf|otf|eot|mp4|webm|mov|pdf|snap|lock)$)',
+    '(-snapshots/|(^|/)(package-lock\\.json|pnpm-lock\\.yaml|yarn\\.lock)$|\\.(png|jpe?g|gif|webp|avif|ico|svg|woff2?|ttf|otf|eot|mp4|webm|mov|pdf|snap|lock)$)',
 };
 
 export function createRiskGate(): Gate {
