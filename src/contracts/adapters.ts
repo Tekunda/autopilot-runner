@@ -99,6 +99,11 @@ export interface VCSHost {
   // Used by the auto back-merge to open an upstream->downstream sync PR only when there is
   // actually something to merge. 0 when equal/behind or when the comparison can't be made.
   aheadBy(repoId: string, baseBranch: string, headBranch: string): Promise<number>;
+  // Post a top-level comment on a PR. Used by the autofixer to ACKNOWLEDGE review feedback it
+  // addressed -- resolving inline threads covers inline comments, but a top-level PR comment or
+  // a review summary with no inline comments has no thread to resolve, so a reply is the only
+  // acknowledgement. Best-effort.
+  replyToPr(repoId: string, prNumber: number, body: string): Promise<void>;
 }
 
 // An open pull request as seen by the external-PR QA sweep: enough to identify it,

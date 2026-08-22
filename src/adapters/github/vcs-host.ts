@@ -406,6 +406,10 @@ export class GitHubVCSHost implements VCSHost {
     );
     return cmp?.ahead_by ?? 0;
   }
+
+  async replyToPr(repoId: string, prNumber: number, body: string): Promise<void> {
+    await this.client.request('POST', `/repos/${repoId}/issues/${prNumber}/comments`, { body });
+  }
 }
 
 interface GhWorkflowRun {
