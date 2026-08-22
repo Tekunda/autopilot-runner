@@ -222,40 +222,58 @@ export class GitHubVCSHost implements VCSHost {
     // Inline review-thread comments aren't returned by the REST reviews/issue-comments
     // endpoints, so fetch them via GraphQL and surface each UNRESOLVED thread's first comment
     // as a `comment` carrying its thread node id (so the fix can resolve exactly that thread).
-    // Best-effort: on any GraphQL failure, skip the inline threads -- the REST feedback stands.
-    // (first:100 caps the thread count; a PR with more open threads is not paginated here.)
+    // Paginate every page (a PR can carry >100 open threads; dropping the tail silently loses
+    // reviewer feedback). A transient GraphQL error is retried once per page rather than
+    // silently swallowed -- but we still can't throw on repeated failure: the caller wraps this
+    // in `.catch(() => [])`, so throwing would drop the REST feedback too. On repeated failure
+    // we keep whatever threads we already paged plus the REST feedback, and let the next tick
+    // re-read (the missing threads stay below the cursor, so they aren't marked seen).
     const [owner, repo] = repoId.split('/');
     if (owner && repo) {
-      const query = `query($owner:String!,$repo:String!,$pr:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:100){nodes{id isResolved comments(first:1){nodes{databaseId body author{login __typename}}}}}}}}`;
-      try {
-        const res = await this.client.request<{ data?: GhReviewThreadsData }>('POST', '/graphql', {
-          query,
-          variables: { owner, repo, pr: prNumber },
-        });
-        const threads = res?.data?.repository?.pullRequest?.reviewThreads?.nodes ?? [];
-        for (const t of threads) {
-          if (!t?.id || t.isResolved) continue;
-          const first = t.comments?.nodes?.[0];
-          if (!first || first.databaseId === undefined) continue; // no id -> can't cursor on it
-          // GraphQL returns a Bot's login WITHOUT the `[bot]` suffix (`chatgpt-codex-connector`),
-          // but REST -- and the allowlist the control plane matches against (CODEX_BOT_LOGIN) --
-          // uses the suffixed form. Normalize so an inline bot thread is recognized as the same
-          // reviewer as its REST review summary; otherwise Codex's line comments are never actioned.
-          const isBot = (first.author?.__typename ?? '') === 'Bot';
-          const login = first.author?.login ?? '';
-          out.push({
-            id: first.databaseId,
-            kind: 'comment',
-            author: isBot && login && !login.endsWith('[bot]') ? `${login}[bot]` : login,
-            authorIsBot: isBot,
-            body: first.body ?? '',
-            requestsChanges: false,
-            approved: false,
-            threadId: t.id,
-          });
+      const query = `query($owner:String!,$repo:String!,$pr:Int!,$after:String){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor}nodes{id isResolved comments(first:1){nodes{databaseId body author{login __typename}}}}}}}}`;
+      const threads: GhReviewThread[] = [];
+      let after: string | null = null;
+      for (let page = 0; page < 50; page++) {
+        let conn: GhReviewThreadsConnection | undefined;
+        let failed = false;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const res = await this.client.request<{ data?: GhReviewThreadsData }>('POST', '/graphql', {
+              query,
+              variables: { owner, repo, pr: prNumber, after },
+            });
+            conn = res?.data?.repository?.pullRequest?.reviewThreads;
+            failed = false;
+            break;
+          } catch {
+            failed = true;
+          }
         }
-      } catch {
-        // GraphQL unavailable / permission -- inline threads are best-effort, never throw.
+        if (failed) break; // repeated failure: keep prior pages + REST, retry next tick
+        threads.push(...(conn?.nodes ?? []));
+        if (!conn?.pageInfo?.hasNextPage) break;
+        after = conn.pageInfo.endCursor ?? null;
+      }
+      for (const t of threads) {
+        if (!t?.id || t.isResolved) continue;
+        const first = t.comments?.nodes?.[0];
+        if (!first || first.databaseId === undefined) continue; // no id -> can't cursor on it
+        // GraphQL returns a Bot's login WITHOUT the `[bot]` suffix (`chatgpt-codex-connector`),
+        // but REST -- and the allowlist the control plane matches against (CODEX_BOT_LOGIN) --
+        // uses the suffixed form. Normalize so an inline bot thread is recognized as the same
+        // reviewer as its REST review summary; otherwise Codex's line comments are never actioned.
+        const isBot = (first.author?.__typename ?? '') === 'Bot';
+        const login = first.author?.login ?? '';
+        out.push({
+          id: first.databaseId,
+          kind: 'comment',
+          author: isBot && login && !login.endsWith('[bot]') ? `${login}[bot]` : login,
+          authorIsBot: isBot,
+          body: first.body ?? '',
+          requestsChanges: false,
+          approved: false,
+          threadId: t.id,
+        });
       }
     }
     return out;
@@ -468,8 +486,13 @@ interface GhReviewThread {
   };
 }
 
+interface GhReviewThreadsConnection {
+  pageInfo?: { hasNextPage?: boolean; endCursor?: string | null };
+  nodes?: GhReviewThread[];
+}
+
 interface GhReviewThreadsData {
-  repository?: { pullRequest?: { reviewThreads?: { nodes?: GhReviewThread[] } } };
+  repository?: { pullRequest?: { reviewThreads?: GhReviewThreadsConnection } };
 }
 
 function mapPRState(state: string, merged: boolean): 'open' | 'closed' | 'merged' {

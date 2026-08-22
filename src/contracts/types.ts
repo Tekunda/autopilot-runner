@@ -234,6 +234,12 @@ export interface SubtaskState {
   // re-drives the build while this is under `fix.maxBuildRetries` before
   // blocking the subtask for a human. Reset once a build produces a PR.
   buildAttempts?: number;
+  // Consecutive ticks this subtask has re-driven through the gate/merge path
+  // without completing (its merge stayed pending). The pipeline re-drives while
+  // this is under `MAX_REVIEW_ATTEMPTS` before blocking the subtask for a human,
+  // so a merge that never becomes mergeable can't loop CI forever. Reset once the
+  // subtask completes (merged/done).
+  reviewAttempts?: number;
   // Why this subtask was blocked, when it was: an exhausted build/fix loop, a
   // real merge conflict on its PR, or an error that isolated to it (never the
   // whole ticket). Carried so a human sees a concrete reason.
@@ -289,6 +295,12 @@ export interface TicketState {
   // Set by the orchestrator when `advance()` blocks a ticket, so a human
   // has a concrete reason without re-deriving it from telemetry.
   blockedReason?: string;
+  // Consecutive times the watchdog has nudged a stalled QA/fixer stage back to
+  // life without the stage making progress. Bounds the stall re-arm loop
+  // (watchdog.ts MAX_STALL_RECOVERIES) so a genuinely dead runner is escalated
+  // to a human instead of being re-armed forever. Reset once the stage advances
+  // (a real stage transition off reviewing/fixing).
+  stallRecoveries?: number;
   // The deployment of this ticket's promoted change, once its promotion PR has
   // merged. A ticket is complete when its deployment is observed, not when its PR
   // merges (see deploy-watch.ts): while this is `pending`, the ticket stays in

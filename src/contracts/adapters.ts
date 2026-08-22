@@ -17,12 +17,24 @@ import type {
   TicketStatus,
 } from './types.ts';
 
+// One tracker comment/reply. `id` is the tracker's own stable comment id (used to
+// dedup handled replies across restarts -- see CommentCursorStore); `author` is the
+// tracker's author identifier (login/accountId/user id, '' when the tracker doesn't
+// expose it); `isBot` is true when the author is a bot/integration (the pipeline's own
+// comments or another bot), so the conversation loop can skip them.
+export interface TaskReply {
+  id: string;
+  author: string;
+  isBot: boolean;
+  body: string;
+}
+
 export interface TaskBackend {
   listReady(): Promise<TicketState[]>;
   get(ticketId: string): Promise<TicketState>;
   setStatus(ticketId: string, status: TicketStatus): Promise<void>;
   comment(ticketId: string, body: string): Promise<void>;
-  readReplies(ticketId: string): Promise<string[]>;
+  readReplies(ticketId: string): Promise<TaskReply[]>;
   createSubtasks(ticketId: string, subtasks: { id: string; title: string }[]): Promise<void>;
   linkBlockedBy(ticketId: string, blockingTicketId: string): Promise<void>;
 }
