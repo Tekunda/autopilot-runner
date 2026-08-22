@@ -83,6 +83,11 @@ export interface OpenPR {
   url: string;
   headRef: string;
   author: string;
+  /** "owner/repo" of the head branch's repository. Equals the base repo for a
+   *  same-repo PR; differs for a fork. The QA sweep only runs a PR's build when
+   *  its head lives in the tenant repo -- a fork head is untrusted code that also
+   *  wouldn't resolve in the tenant checkout. Empty if the head repo is gone. */
+  headRepo: string;
 }
 
 // One Autopilot-authored check on a PR: the gate/stage name, its verdict, and a short

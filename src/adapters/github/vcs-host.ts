@@ -16,7 +16,7 @@ interface GhPull {
 interface GhListPull {
   number: number;
   html_url: string;
-  head: { ref: string };
+  head: { ref: string; repo: { full_name: string } | null };
   user: { login: string } | null;
 }
 
@@ -218,6 +218,7 @@ export class GitHubVCSHost implements VCSHost {
       url: p.html_url,
       headRef: p.head.ref,
       author: p.user?.login ?? '',
+      headRepo: p.head.repo?.full_name ?? '',
     }));
   }
 
