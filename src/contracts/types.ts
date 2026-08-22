@@ -5,7 +5,11 @@ export type Stage = 'enrich' | 'plan' | 'architect' | 'build' | 'review' | 'fix'
 
 export type ModelTier = 'fast' | 'standard' | 'deep';
 
-export type StageOutcome = 'pass' | 'fail' | 'error';
+// 'running' is only ever produced by CIRunner.checkStage when a dispatched CI run has not
+// completed yet -- it signals "no terminal result this tick, check again next tick". It must
+// NEVER reach advance()/StatusTelemetry (those describe a completed stage); every caller
+// early-returns on 'running' before advancing a ticket.
+export type StageOutcome = 'pass' | 'fail' | 'error' | 'running';
 
 export type CheckStatus = 'pass' | 'fail' | 'pending';
 
@@ -124,6 +128,11 @@ export interface StageResult {
   checks: CheckResult[];
   prUrl?: string;
   logDigest: string;
+  // Set by dispatchStage/checkStage so the caller can persist the in-flight run marker and,
+  // on later ticks, re-correlate the same run (cross-tick deadline is anchored on
+  // runCreatedAt -- the run's immutable created_at -- so a hung run still escalates).
+  runId?: number;
+  runCreatedAt?: string;
   // Only an `architect` stage populates this: the ordered subtask plan it produced,
   // downloaded by the CIRunner from the run's `plan.json` artifact and persisted
   // deterministically by the control plane (createSubtasks + linkBlockedBy). Absent for
@@ -207,6 +216,28 @@ export interface Snippet {
   sourceUrl?: string;
 }
 
+// A CI stage that was dispatched but hasn't been observed complete yet. Persisted on the
+// ticket/subtask so the drive loop can DISPATCH a stage and RETURN immediately, then RECONCILE
+// the run's result on a later tick -- instead of blocking the whole tick awaiting the run. This
+// is what keeps every tick fast so tickets, imports, and recovery all advance in parallel.
+export interface InFlightStage {
+  // The logical step running (build | gate | fix | architect | enrich | plan | accept | review).
+  stage: Stage;
+  // When this stage was dispatched (ISO). Fallback deadline anchor + findRun lower bound until
+  // the run's own created_at is known.
+  dispatchedAt: string;
+  // The dispatched run, once correlated by run-name. Absent until the first successful check.
+  runId?: number;
+  // The run's immutable created_at (ISO). The cross-tick deadline is anchored HERE (not on
+  // Date.now()), so a genuinely hung/overlong run still escalates after the stage timeout.
+  runCreatedAt?: string;
+  // Fix-loop resumability: which fix round this is, and which half (fix vs re-gate) is running.
+  fixRound?: number;
+  fixPhase?: 'fix' | 'gate';
+  // Assembled-acceptance repair counter mirror (ticket-level accept machine).
+  acceptRepairs?: number;
+}
+
 export interface SubtaskState {
   id: string;
   title?: string;
@@ -244,6 +275,10 @@ export interface SubtaskState {
   // real merge conflict on its PR, or an error that isolated to it (never the
   // whole ticket). Carried so a human sees a concrete reason.
   blockedReason?: string;
+  // A dispatched CI stage (build/gate/fix) awaiting completion. When set, the next drive
+  // CHECKS it (non-blocking) instead of dispatching; cleared when the stage completes. This
+  // is what makes driveSubtask a per-tick state machine (see InFlightStage).
+  inFlight?: InFlightStage;
 }
 
 export interface TicketState {
@@ -301,6 +336,11 @@ export interface TicketState {
   // to a human instead of being re-armed forever. Reset once the stage advances
   // (a real stage transition off reviewing/fixing).
   stallRecoveries?: number;
+  // A dispatched ticket-level CI stage (architect/enrich/plan/accept, or a repair build)
+  // awaiting completion. When set, the next drive CHECKS it (non-blocking) instead of
+  // dispatching; cleared when it completes. Makes the ticket-level judgment/accept paths
+  // per-tick state machines (see InFlightStage).
+  inFlight?: InFlightStage;
   // The deployment of this ticket's promoted change, once its promotion PR has
   // merged. A ticket is complete when its deployment is observed, not when its PR
   // merges (see deploy-watch.ts): while this is `pending`, the ticket stays in

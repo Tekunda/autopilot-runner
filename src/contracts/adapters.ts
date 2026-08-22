@@ -12,6 +12,7 @@ import type {
   ExecutorResult,
   PRStatus,
   Snippet,
+  InFlightStage,
   StageResult,
   TicketState,
   TicketStatus,
@@ -165,8 +166,29 @@ export interface PublishedCheck {
   detailsUrl?: string;
 }
 
+// The reference to a CI stage that dispatchStage started, persisted (as InFlightStage) so a
+// later tick can re-correlate the same run via checkStage without re-dispatching it.
+export interface StageHandle {
+  runId?: number;
+  runCreatedAt?: string;
+  dispatchedAt: string;
+}
+
 export interface CIRunner {
+  // Blocking: dispatch a stage and await its completion. Retained for on-demand callers
+  // (e.g. runPack) and as the simple path; the non-blocking drive loop uses dispatch/check.
   runStage(grant: ExecutionGrant): Promise<StageResult>;
+  // Non-blocking dispatch: adopt an already-in-flight run with this grant's run-name, or
+  // dispatch a new one, and return immediately with a handle. Never awaits the run.
+  // Optional during the blocking->non-blocking migration: the real GitHub Actions runner
+  // implements it; a caller that wants non-blocking drive uses dispatchStage+checkStage when
+  // present and falls back to the blocking runStage otherwise (so existing fakes keep working).
+  dispatchStage?(grant: ExecutionGrant): Promise<StageHandle>;
+  // Non-blocking probe: one check of a previously-dispatched run. Returns a terminal
+  // StageResult once the run completes, `outcome:'running'` while it is still in flight
+  // (within the stage timeout), or `outcome:'error'` once the timeout (anchored on the run's
+  // created_at, carried in `inFlight`) has passed without completion -- so a hung run escalates.
+  checkStage?(grant: ExecutionGrant, inFlight: InFlightStage): Promise<StageResult>;
 }
 
 // The pluggable coding-agent seam the thin runner drives for coding stages
