@@ -398,6 +398,14 @@ export class GitHubVCSHost implements VCSHost {
     }
     return resolved;
   }
+
+  async aheadBy(repoId: string, baseBranch: string, headBranch: string): Promise<number> {
+    const cmp = await this.client.requestOptional<{ ahead_by?: number }>(
+      'GET',
+      `/repos/${repoId}/compare/${encodeURIComponent(baseBranch)}...${encodeURIComponent(headBranch)}`,
+    );
+    return cmp?.ahead_by ?? 0;
+  }
 }
 
 interface GhWorkflowRun {

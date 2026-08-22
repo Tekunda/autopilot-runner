@@ -95,6 +95,10 @@ export interface VCSHost {
   // a human to click through. Returns how many threads it resolved. Best-effort; a host that
   // can't resolve threads returns 0.
   resolveReviewThreads(repoId: string, prNumber: number, authors?: string[]): Promise<number>;
+  // How many commits `headBranch` is ahead of `baseBranch` (commits on head not on base).
+  // Used by the auto back-merge to open an upstream->downstream sync PR only when there is
+  // actually something to merge. 0 when equal/behind or when the comparison can't be made.
+  aheadBy(repoId: string, baseBranch: string, headBranch: string): Promise<number>;
 }
 
 // An open pull request as seen by the external-PR QA sweep: enough to identify it,
