@@ -296,17 +296,41 @@ export interface TicketState {
   // `unverified` records that the host never reported a deployment result -- the
   // ticket is finished, but Autopilot did not see the deploy succeed.
   deployment?: {
-    /** The promoted branch whose head carries the deployment. */
+    /** The commit the deployment runs on -- the merge commit SHA (pinned at promotion), so a
+     *  failure is judged against THIS change, not whatever later lands on the moving branch. */
     ref: string;
-    /** When the wait started (ISO 8601). */
+    /** When the wait started (ISO 8601). Reset each time a failed deploy is re-triggered. */
     startedAt: string;
     status: 'pending' | 'passed' | 'failed' | 'unverified';
     detail?: string;
+    /** How many times a failed/stalled deployment has been re-triggered (deploy.maxRetries
+     *  bounds this before the ticket blocks for a human). */
+    retryAttempts?: number;
   };
   // The last promotion-hold notice emitted for this ticket, so a ticket that sits
   // ready-but-unmergeable (auto-merge disabled, unmet checks, a host merge refusal)
   // is announced once per reason-change rather than on every 60s tick.
   lastNotice?: string;
+  // Present ONLY on an external-PR pseudo-ticket (id "external-pr-<n>"): a human/automation
+  // PR into a protected branch that the ticket pipeline did NOT open, which the control
+  // plane picks up as a first-class driven workflow (QA -> autofix-on-fail -> conflict
+  // resolve -> merge). Carries the PR number, its head branch, and the base it targets.
+  // A pseudo-ticket is isolated from the tracker/reconciler (it has no TaskBackend ticket).
+  externalPr?: { number: number; headRef: string; baseBranch: string };
+  // How many times a `fix` has been dispatched to green an external PR after its QA failed
+  // (a failing gate, or a QA that repeatedly could not complete). Bounds the external
+  // autofix so a PR Autopilot can't get green is left for its author instead of looping.
+  externalQaFixAttempts?: number;
+}
+
+// The ticketId prefix for an external-PR pseudo-ticket (see TicketState.externalPr). Such
+// entries live in the same StateStore as real tickets but are driven by driveExternalPr and
+// must be skipped by anything that assumes a backing TaskBackend ticket (the tracker poll,
+// the reconciler's merged-PR/status sweeps).
+export const EXTERNAL_PR_PREFIX = 'external-pr-';
+
+export function isExternalPrTicket(ticketId: string): boolean {
+  return ticketId.startsWith(EXTERNAL_PR_PREFIX);
 }
 
 // `mergeable` abstracts the host's merge-readiness signal for the watchdog's

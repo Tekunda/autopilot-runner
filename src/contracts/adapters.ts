@@ -83,6 +83,18 @@ export interface VCSHost {
   // credential lacks it should surface the failure to the caller, which treats
   // publishing as best-effort.
   publishCheck(repoId: string, ref: string, check: PublishedCheck): Promise<void>;
+  // Re-trigger a FAILED deployment on `ref` (a merge commit sha): re-run the failed jobs of
+  // the workflow run(s) that produced the failing deployment check, so a transient deploy
+  // failure (registry blip, infra flake) recovers without a human. Returns true if a rerun
+  // was actually requested. Best-effort -- the control plane bounds how many times it calls
+  // this (deploy.maxRetries) before blocking the ticket.
+  rerunDeployment(repoId: string, ref: string): Promise<boolean>;
+  // Mark a PR's open (unresolved) inline review-comment threads as resolved -- optionally
+  // only those started by one of `authors` (the reviewers whose feedback was just fixed), so
+  // the autofixer closes the conversations it addressed instead of leaving them dangling for
+  // a human to click through. Returns how many threads it resolved. Best-effort; a host that
+  // can't resolve threads returns 0.
+  resolveReviewThreads(repoId: string, prNumber: number, authors?: string[]): Promise<number>;
 }
 
 // An open pull request as seen by the external-PR QA sweep: enough to identify it,
@@ -90,6 +102,9 @@ export interface VCSHost {
 export interface OpenPR {
   number: number;
   url: string;
+  /** The PR title, used to name the external-PR pseudo-ticket and its CI runs meaningfully
+   *  (so a run reads "... content: daily blog 2026-08-22" not the PR number twice). */
+  title: string;
   headRef: string;
   author: string;
   /** "owner/repo" of the head branch's repository. Equals the base repo for a

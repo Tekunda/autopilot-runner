@@ -16,6 +16,7 @@ interface GhPull {
 interface GhListPull {
   number: number;
   html_url: string;
+  title: string;
   head: { ref: string; repo: { full_name: string } | null };
   user: { login: string } | null;
 }
@@ -301,6 +302,7 @@ export class GitHubVCSHost implements VCSHost {
     return (pulls ?? []).map((p) => ({
       number: p.number,
       url: p.html_url,
+      title: p.title ?? '',
       headRef: p.head.ref,
       author: p.user?.login ?? '',
       headRepo: p.head.repo?.full_name ?? '',
@@ -334,6 +336,83 @@ export class GitHubVCSHost implements VCSHost {
       },
     });
   }
+
+  async rerunDeployment(repoId: string, ref: string): Promise<boolean> {
+    // Resolve a branch name to its head sha (a pinned ref is already a sha; getBranchSha
+    // returns undefined for a sha, so fall back to `ref`).
+    const sha = (await this.getBranchSha(repoId, ref)) ?? ref;
+    const runs = await this.client.requestOptional<{ workflow_runs?: GhWorkflowRun[] }>(
+      'GET',
+      `/repos/${repoId}/actions/runs?head_sha=${encodeURIComponent(sha)}&per_page=50`,
+    );
+    // Re-run the failed jobs of every failed run on this commit. rerun-failed-jobs is
+    // idempotent-friendly (only the failed jobs re-execute) and cheaper than a full rerun.
+    const failed = (runs?.workflow_runs ?? []).filter(
+      (r) => r.conclusion === 'failure' || r.conclusion === 'timed_out' || r.conclusion === 'cancelled',
+    );
+    let reran = false;
+    for (const run of failed) {
+      try {
+        await this.client.request('POST', `/repos/${repoId}/actions/runs/${run.id}/rerun-failed-jobs`);
+        reran = true;
+      } catch {
+        // A run that can't be re-run (too old, already re-running) is skipped, not fatal.
+      }
+    }
+    return reran;
+  }
+
+  async resolveReviewThreads(repoId: string, prNumber: number, authors?: string[]): Promise<number> {
+    const [owner, repo] = repoId.split('/');
+    if (!owner || !repo) return 0;
+    const query = `query($owner:String!,$repo:String!,$pr:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:100){nodes{id isResolved comments(first:1){nodes{author{login}}}}}}}}`;
+    let threads: GhReviewThread[];
+    try {
+      const res = await this.client.request<{ data?: GhReviewThreadsData }>('POST', '/graphql', {
+        query,
+        variables: { owner, repo, pr: prNumber },
+      });
+      threads = res?.data?.repository?.pullRequest?.reviewThreads?.nodes ?? [];
+    } catch {
+      return 0; // GraphQL unavailable / permission -- best-effort, never blocks the fix
+    }
+    const allow = authors ? new Set(authors) : undefined;
+    let resolved = 0;
+    for (const t of threads) {
+      if (!t?.id || t.isResolved) continue;
+      // Only resolve threads started by a reviewer whose feedback we just addressed (when a
+      // filter is given), so an unrelated open conversation isn't silently hidden.
+      if (allow) {
+        const starter = t.comments?.nodes?.[0]?.author?.login;
+        if (!starter || !allow.has(starter)) continue;
+      }
+      try {
+        await this.client.request('POST', '/graphql', {
+          query: `mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id}}}`,
+          variables: { id: t.id },
+        });
+        resolved += 1;
+      } catch {
+        // A thread that can't be resolved (already resolved by a race, permission) is skipped.
+      }
+    }
+    return resolved;
+  }
+}
+
+interface GhWorkflowRun {
+  id: number;
+  conclusion: string | null;
+}
+
+interface GhReviewThread {
+  id: string;
+  isResolved: boolean;
+  comments?: { nodes?: { author?: { login?: string } | null }[] };
+}
+
+interface GhReviewThreadsData {
+  repository?: { pullRequest?: { reviewThreads?: { nodes?: GhReviewThread[] } } };
 }
 
 function mapPRState(state: string, merged: boolean): 'open' | 'closed' | 'merged' {
