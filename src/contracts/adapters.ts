@@ -54,6 +54,12 @@ export interface VCSHost {
   // (src/runner/finalize-stage.ts) -- the live trace accumulated duplicate build PRs
   // because every build attempt opened a fresh PR from a fresh branch.
   findOpenPR(repoId: string, headBranch: string): Promise<{ url: string; number: number } | undefined>;
+  // Every open PR targeting `baseBranch`. Used by the control plane's external-PR QA
+  // sweep to find PRs it did not open itself (blog/SEO automations, human test->main
+  // promotions) so it can QA them and publish the `qa` check they'd otherwise wait on
+  // forever. Includes the head ref and author so the sweep can skip Autopilot's own
+  // branches (which the ticket pipeline already gates).
+  listOpenPRs(repoId: string, baseBranch: string): Promise<OpenPR[]>;
   // Close an open PR without merging it. Used to retire a superseded/abandoned build
   // PR so a blocked ticket doesn't leave an orphan open forever.
   closePR(repoId: string, prNumber: number): Promise<void>;
@@ -68,6 +74,15 @@ export interface VCSHost {
   // credential lacks it should surface the failure to the caller, which treats
   // publishing as best-effort.
   publishCheck(repoId: string, ref: string, check: PublishedCheck): Promise<void>;
+}
+
+// An open pull request as seen by the external-PR QA sweep: enough to identify it,
+// route a QA grant at its head, and decide whether Autopilot itself opened it.
+export interface OpenPR {
+  number: number;
+  url: string;
+  headRef: string;
+  author: string;
 }
 
 // One Autopilot-authored check on a PR: the gate/stage name, its verdict, and a short

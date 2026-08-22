@@ -1,6 +1,6 @@
 // GitHub implementation of the VCSHost contract (src/contracts/adapters.ts).
 
-import type { PublishedCheck, VCSHost } from '../../contracts/adapters.ts';
+import type { OpenPR, PublishedCheck, VCSHost } from '../../contracts/adapters.ts';
 import type { CheckResult, PRStatus } from '../../contracts/types.ts';
 import { GitHubClient, type GitHubClientConfig } from './rest.ts';
 
@@ -11,6 +11,13 @@ interface GhRef {
 interface GhPull {
   number: number;
   html_url: string;
+}
+
+interface GhListPull {
+  number: number;
+  html_url: string;
+  head: { ref: string };
+  user: { login: string } | null;
 }
 
 interface GhPullDetail {
@@ -198,6 +205,20 @@ export class GitHubVCSHost implements VCSHost {
     );
     const pr = pulls?.[0];
     return pr ? { url: pr.html_url, number: pr.number } : undefined;
+  }
+
+  async listOpenPRs(repoId: string, baseBranch: string): Promise<OpenPR[]> {
+    const base = encodeURIComponent(baseBranch);
+    const pulls = await this.client.requestOptional<GhListPull[]>(
+      'GET',
+      `/repos/${repoId}/pulls?state=open&base=${base}&per_page=100`,
+    );
+    return (pulls ?? []).map((p) => ({
+      number: p.number,
+      url: p.html_url,
+      headRef: p.head.ref,
+      author: p.user?.login ?? '',
+    }));
   }
 
   async closePR(repoId: string, prNumber: number): Promise<void> {
