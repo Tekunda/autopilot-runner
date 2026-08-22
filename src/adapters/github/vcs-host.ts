@@ -200,6 +200,46 @@ export class GitHubVCSHost implements VCSHost {
         approved: false,
       });
     }
+
+    // Inline review-thread comments aren't returned by the REST reviews/issue-comments
+    // endpoints, so fetch them via GraphQL and surface each UNRESOLVED thread's first comment
+    // as a `comment` carrying its thread node id (so the fix can resolve exactly that thread).
+    // Best-effort: on any GraphQL failure, skip the inline threads -- the REST feedback stands.
+    // (first:100 caps the thread count; a PR with more open threads is not paginated here.)
+    const [owner, repo] = repoId.split('/');
+    if (owner && repo) {
+      const query = `query($owner:String!,$repo:String!,$pr:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:100){nodes{id isResolved comments(first:1){nodes{databaseId body author{login __typename}}}}}}}}`;
+      try {
+        const res = await this.client.request<{ data?: GhReviewThreadsData }>('POST', '/graphql', {
+          query,
+          variables: { owner, repo, pr: prNumber },
+        });
+        const threads = res?.data?.repository?.pullRequest?.reviewThreads?.nodes ?? [];
+        for (const t of threads) {
+          if (!t?.id || t.isResolved) continue;
+          const first = t.comments?.nodes?.[0];
+          if (!first || first.databaseId === undefined) continue; // no id -> can't cursor on it
+          // GraphQL returns a Bot's login WITHOUT the `[bot]` suffix (`chatgpt-codex-connector`),
+          // but REST -- and the allowlist the control plane matches against (CODEX_BOT_LOGIN) --
+          // uses the suffixed form. Normalize so an inline bot thread is recognized as the same
+          // reviewer as its REST review summary; otherwise Codex's line comments are never actioned.
+          const isBot = (first.author?.__typename ?? '') === 'Bot';
+          const login = first.author?.login ?? '';
+          out.push({
+            id: first.databaseId,
+            kind: 'comment',
+            author: isBot && login && !login.endsWith('[bot]') ? `${login}[bot]` : login,
+            authorIsBot: isBot,
+            body: first.body ?? '',
+            requestsChanges: false,
+            approved: false,
+            threadId: t.id,
+          });
+        }
+      } catch {
+        // GraphQL unavailable / permission -- inline threads are best-effort, never throw.
+      }
+    }
     return out;
   }
 
@@ -362,34 +402,15 @@ export class GitHubVCSHost implements VCSHost {
     return reran;
   }
 
-  async resolveReviewThreads(repoId: string, prNumber: number, authors?: string[]): Promise<number> {
-    const [owner, repo] = repoId.split('/');
-    if (!owner || !repo) return 0;
-    const query = `query($owner:String!,$repo:String!,$pr:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:100){nodes{id isResolved comments(first:1){nodes{author{login}}}}}}}}`;
-    let threads: GhReviewThread[];
-    try {
-      const res = await this.client.request<{ data?: GhReviewThreadsData }>('POST', '/graphql', {
-        query,
-        variables: { owner, repo, pr: prNumber },
-      });
-      threads = res?.data?.repository?.pullRequest?.reviewThreads?.nodes ?? [];
-    } catch {
-      return 0; // GraphQL unavailable / permission -- best-effort, never blocks the fix
-    }
-    const allow = authors ? new Set(authors) : undefined;
+  async resolveReviewThreads(repoId: string, prNumber: number, threadIds: string[]): Promise<number> {
+    if (threadIds.length === 0) return 0;
     let resolved = 0;
-    for (const t of threads) {
-      if (!t?.id || t.isResolved) continue;
-      // Only resolve threads started by a reviewer whose feedback we just addressed (when a
-      // filter is given), so an unrelated open conversation isn't silently hidden.
-      if (allow) {
-        const starter = t.comments?.nodes?.[0]?.author?.login;
-        if (!starter || !allow.has(starter)) continue;
-      }
+    for (const id of threadIds) {
+      if (!id) continue;
       try {
         await this.client.request('POST', '/graphql', {
           query: `mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id}}}`,
-          variables: { id: t.id },
+          variables: { id },
         });
         resolved += 1;
       } catch {
@@ -420,7 +441,13 @@ interface GhWorkflowRun {
 interface GhReviewThread {
   id: string;
   isResolved: boolean;
-  comments?: { nodes?: { author?: { login?: string } | null }[] };
+  comments?: {
+    nodes?: {
+      databaseId?: number;
+      body?: string;
+      author?: { login?: string; __typename?: string } | null;
+    }[];
+  };
 }
 
 interface GhReviewThreadsData {

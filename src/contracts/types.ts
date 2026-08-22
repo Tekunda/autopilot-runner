@@ -266,7 +266,7 @@ export interface TicketState {
   // Highest PR review/comment ids the control plane has already acted on, per source, so
   // corrective feedback (a Codex or human `changes_requested`/comment) drives a fix exactly
   // once. Persisted so a control-plane restart doesn't re-fix already-handled feedback.
-  feedbackCursor?: { reviewId: number; commentId: number };
+  feedbackCursor?: { reviewId: number; commentId: number; threadCommentId?: number };
   // How many times a `fix` stage has been dispatched to auto-resolve a merge conflict on
   // this ticket's PR. Bounds the conflict self-heal so a genuinely unresolvable conflict
   // blocks for a human instead of looping. Reset once the PR merges.

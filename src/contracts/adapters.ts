@@ -89,12 +89,12 @@ export interface VCSHost {
   // was actually requested. Best-effort -- the control plane bounds how many times it calls
   // this (deploy.maxRetries) before blocking the ticket.
   rerunDeployment(repoId: string, ref: string): Promise<boolean>;
-  // Mark a PR's open (unresolved) inline review-comment threads as resolved -- optionally
-  // only those started by one of `authors` (the reviewers whose feedback was just fixed), so
-  // the autofixer closes the conversations it addressed instead of leaving them dangling for
-  // a human to click through. Returns how many threads it resolved. Best-effort; a host that
-  // can't resolve threads returns 0.
-  resolveReviewThreads(repoId: string, prNumber: number, authors?: string[]): Promise<number>;
+  // Mark specific inline review-comment threads (by node id) as resolved -- the exact threads
+  // whose feedback the autofixer just addressed, so it closes those conversations instead of
+  // leaving them dangling for a human to click through (and without touching unrelated open
+  // threads). Returns how many threads it resolved. Best-effort; a host that can't resolve
+  // threads returns 0. An empty `threadIds` is a no-op.
+  resolveReviewThreads(repoId: string, prNumber: number, threadIds: string[]): Promise<number>;
   // How many commits `headBranch` is ahead of `baseBranch` (commits on head not on base).
   // Used by the auto back-merge to open an upstream->downstream sync PR only when there is
   // actually something to merge. 0 when equal/behind or when the comparison can't be made.
@@ -137,6 +137,9 @@ export interface PrFeedback {
   /** A review with state APPROVED -- an approval, never a request to change anything, so it
    *  must not drive a fix even if its body has substance ("looks correct, nice work"). */
   approved: boolean;
+  /** The review thread's node id, when this feedback is an inline review-thread comment; absent
+   *  for review summaries and top-level PR comments, which have no resolvable thread. */
+  threadId?: string;
 }
 
 // One Autopilot-authored check on a PR: the gate/stage name, its verdict, and a short
