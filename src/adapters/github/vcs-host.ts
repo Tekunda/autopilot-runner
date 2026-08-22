@@ -36,6 +36,8 @@ interface GhCheckRun {
   status: string;
   conclusion: string | null;
   details_url: string | null;
+  started_at: string | null;
+  id: number;
 }
 
 interface GhCheckRunsResponse {
@@ -120,10 +122,26 @@ export class GitHubVCSHost implements VCSHost {
   async listChecks(repoId: string, ref: string): Promise<CheckResult[]> {
     const result = await this.client.request<GhCheckRunsResponse>(
       'GET',
-      `/repos/${repoId}/commits/${ref}/check-runs`,
+      `/repos/${repoId}/commits/${ref}/check-runs?per_page=100`,
     );
 
-    return (result?.check_runs ?? []).map((run) => ({
+    // A re-run leaves MULTIPLE check-runs of the same name on a commit (a failed run, then a
+    // green re-run). Keep only the LATEST per name -- otherwise a stale failure masks the newer
+    // pass and observeDeployment (deploy-watch) would block a deployment whose gate actually
+    // passed, reporting "qa: fail" when qa is green. The gate is still obeyed: a genuinely
+    // failing LATEST run blocks. Latest = newest started_at, id as tiebreak. Mirrors
+    // reviewDecision's latest-per-user rule.
+    const latest = new Map<string, GhCheckRun>();
+    for (const run of result?.check_runs ?? []) {
+      const prev = latest.get(run.name);
+      const newer =
+        !prev ||
+        (run.started_at ?? '') > (prev.started_at ?? '') ||
+        ((run.started_at ?? '') === (prev.started_at ?? '') && (run.id ?? 0) > (prev.id ?? 0));
+      if (newer) latest.set(run.name, run);
+    }
+
+    return [...latest.values()].map((run) => ({
       name: run.name,
       status: mapCheckStatus(run.status, run.conclusion),
       ...(run.details_url ? { detailsUrl: run.details_url } : {}),
