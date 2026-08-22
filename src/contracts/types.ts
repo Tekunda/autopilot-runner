@@ -133,6 +133,12 @@ export interface StageResult {
   // integration branch, downloaded by the CIRunner from the run's artifact. Absent
   // for every other stage.
   acceptance?: AcceptanceVerdict;
+  // Only an `architect` stage populates this, and only when it HELD instead of
+  // decomposing: the plain-language fork explanation (what was asked / found / why it
+  // stopped / the questions a human must answer) from plan.json's `hold` field. When set,
+  // the plan is intentionally empty and the control plane blocks the ticket with this text
+  // for a human, rather than treating the empty plan as an architect failure.
+  hold?: string;
 }
 
 export interface StatusTelemetry {
