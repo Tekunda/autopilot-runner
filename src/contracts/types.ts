@@ -107,6 +107,11 @@ export type ExecutionGrant = {
 export interface PlannedSubtask {
   title: string;
   plan?: string;
+  // The rich, PO-readable + grouped-technical markdown spec for this subtask (## What will
+  // be done, ## Technical approach, ## Files, ## Acceptance criteria, ## Reuse, ## Obligations).
+  // Written into the subtask's tracker page/issue body so it reaches BOTH the implementer
+  // (build stage reads the page) and a human reader. `plan` stays the terse one-line note.
+  body?: string;
   coverage?: string[];
   blockedBy?: number[];
 }

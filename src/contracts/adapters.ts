@@ -36,7 +36,7 @@ export interface TaskBackend {
   setStatus(ticketId: string, status: TicketStatus): Promise<void>;
   comment(ticketId: string, body: string): Promise<void>;
   readReplies(ticketId: string): Promise<TaskReply[]>;
-  createSubtasks(ticketId: string, subtasks: { id: string; title: string }[]): Promise<void>;
+  createSubtasks(ticketId: string, subtasks: { id: string; title: string; body?: string }[]): Promise<void>;
   linkBlockedBy(ticketId: string, blockingTicketId: string): Promise<void>;
 }
 
