@@ -128,6 +128,32 @@ export interface AcceptanceVerdict {
   unmet: string[];
 }
 
+// The PO-facing plain-language summary of an architect plan, rendered as the parent ticket's
+// "## For review" block so a non-technical reporter can sign off without reading the code plan.
+// Every field is jargon-free (no file paths or symbols) -- that's enforced in the architect
+// prompt. Ported from the old website architect's `review_summary`.
+export interface ReviewSummary {
+  whatChanges: string;
+  userVisible: string;
+  outOfScope: string;
+  assumptions: string[];
+  openQuestions: string[];
+}
+
+// Everything the architect writes back to the PARENT ticket beyond the subtasks themselves:
+// the PO "For review" block, the engineer-facing plan narrative (rendered as formatted body
+// blocks under a collapsed toggle), the touched-areas list, and any related tickets. All
+// optional -- a plan may carry some and not others. Metadata only (prose), split-plane safe.
+export interface ArchitectReview {
+  reviewSummary?: ReviewSummary;
+  // Engineer-facing plan narrative in markdown (## Overview / ## Why This Architecture /
+  // ## Findings / ## Subtasks / ## Verification). Rendered as native Notion blocks, not a
+  // code block, so it wraps.
+  summary?: string;
+  touchedAreas?: string[];
+  relatedTickets?: string[];
+}
+
 export interface StageResult {
   outcome: StageOutcome;
   checks: CheckResult[];
@@ -147,6 +173,10 @@ export interface StageResult {
   // integration branch, downloaded by the CIRunner from the run's artifact. Absent
   // for every other stage.
   acceptance?: AcceptanceVerdict;
+  // Only an `architect` stage populates this: the PO/engineer plan writeback (For-review
+  // block, plan narrative, touched areas, related tickets) the control plane renders onto
+  // the PARENT ticket after decomposing. Absent for every other stage and for a HOLD.
+  review?: ArchitectReview;
   // Only an `architect` stage populates this, and only when it HELD instead of
   // decomposing: the plain-language fork explanation (what was asked / found / why it
   // stopped / the questions a human must answer) from plan.json's `hold` field. When set,

@@ -13,6 +13,7 @@ import type {
   PRStatus,
   Snippet,
   InFlightStage,
+  ArchitectReview,
   StageResult,
   TicketState,
   TicketStatus,
@@ -38,6 +39,22 @@ export interface TaskBackend {
   readReplies(ticketId: string): Promise<TaskReply[]>;
   createSubtasks(ticketId: string, subtasks: { id: string; title: string; body?: string }[]): Promise<void>;
   linkBlockedBy(ticketId: string, blockingTicketId: string): Promise<void>;
+  // Render the architect's plan onto the PARENT ticket for a human: a PO-facing "For review"
+  // block, the engineer plan narrative, touched areas, and (best-effort) assign the reporter
+  // as reviewer. Optional -- backends that can't render rich bodies simply don't implement it.
+  // Reporting, not control flow: a failure never fails the decomposition.
+  writeArchitectReview?(ticketId: string, review: ArchitectReview): Promise<void>;
+  // Record an architect HOLD on the ticket for a human: surface the open questions prominently
+  // (e.g. at the top of the page body) so the PO sees why it's blocked. The control plane sets
+  // the blocked STATUS separately -- that status is the only thing gating re-planning, so
+  // clearing the hold is just: answer + move the ticket back to the ready status. Optional.
+  // Returns whether the questions were actually rendered on the ticket, so the caller can fall
+  // back to putting them in a comment (the durable, backend-agnostic surface) when it couldn't.
+  writeHoldNotice?(ticketId: string, holdText: string): Promise<boolean>;
+  // Reflect "the ticket's promotion PR merged into the base branch" on the tracker by moving
+  // it to the tenant-configured merged status (e.g. a "test" column), instead of leaving it in
+  // review. A one-way cosmetic write; no-op when the tenant hasn't configured it. Optional.
+  notifyMergedToBase?(ticketId: string): Promise<void>;
 }
 
 export interface VCSHost {
