@@ -39,6 +39,14 @@ export interface TaskBackend {
   readReplies(ticketId: string): Promise<TaskReply[]>;
   createSubtasks(ticketId: string, subtasks: { id: string; title: string; body?: string }[]): Promise<void>;
   linkBlockedBy(ticketId: string, blockingTicketId: string): Promise<void>;
+  // Idempotently RE-assert a blocked-by dependency, safe to call every drive tick. Optional and
+  // implemented ONLY by backends whose blocked-by write is idempotent + needs deferral -- Notion,
+  // whose relation to a just-created sibling page can't be written until Notion indexes it (which
+  // takes minutes; see the notion adapter). The control plane calls this each tick to land the
+  // relation once the page is indexed. Backends whose linkBlockedBy is a plain comment/issue-link
+  // (github/jira) do NOT implement it -- their one-shot linkBlockedBy at decompose is enough and
+  // re-calling it would spam. Never throws.
+  reassertBlockedBy?(ticketId: string, blockingTicketId: string): Promise<void>;
   // Render the architect's plan onto the PARENT ticket for a human: a PO-facing "For review"
   // block, the engineer plan narrative, touched areas, and (best-effort) assign the reporter
   // as reviewer. Optional -- backends that can't render rich bodies simply don't implement it.
