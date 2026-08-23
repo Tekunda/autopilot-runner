@@ -15,12 +15,16 @@
 //     it never trusts the vendor step's own self-reported branch name (issue #113).
 
 import { createHash } from 'node:crypto';
+import { writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import type { CodingExecutor } from '../contracts/adapters.ts';
 import { effortForTier, resolveModel } from '../config/model-tiers.ts';
 import type { ExecutionGrant, Stage, StatusTelemetry } from '../contracts/types.ts';
 import { slugify } from '../control-plane/branch-names.ts';
 import { verifyGrant, type KeyInput } from '../control-plane/grant-verify.ts';
+import { buildMcpConfig } from './mcp-config.ts';
 
 export interface PrepareStageDeps {
   codingExecutor: CodingExecutor;
@@ -49,11 +53,15 @@ export const DEFAULT_BASE_REF = 'main';
 // `model`/`effort` carry the grant's signed modelTier through to the vendor Action
 // step's own inputs (action.yml), which is what actually makes a "deep" build stage
 // run on the deep model instead of the vendor's default.
+// `mcpConfigPath`/`mcpAllowedTools` are set on every agent stage when the grant authorizes
+// MCP: the path of the claude-code-action `--mcp-config` file this phase wrote (from the
+// grant's signed server definitions) and the mcp tool names to add to the vendor step's
+// `--allowedTools`. Absent when the grant carries no `mcp`.
 export type PreparedStage =
   | { kind: 'resolved'; telemetry: StatusTelemetry }
-  | { kind: 'judgment'; repoId: string; baseRef: string; prompt: string; model?: string; effort?: string }
-  | { kind: 'architect'; repoId: string; baseRef: string; prompt: string; model?: string; effort?: string }
-  | { kind: 'coding'; repoId: string; baseRef: string; branchName: string; prompt: string; model?: string; effort?: string };
+  | { kind: 'judgment'; repoId: string; baseRef: string; prompt: string; model?: string; effort?: string; mcpConfigPath?: string; mcpAllowedTools?: string[] }
+  | { kind: 'architect'; repoId: string; baseRef: string; prompt: string; model?: string; effort?: string; mcpConfigPath?: string; mcpAllowedTools?: string[] }
+  | { kind: 'coding'; repoId: string; baseRef: string; branchName: string; prompt: string; model?: string; effort?: string; mcpConfigPath?: string; mcpAllowedTools?: string[] };
 
 // A grant carries no id of its own -- its signature already uniquely
 // fingerprints the issued grant, so hash it into a stable telemetry id.
@@ -128,6 +136,18 @@ export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps
     : deps.configuredModel;
   const effort = effortForTier(grant.modelTier);
 
+  // The grant's signed MCP access, materialized for the vendor Action step: write the
+  // `--mcp-config` file this stage runs with (from the signed server definitions -- only
+  // ${ENV} placeholders, never a secret) and carry its path + tool allowlist through. Every
+  // agent stage kind gets this spread. Absent -> nothing written and the step runs MCP-free.
+  const mcpFields = ((): { mcpConfigPath?: string; mcpAllowedTools?: string[] } => {
+    if (!grant.mcp) return {};
+    const { json, allowedTools } = buildMcpConfig(grant.mcp);
+    const path = join(tmpdir(), `autopilot-mcp-${grantId(grant).slice(0, 16)}.json`);
+    writeFileSync(path, json);
+    return { mcpConfigPath: path, mcpAllowedTools: allowedTools };
+  })();
+
   // The architect and accept stages share one execution shape -- read-only repo plus a
   // single Write to the artifact file (plan.json), no branch and no PR. action.yml gives
   // the vendor step Write access (and uploads the artifact) on this kind, then finalize
@@ -144,6 +164,7 @@ export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps
       prompt,
       ...(model ? { model } : {}),
       effort,
+      ...mcpFields,
     };
   }
 
@@ -165,6 +186,7 @@ export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps
       prompt: prepared.prompt,
       ...(model ? { model } : {}),
       effort,
+      ...mcpFields,
     };
   }
 
@@ -175,5 +197,6 @@ export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps
     prompt,
     ...(model ? { model } : {}),
     effort,
+    ...mcpFields,
   };
 }

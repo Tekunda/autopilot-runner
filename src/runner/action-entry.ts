@@ -206,6 +206,11 @@ export function reportResult(result: ActionResult, writeOutput: OutputWriter = d
     if (result.prepared.model) writeOutput('model', result.prepared.model);
     if (result.prepared.effort) writeOutput('effort', result.prepared.effort);
     if (result.prepared.kind === 'coding') writeOutput('branch-name', result.prepared.branchName);
+    // The grant's signed MCP access, materialized by prepare: the `--mcp-config` file path
+    // and the mcp tool names action.yml appends to the vendor step's --allowedTools. Emitted
+    // for every agent stage kind; absent when the grant authorized no MCP.
+    if (result.prepared.mcpConfigPath) writeOutput('mcp-config-path', result.prepared.mcpConfigPath);
+    if (result.prepared.mcpAllowedTools?.length) writeOutput('mcp-allowed-tools', result.prepared.mcpAllowedTools.join(','));
     return;
   }
 

@@ -115,9 +115,17 @@ runs:
         # Three tool profiles keyed on the resolved stage-kind: coding edits and commits;
         # architect is read-only judgment plus a single Write for plan.json (uploaded as an
         # artifact below, never committed); every other judgment stage is strictly read-only.
+        # Every profile also gets WebSearch + WebFetch so any stage can research and pull
+        # content a ticket references (e.g. a quote/page named in the spec) instead of holding
+        # on material it can't reach -- the split-plane boundary is unchanged (plan/judgment
+        # stages still can't edit or commit; only the coding profile has Edit/write-back).
+        # When the grant authorized MCP, prepare emits mcp-config-path + mcp-allowed-tools:
+        # every profile then appends the tenant's mcp tool names to its --allowedTools and the
+        # step gets --mcp-config <file> (the file carries only ${ENV} placeholders, no secret).
         claude_args: >-
-          ${{ steps.prepare.outputs.stage-kind == 'coding' && '--allowedTools "Bash,Edit,Read,Write,Glob,Grep" --max-turns 200' || (steps.prepare.outputs.stage-kind == 'architect' && '--allowedTools "Read,Glob,Grep,Write,Bash"' || '--allowedTools "Read,Glob,Grep"') }}
+          ${{ steps.prepare.outputs.stage-kind == 'coding' && format('--allowedTools "Bash,Edit,Read,Write,Glob,Grep,WebSearch,WebFetch{0}" --max-turns 200', steps.prepare.outputs.mcp-allowed-tools && format(',{0}', steps.prepare.outputs.mcp-allowed-tools) || '') || (steps.prepare.outputs.stage-kind == 'architect' && format('--allowedTools "Read,Glob,Grep,Write,Bash,WebSearch,WebFetch{0}"', steps.prepare.outputs.mcp-allowed-tools && format(',{0}', steps.prepare.outputs.mcp-allowed-tools) || '') || format('--allowedTools "Read,Glob,Grep,WebSearch,WebFetch{0}"', steps.prepare.outputs.mcp-allowed-tools && format(',{0}', steps.prepare.outputs.mcp-allowed-tools) || '')) }}
           ${{ steps.prepare.outputs.model && format('--model {0}', steps.prepare.outputs.model) || '' }}
+          ${{ steps.prepare.outputs.mcp-config-path && format('--mcp-config {0}', steps.prepare.outputs.mcp-config-path) || '' }}
 
     - name: Run with codex-action
       id: codex

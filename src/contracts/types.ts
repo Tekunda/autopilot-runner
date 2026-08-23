@@ -49,6 +49,29 @@ export type GateSpec =
   | { kind: 'generic'; id: string; config?: Record<string, unknown> }
   | { kind: 'prompt'; id: string; prompt: string };
 
+// One MCP server an agent stage may use, carried in the signed grant (control-plane
+// authority) so the runner writes a claude-code-action `--mcp-config` file for it. The
+// `name` is the mcpServers key -- its tools are addressed as `mcp__<name>__<tool>`.
+// `authEnvVar` names the env var the tenant's CI exposes the server's token under; it is a
+// NAME, never a value -- the mcp-config file the runner writes uses a `${authEnvVar}`
+// placeholder, so no secret ever appears in the grant, the config file, or any log.
+export interface McpServerSpec {
+  name: string;
+  transport: 'http' | 'sse' | 'stdio';
+  url?: string; // for http/sse
+  command?: string; // for stdio
+  args?: string[]; // for stdio
+  authEnvVar?: string; // NAME of the env var holding the token (never the value)
+}
+
+// The MCP access a grant authorizes: the server definitions plus the allowlist of mcp tool
+// names the stage may call (`mcp__<server>__<tool>`). Both are resolved SERVER-SIDE from the
+// tenant's config (never from ticket/tracker input), like gateSpecs.
+export interface McpGrant {
+  servers: McpServerSpec[];
+  allowedTools: string[];
+}
+
 export interface CheckResult {
   name: string;
   status: CheckStatus;
@@ -96,6 +119,11 @@ export type ExecutionGrant = {
   // tampered/added spec fails verifyGrant, and a gate id absent here never
   // runs even if it's registered runner-side. See AGENTS.md and issues #106, #129.
   gateSpecs?: GateSpec[];
+  // The per-tenant MCP-server access every agent stage (planner/architect/build/fix/qa/
+  // accept) runs with -- resolved server-side from the tenant's config (never from
+  // ticket/tracker input). Part of the signed payload like every other field;
+  // `authEnvVar` carries a NAME not a value, so no secret ever crosses the split plane.
+  mcp?: McpGrant;
 } & ({ stepPrompt: string; ref?: never } | { ref: string; stepPrompt?: never });
 
 // One planned subtask produced by the architect stage: the title that becomes its
