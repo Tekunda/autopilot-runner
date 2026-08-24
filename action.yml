@@ -126,6 +126,11 @@ runs:
           ${{ steps.prepare.outputs.stage-kind == 'coding' && format('--allowedTools "Bash,Edit,Read,Write,Glob,Grep,WebSearch,WebFetch{0}" --max-turns 200', steps.prepare.outputs.mcp-allowed-tools && format(',{0}', steps.prepare.outputs.mcp-allowed-tools) || '') || (steps.prepare.outputs.stage-kind == 'architect' && format('--allowedTools "Read,Glob,Grep,Write,Bash,WebSearch,WebFetch{0}"', steps.prepare.outputs.mcp-allowed-tools && format(',{0}', steps.prepare.outputs.mcp-allowed-tools) || '') || format('--allowedTools "Read,Glob,Grep,WebSearch,WebFetch{0}"', steps.prepare.outputs.mcp-allowed-tools && format(',{0}', steps.prepare.outputs.mcp-allowed-tools) || '')) }}
           ${{ steps.prepare.outputs.model && format('--model {0}', steps.prepare.outputs.model) || '' }}
           ${{ steps.prepare.outputs.mcp-config-path && format('--mcp-config {0}', steps.prepare.outputs.mcp-config-path) || '' }}
+        # The grant's signed debug.showFullOutput toggle (off by default -- see
+        # config/types.ts DebugConfig): reveals the raw Claude Code SDK output for this run
+        # instead of the minimal {is_error, duration_ms, ...} summary, so a failure's actual
+        # reason (rate/usage limit vs. a real error) is visible in the log.
+        show_full_output: ${{ steps.prepare.outputs.show-full-output || 'false' }}
 
     - name: Run with codex-action
       id: codex

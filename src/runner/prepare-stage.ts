@@ -57,11 +57,14 @@ export const DEFAULT_BASE_REF = 'main';
 // MCP: the path of the claude-code-action `--mcp-config` file this phase wrote (from the
 // grant's signed server definitions) and the mcp tool names to add to the vendor step's
 // `--allowedTools`. Absent when the grant carries no `mcp`.
+// `debugFullOutput` mirrors the grant's signed `debugFullOutput` (DebugConfig.showFullOutput):
+// true -> action.yml passes claude-code-action's own `show_full_output` input, revealing the
+// raw SDK output for this run instead of the minimal result summary. Absent/false by default.
 export type PreparedStage =
   | { kind: 'resolved'; telemetry: StatusTelemetry }
-  | { kind: 'judgment'; repoId: string; baseRef: string; prompt: string; model?: string; effort?: string; mcpConfigPath?: string; mcpAllowedTools?: string[] }
-  | { kind: 'architect'; repoId: string; baseRef: string; prompt: string; model?: string; effort?: string; mcpConfigPath?: string; mcpAllowedTools?: string[] }
-  | { kind: 'coding'; repoId: string; baseRef: string; branchName: string; prompt: string; model?: string; effort?: string; mcpConfigPath?: string; mcpAllowedTools?: string[] };
+  | { kind: 'judgment'; repoId: string; baseRef: string; prompt: string; model?: string; effort?: string; mcpConfigPath?: string; mcpAllowedTools?: string[]; debugFullOutput?: true }
+  | { kind: 'architect'; repoId: string; baseRef: string; prompt: string; model?: string; effort?: string; mcpConfigPath?: string; mcpAllowedTools?: string[]; debugFullOutput?: true }
+  | { kind: 'coding'; repoId: string; baseRef: string; branchName: string; prompt: string; model?: string; effort?: string; mcpConfigPath?: string; mcpAllowedTools?: string[]; debugFullOutput?: true };
 
 // A grant carries no id of its own -- its signature already uniquely
 // fingerprints the issued grant, so hash it into a stable telemetry id.
@@ -156,6 +159,8 @@ export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps
   // branch (grant.baseBranch) and writes its acceptance verdict to plan.json, which the
   // control plane parses per grant.stage -- so no runner/action.yml change is needed to
   // add the acceptance walk.
+  const debugFields = grant.debugFullOutput ? { debugFullOutput: true as const } : {};
+
   if (grant.stage === 'architect' || grant.stage === 'accept') {
     return {
       kind: 'architect',
@@ -165,6 +170,7 @@ export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps
       ...(model ? { model } : {}),
       effort,
       ...mcpFields,
+      ...debugFields,
     };
   }
 
@@ -187,6 +193,7 @@ export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps
       ...(model ? { model } : {}),
       effort,
       ...mcpFields,
+      ...debugFields,
     };
   }
 
@@ -198,5 +205,6 @@ export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps
     ...(model ? { model } : {}),
     effort,
     ...mcpFields,
+    ...debugFields,
   };
 }

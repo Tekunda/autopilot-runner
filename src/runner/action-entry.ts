@@ -211,6 +211,10 @@ export function reportResult(result: ActionResult, writeOutput: OutputWriter = d
     // for every agent stage kind; absent when the grant authorized no MCP.
     if (result.prepared.mcpConfigPath) writeOutput('mcp-config-path', result.prepared.mcpConfigPath);
     if (result.prepared.mcpAllowedTools?.length) writeOutput('mcp-allowed-tools', result.prepared.mcpAllowedTools.join(','));
+    // The grant's signed debug.showFullOutput toggle: tells action.yml to pass
+    // claude-code-action's own `show_full_output` input. Emitted only when true --
+    // claude-code-action already defaults it to 'false'.
+    if (result.prepared.debugFullOutput) writeOutput('show-full-output', 'true');
     return;
   }
 

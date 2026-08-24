@@ -124,6 +124,11 @@ export type ExecutionGrant = {
   // ticket/tracker input). Part of the signed payload like every other field;
   // `authEnvVar` carries a NAME not a value, so no secret ever crosses the split plane.
   mcp?: McpGrant;
+  // Server-side resolved from the tenant's debug.showFullOutput config (never from ticket/
+  // tracker input, like every other field here): tells the runner to pass claude-code-action's
+  // own `show_full_output` input, revealing the raw SDK output instead of the minimal result
+  // summary. Absent/false by default -- see config/types.ts DebugConfig for why it's opt-in.
+  debugFullOutput?: boolean;
 } & ({ stepPrompt: string; ref?: never } | { ref: string; stepPrompt?: never });
 
 // One planned subtask produced by the architect stage: the title that becomes its
