@@ -339,6 +339,11 @@ export interface SubtaskState {
   // so a merge that never becomes mergeable can't loop CI forever. Reset once the
   // subtask completes (merged/done).
   reviewAttempts?: number;
+  // How many times a `fix` stage has been dispatched to auto-resolve a merge
+  // conflict on this subtask's build PR (the same bounded self-heal the
+  // rollup/promotion/external-PR paths get). Bounds the conflict loop so a
+  // genuinely unresolvable conflict blocks the subtask for a human.
+  conflictFixAttempts?: number;
   // Why this subtask was blocked, when it was: an exhausted build/fix loop, a
   // real merge conflict on its PR, or an error that isolated to it (never the
   // whole ticket). Carried so a human sees a concrete reason.
