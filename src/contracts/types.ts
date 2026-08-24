@@ -380,6 +380,11 @@ export interface TicketState {
   // this ticket's PR. Bounds the conflict self-heal so a genuinely unresolvable conflict
   // blocks for a human instead of looping. Reset once the PR merges.
   conflictFixAttempts?: number;
+  // Consecutive ticks the rollup PR's merge has stayed `pending` (behind, not ready, or a
+  // benign race that keeps recurring). Bounds the deferral so a merge error that never
+  // clears escalates for a human instead of parking silently forever. Reset once the
+  // rollup merges.
+  rollupPendingTicks?: number;
   // How many times the architect has been re-run because its plan dropped a required
   // deliverable (the deterministic coverage gate). Bounds the re-architect loop before
   // blocking for a human. Reset once a covering plan is accepted.
