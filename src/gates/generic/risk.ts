@@ -25,6 +25,18 @@ export const DEFAULT_CONFIG: RiskGateConfig = {
     '(-snapshots/|(^|/)(package-lock\\.json|pnpm-lock\\.yaml|yarn\\.lock)$|\\.(png|jpe?g|gif|webp|avif|ico|svg|woff2?|ttf|otf|eot|mp4|webm|mov|pdf|snap|lock)$)',
 };
 
+// `maxChangedFiles` rides a tenant-editable packConfig into the signed gate spec, so it is
+// untrusted input. Two junk failure modes: 0/-1 fails every non-empty diff, while NaN or a
+// non-numeric value coerces the threshold comparison to always-false and the gate silently
+// passes EVERYTHING. Anything that isn't a positive integer falls back to the default
+// rather than throwing -- a throwing gate would wedge the runner's fix loop on a tenant
+// config typo.
+function normalizeMaxChangedFiles(value: unknown): number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 1
+    ? value
+    : DEFAULT_CONFIG.maxChangedFiles;
+}
+
 // The effective config the runner will apply for this gate: defaults overlaid by the
 // per-gate signed spec config (`spec.config` for id 'risk'), exactly what run-gate-stage
 // does when it overlays spec.config over GateTarget.config before readGateConfig merges
@@ -34,7 +46,8 @@ export const DEFAULT_CONFIG: RiskGateConfig = {
 // GateTarget.config under the signed spec.config, but today's only adapter sends no
 // target config -- if one ever does, thread it through here too.
 export function effectiveRiskConfig(specConfig?: Record<string, unknown>): RiskGateConfig {
-  return readGateConfig(specConfig === undefined ? {} : { risk: specConfig }, 'risk', DEFAULT_CONFIG);
+  const config = readGateConfig(specConfig === undefined ? {} : { risk: specConfig }, 'risk', DEFAULT_CONFIG);
+  return { ...config, maxChangedFiles: normalizeMaxChangedFiles(config.maxChangedFiles) };
 }
 
 export function createRiskGate(): Gate {
@@ -42,6 +55,7 @@ export function createRiskGate(): Gate {
     id: 'risk',
     async run(ctx: GateContext): Promise<GateResult> {
       const config = readGateConfig(ctx.config, 'risk', DEFAULT_CONFIG);
+      const maxChangedFiles = normalizeMaxChangedFiles(config.maxChangedFiles);
       const findings: string[] = [];
 
       for (const file of ctx.changedFiles) {
@@ -53,10 +67,10 @@ export function createRiskGate(): Gate {
       // snapshot/asset change is not the risky source change this threshold guards against.
       const exempt = new RegExp(config.largeChangeExemptPattern, 'i');
       const countable = ctx.changedFiles.filter((file) => !exempt.test(file));
-      if (countable.length > config.maxChangedFiles) {
+      if (countable.length > maxChangedFiles) {
         findings.push(
           `diff touches ${countable.length} review-relevant files (excluding generated/binary assets), ` +
-            `exceeding the risk threshold of ${config.maxChangedFiles}`,
+            `exceeding the risk threshold of ${maxChangedFiles}`,
         );
       }
 
