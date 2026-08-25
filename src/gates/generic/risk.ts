@@ -37,6 +37,28 @@ function normalizeMaxChangedFiles(value: unknown): number {
     : DEFAULT_CONFIG.maxChangedFiles;
 }
 
+// Same untrusted provenance as maxChangedFiles: a non-array prefixes value throws in
+// .find() and a non-compiling exempt pattern throws in new RegExp() -- and a thrown gate
+// is recorded as a fail check that never clears, wedging the fix loop. Wrong-shape values
+// fall back to the default instead. An empty array also falls back: it would silently
+// disarm the high-risk-path check entirely. ponytail: the clamp is silent -- surface
+// config-validation errors to tenants when there's a reporting channel for them.
+function normalizeHighRiskPathPrefixes(value: unknown): string[] {
+  return Array.isArray(value) && value.length > 0 && value.every((p) => typeof p === 'string' && p.length > 0)
+    ? value
+    : DEFAULT_CONFIG.highRiskPathPrefixes;
+}
+
+function normalizeLargeChangeExemptPattern(value: unknown): string {
+  if (typeof value !== 'string') return DEFAULT_CONFIG.largeChangeExemptPattern;
+  try {
+    new RegExp(value);
+    return value;
+  } catch {
+    return DEFAULT_CONFIG.largeChangeExemptPattern;
+  }
+}
+
 // The effective config the runner will apply for this gate: defaults overlaid by the
 // per-gate signed spec config (`spec.config` for id 'risk'), exactly what run-gate-stage
 // does when it overlays spec.config over GateTarget.config before readGateConfig merges
@@ -47,15 +69,22 @@ function normalizeMaxChangedFiles(value: unknown): number {
 // target config -- if one ever does, thread it through here too.
 export function effectiveRiskConfig(specConfig?: Record<string, unknown>): RiskGateConfig {
   const config = readGateConfig(specConfig === undefined ? {} : { risk: specConfig }, 'risk', DEFAULT_CONFIG);
-  return { ...config, maxChangedFiles: normalizeMaxChangedFiles(config.maxChangedFiles) };
+  return {
+    ...config,
+    maxChangedFiles: normalizeMaxChangedFiles(config.maxChangedFiles),
+    highRiskPathPrefixes: normalizeHighRiskPathPrefixes(config.highRiskPathPrefixes),
+    largeChangeExemptPattern: normalizeLargeChangeExemptPattern(config.largeChangeExemptPattern),
+  };
 }
 
 export function createRiskGate(): Gate {
   return {
     id: 'risk',
     async run(ctx: GateContext): Promise<GateResult> {
-      const config = readGateConfig(ctx.config, 'risk', DEFAULT_CONFIG);
-      const maxChangedFiles = normalizeMaxChangedFiles(config.maxChangedFiles);
+      // The runner hands the tenant's spec config in as ctx.config.risk; resolve through
+      // effectiveRiskConfig so the gate applies exactly what the server-side consumers see,
+      // and so a bad tenant shape falls back to defaults instead of throwing this gate.
+      const config = effectiveRiskConfig(ctx.config.risk as Record<string, unknown> | undefined);
       const findings: string[] = [];
 
       for (const file of ctx.changedFiles) {
@@ -67,10 +96,10 @@ export function createRiskGate(): Gate {
       // snapshot/asset change is not the risky source change this threshold guards against.
       const exempt = new RegExp(config.largeChangeExemptPattern, 'i');
       const countable = ctx.changedFiles.filter((file) => !exempt.test(file));
-      if (countable.length > maxChangedFiles) {
+      if (countable.length > config.maxChangedFiles) {
         findings.push(
           `diff touches ${countable.length} review-relevant files (excluding generated/binary assets), ` +
-            `exceeding the risk threshold of ${maxChangedFiles}`,
+            `exceeding the risk threshold of ${config.maxChangedFiles}`,
         );
       }
 
