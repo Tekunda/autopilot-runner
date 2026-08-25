@@ -15,6 +15,7 @@
 //     it never trusts the vendor step's own self-reported branch name (issue #113).
 
 import { createHash } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -207,4 +208,43 @@ export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps
     ...mcpFields,
     ...debugFields,
   };
+}
+
+// The changed files a gate scopes over, computed IN THE RUNNER from its own checkout:
+// fetch the base branch (best-effort -- a checkout without the base falls back to a local
+// ref), then three-dot diff against HEAD. The control plane deliberately does NOT ship
+// this list through the workflow_dispatch input: computing it here routes the data where
+// the tree already lives and keeps the dispatch input small (every changed path would
+// otherwise ride along, ~12KB for a large PR).
+export async function computeChangedFiles(baseRef: string, cwd: string = process.cwd()): Promise<string[]> {
+  const git = (args: string[]): Promise<string> =>
+    new Promise((resolve, reject) => {
+      execFile('git', args, { cwd, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => (err ? reject(err) : resolve(stdout)));
+    });
+
+  const remoteRef = `refs/remotes/origin/${baseRef}`;
+  try {
+    await git(['fetch', '--no-tags', 'origin', `+refs/heads/${baseRef}:${remoteRef}`]);
+  } catch {
+    // No origin (or offline): fall back to a locally-known branch of that name.
+  }
+  const base = (await git(['rev-parse', '--verify', '--quiet', remoteRef]).catch(() => '')).trim()
+    || (await git(['rev-parse', '--verify', '--quiet', `refs/heads/${baseRef}`]).catch(() => '')).trim();
+  if (!base) throw new Error(`computeChangedFiles: base ref "${baseRef}" not found locally or on origin`);
+
+  // A shallow checkout (actions/checkout defaults to depth 1) severs HEAD's ancestry, so a
+  // three-dot diff has no merge-base and fails. The action's own checkout step sets
+  // fetch-depth: 0; this unshallow-and-retry covers nonstandard workspaces. Best-effort:
+  // if the deepen fails (or the retry still can't find a merge-base), the original error
+  // surfaces rather than an empty file list silently gating over nothing.
+  let out: string;
+  try {
+    out = await git(['diff', '--name-only', `${base}...HEAD`]);
+  } catch (err) {
+    await git(['fetch', '--unshallow', 'origin']).catch(() => undefined);
+    out = await git(['diff', '--name-only', `${base}...HEAD`]).catch(() => {
+      throw err;
+    });
+  }
+  return out.split('\n').map((line) => line.trim()).filter((line) => line.length > 0);
 }

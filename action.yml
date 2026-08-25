@@ -73,6 +73,9 @@ runs:
       if: steps.prepare.outputs.resolved == 'false' || fromJSON(inputs.grant).stage == 'gate'
       uses: actions/checkout@v7
       with:
+        # Full history: computeChangedFiles three-dot-diffs HEAD against the base, which
+        # needs the merge-base -- unreachable from a default depth-1 checkout.
+        fetch-depth: 0
         ref: ${{ fromJSON(inputs.grant).stage == 'gate' && fromJSON(inputs.gate-target).branch || steps.prepare.outputs.base-ref }}
         token: ${{ fromJSON(inputs.vcs-host-config).token }}
 
@@ -94,6 +97,23 @@ runs:
         INPUT_VCS-HOST-CONFIG: ${{ inputs.vcs-host-config }}
         INPUT_GATE-TARGET: ${{ inputs.gate-target }}
       run: node src/runner/action-entry.ts
+
+    # Upload the per-gate results+findings the "Run gates" step wrote (the StatusTelemetry
+    # JSON from action-entry.ts gate mode): job names alone can't say WHICH gate failed or
+    # why, so the control plane's CIRunner replaces them with these reported checks
+    # (src/adapters/github-actions/ci-runner.ts). always() is load-bearing: a failing gate
+    # makes the step above exit 1, and a plain `if` would then be skipped as failed --
+    # exactly the case whose findings matter most. A rejected grant still writes its error
+    # telemetry, which uploads with empty checks -- harmless: the control plane ignores
+    # such a report and falls back to job-name checks. if-no-files-found keeps a missing
+    # file a skip, not an error.
+    - name: Upload gate report
+      if: always() && fromJSON(inputs.grant).stage == 'gate'
+      uses: actions/upload-artifact@v4
+      with:
+        name: gate-report
+        path: gate-report.json
+        if-no-files-found: ignore
 
     # The ONLY non-deterministic, non-ours step (issue #70's settled execution boundary):
     # the selected vendor Action performs read-only judgment or edits the checkout. Git

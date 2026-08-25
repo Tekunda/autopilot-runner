@@ -51,6 +51,7 @@ function toChecks(results: GateResult[]): CheckResult[] {
   return results.map((result) => ({
     name: result.id,
     status: toCheckStatus(result.status),
+    ...(result.findings?.length ? { findings: result.findings } : {}),
     ...(result.detailsUrl ? { detailsUrl: result.detailsUrl } : {}),
   }));
 }
@@ -99,6 +100,16 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
 
   const results = genericReport.results;
   const ok = results.every((result) => result.status !== 'fail');
+
+  // Make the run's log self-describing: a legitimate gate failure must be legible in
+  // Actions logs, not byte-identical to a crash (the 75-file diff that failed `risk`
+  // for an hour with nothing in the log saying why).
+  for (const result of results) {
+    process.stdout.write(`[gate] ${result.id}: ${result.status}\n`);
+    for (const finding of result.findings ?? []) {
+      process.stdout.write(`  ${finding}\n`);
+    }
+  }
 
   return {
     grantId: grantId(grant),

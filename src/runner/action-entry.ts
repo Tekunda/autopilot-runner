@@ -11,7 +11,7 @@
 // a diff. action.yml carries no logic of its own; everything lives here so it can be
 // tested.
 
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, writeFileSync } from 'node:fs';
 
 import type { CodingExecutor, VCSHost } from '../contracts/adapters.ts';
 import type { ExecutionGrant, StatusTelemetry } from '../contracts/types.ts';
@@ -24,7 +24,7 @@ import {
 import type { GateRegistry } from '../gates/registry.ts';
 import { finalizeCodingStage, finalizeJudgmentStage, type ActionOutcome } from './finalize-stage.ts';
 import { createRunnerGateRegistry } from './gate-registry.ts';
-import { CODING_STAGES, DEFAULT_BASE_REF, prepareStage, type PreparedStage } from './prepare-stage.ts';
+import { CODING_STAGES, computeChangedFiles, DEFAULT_BASE_REF, prepareStage, type PreparedStage } from './prepare-stage.ts';
 import { runGateStage, type GateTarget } from './run-gate-stage.ts';
 
 export class ActionInputError extends Error {}
@@ -235,6 +235,13 @@ export function exitCodeFor(result: ActionResult): number {
   return telemetry.result === 'pass' ? 0 : 1;
 }
 
+// Gate mode's git and its gate-report write must be rooted at GITHUB_WORKSPACE -- the
+// checked-out customer repo -- never process.cwd(): the "Run gates" step runs with
+// working-directory ${{ github.action_path }}, the downloaded action copy, which has no .git.
+export function workspaceRoot(env: NodeJS.ProcessEnv = process.env): string {
+  return env.GITHUB_WORKSPACE ?? '.';
+}
+
 async function main(): Promise<void> {
   let inputs: ActionInputs;
   try {
@@ -246,7 +253,26 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Gate mode: compute the changed-file scope from this checkout. The dispatch input
+  // carries only prNumber/branch/baseRef routing data, so a large PR's changed paths
+  // (~12KB) never ride through it -- the list is computed where the tree lives.
+  if (inputs.mode === 'gate') {
+    inputs = {
+      ...inputs,
+      target: { ...inputs.target, changedFiles: await computeChangedFiles(inputs.target.baseRef, workspaceRoot()) },
+    };
+  }
+
   const result = await runActionEntry(inputs);
+
+  // Gate mode's structured record of what the gates actually said (per-gate checks incl.
+  // findings), written into the checked-out tree for upload as an artifact. GitHub exposes
+  // no API for step outputs of a dispatched run, so this file is the only channel that
+  // carries the real gate results back -- the same one the architect's plan.json uses.
+  if (inputs.mode === 'gate' && result.mode === 'gate') {
+    writeFileSync(`${workspaceRoot()}/gate-report.json`, JSON.stringify(result.telemetry));
+  }
+
   reportResult(result);
   process.exitCode = exitCodeFor(result);
 }

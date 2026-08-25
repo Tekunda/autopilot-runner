@@ -18,12 +18,24 @@ export interface RiskGateConfig {
   largeChangeExemptPattern: string;
 }
 
-const DEFAULT_CONFIG: RiskGateConfig = {
+export const DEFAULT_CONFIG: RiskGateConfig = {
   highRiskPathPrefixes: ['.github/workflows/', '.github/actions/'],
   maxChangedFiles: 40,
   largeChangeExemptPattern:
     '(-snapshots/|(^|/)(package-lock\\.json|pnpm-lock\\.yaml|yarn\\.lock)$|\\.(png|jpe?g|gif|webp|avif|ico|svg|woff2?|ttf|otf|eot|mp4|webm|mov|pdf|snap|lock)$)',
 };
+
+// The effective config the runner will apply for this gate: defaults overlaid by the
+// per-gate signed spec config (`spec.config` for id 'risk'), exactly what run-gate-stage
+// does when it overlays spec.config over GateTarget.config before readGateConfig merges
+// over the defaults. Server-side consumers (the architect's size guidance, the
+// decomposition size check) resolve the threshold through this so they can never drift
+// from what the gate actually enforces. ponytail: the runner ALSO lets an unsigned
+// GateTarget.config under the signed spec.config, but today's only adapter sends no
+// target config -- if one ever does, thread it through here too.
+export function effectiveRiskConfig(specConfig?: Record<string, unknown>): RiskGateConfig {
+  return readGateConfig(specConfig === undefined ? {} : { risk: specConfig }, 'risk', DEFAULT_CONFIG);
+}
 
 export function createRiskGate(): Gate {
   return {

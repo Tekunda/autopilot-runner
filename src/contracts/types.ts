@@ -76,6 +76,10 @@ export interface CheckResult {
   name: string;
   status: CheckStatus;
   detailsUrl?: string;
+  // Why the check failed, when its producer reports reasons (gates do; job-name
+  // fallback checks don't). Carried so a fix prompt and human escalations can quote
+  // the actual finding text instead of just a check name.
+  findings?: string[];
 }
 
 // Exactly one of stepPrompt (an inline instruction) or ref (a pointer to a
@@ -304,6 +308,12 @@ export interface InFlightStage {
   fixPhase?: 'fix' | 'gate';
   // Assembled-acceptance repair counter mirror (ticket-level accept machine).
   acceptRepairs?: number;
+  // Which ticket-level path dispatched this fix, so the fix paths sharing the ticket's single
+  // inFlight slot (conflict auto-resolve, review-feedback autofix, external-PR qa autofix)
+  // only reconcile runs they dispatched themselves -- a foreign marker would still correlate
+  // by run-name (stage + ticketId), so consuming it here would mislabel its telemetry.
+  // Absent on subtask markers (each subtask owns its own slot) and legacy persisted markers.
+  origin?: 'conflict' | 'feedback' | 'qa';
 }
 
 export interface SubtaskState {

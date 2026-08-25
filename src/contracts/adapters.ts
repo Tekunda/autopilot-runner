@@ -45,8 +45,10 @@ export interface TaskBackend {
   // takes minutes; see the notion adapter). The control plane calls this each tick to land the
   // relation once the page is indexed. Backends whose linkBlockedBy is a plain comment/issue-link
   // (github/jira) do NOT implement it -- their one-shot linkBlockedBy at decompose is enough and
-  // re-calling it would spam. Never throws.
-  reassertBlockedBy?(ticketId: string, blockingTicketId: string): Promise<void>;
+  // re-calling it would spam. Resolves to true when the relation is present after the call
+  // (written now or already there), false when it couldn't be asserted yet (e.g. Notion hasn't
+  // indexed the sibling page -- the next tick's reconcile retries). Never throws.
+  reassertBlockedBy?(ticketId: string, blockingTicketId: string): Promise<boolean>;
   // Render the architect's plan onto the PARENT ticket for a human: a PO-facing "For review"
   // block, the engineer plan narrative, touched areas, and (best-effort) assign the reporter
   // as reviewer. Optional -- backends that can't render rich bodies simply don't implement it.
