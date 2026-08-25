@@ -22,6 +22,7 @@ import {
   type VCSHostConfig,
 } from './adapters.ts';
 import type { GateRegistry } from '../gates/registry.ts';
+import { GrantLedger } from '../control-plane/grant-ledger.ts';
 import { finalizeCodingStage, finalizeJudgmentStage, type ActionOutcome } from './finalize-stage.ts';
 import { createRunnerGateRegistry } from './gate-registry.ts';
 import { CODING_STAGES, computeChangedFiles, DEFAULT_BASE_REF, prepareStage, type PreparedStage } from './prepare-stage.ts';
@@ -118,9 +119,17 @@ export interface RunActionDeps {
   vcsHost?: VCSHost;
   /** Override the gate catalog; defaults to the runner's full registry (gate only). */
   gateRegistry?: GateRegistry;
+  /** Override the grant consume ledger; defaults to this process's shared one. */
+  grantLedger?: GrantLedger;
   /** Clock override for tests; defaults to the current time. */
   now?: Date;
 }
+
+// One consume ledger per runner process (Track G replay guard): each Actions step
+// process executes one grant's phase, so a second finalize of the same issued grant
+// within this process is a replay and is flagged by the ledger. Cross-process replays
+// are NOT caught here -- they need the control plane keying on the signed jti.
+const processGrantLedger = new GrantLedger();
 
 export type ActionResult =
   | { mode: 'prepare'; prepared: PreparedStage }
@@ -172,9 +181,14 @@ export async function runActionEntry(inputs: ActionInputs, deps: RunActionDeps =
         vcsHost: deps.vcsHost ?? createVCSHost(inputs.vcsHost),
         baseRef: inputs.baseRef,
         verifyKey: inputs.verifyKey,
+        grantLedger: deps.grantLedger ?? processGrantLedger,
         now: deps.now,
       })
-    : finalizeJudgmentStage(inputs.grant, inputs.actionOutcome, { verifyKey: inputs.verifyKey, now: deps.now });
+    : finalizeJudgmentStage(inputs.grant, inputs.actionOutcome, {
+        verifyKey: inputs.verifyKey,
+        grantLedger: deps.grantLedger ?? processGrantLedger,
+        now: deps.now,
+      });
   return { mode: 'finalize', telemetry };
 }
 

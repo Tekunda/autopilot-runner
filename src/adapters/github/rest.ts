@@ -2,6 +2,7 @@
 // fetch (Node 24) — adapters stay dependency-free so package.json doesn't
 // conflict while adapters build in parallel. See AGENTS.md.
 
+import { CircuitBreaker } from '../shared/circuit-breaker.ts';
 import type { TokenProvider } from '../shared/token-provider.ts';
 
 export type { TokenProvider } from '../shared/token-provider.ts';
@@ -22,6 +23,10 @@ export interface GitHubClientConfig {
   /** Per-request timeout in ms; defaults to 30s. A stalled request aborts rather than
    *  hanging the drive loop. */
   timeoutMs?: number;
+  /** Outage breaker guarding each HTTP attempt. Defaults to a fresh process-local one
+   *  so every client instance cools down independently; inject a shared instance (or a
+   *  short-cooldown one in tests) to override. */
+  breaker?: CircuitBreaker;
 }
 
 export class GitHubApiError extends Error {
@@ -44,6 +49,7 @@ export class GitHubClient {
   private readonly baseUrl: string;
   private readonly resolveToken: TokenProvider;
   private readonly timeoutMs: number;
+  private readonly breaker: CircuitBreaker;
 
   constructor(config: GitHubClientConfig) {
     if (!config.token && !config.tokenProvider) {
@@ -53,31 +59,27 @@ export class GitHubClient {
     this.fetchImpl = config.fetchImpl ?? fetch;
     this.baseUrl = config.baseUrl ?? 'https://api.github.com';
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.breaker = config.breaker ?? new CircuitBreaker({ provider: 'github', countsAsFailure: isProviderFault });
   }
 
   async request<T>(method: string, path: string, body?: unknown): Promise<T | undefined> {
-    const token = await this.resolveToken();
-    const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
-      method,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28',
-        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
-      },
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(this.timeoutMs),
+    // The breaker wraps the WHOLE logical request -- status->error conversion included --
+    // so a 5xx actually reaches its failure counter (a bare fetch resolves even for a
+    // 502; only this level sees the throw). While open it throws BreakerOpenError before
+    // any network attempt.
+    return this.breaker.run(async () => {
+      const res = await this.send(method, path, body);
+
+      const text = await res.text();
+      const data: unknown = text.length > 0 ? JSON.parse(text) : undefined;
+
+      if (!res.ok) {
+        const message = isRecord(data) && typeof data.message === 'string' ? data.message : res.statusText;
+        throw new GitHubApiError(res.status, method, path, message);
+      }
+
+      return data as T | undefined;
     });
-
-    const text = await res.text();
-    const data: unknown = text.length > 0 ? JSON.parse(text) : undefined;
-
-    if (!res.ok) {
-      const message = isRecord(data) && typeof data.message === 'string' ? data.message : res.statusText;
-      throw new GitHubApiError(res.status, method, path, message);
-    }
-
-    return data as T | undefined;
   }
 
   /** Like request(), but resolves to undefined instead of throwing on a 404. */
@@ -89,6 +91,31 @@ export class GitHubClient {
       throw err;
     }
   }
+
+  /** One raw HTTP attempt (token resolution included). Never called while the breaker
+   *  is open. */
+  private async send(method: string, path: string, body?: unknown): Promise<Response> {
+    const token = await this.resolveToken();
+    return this.fetchImpl(`${this.baseUrl}${path}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(this.timeoutMs),
+    });
+  }
+}
+
+// Breaker classifier: only PROVIDER ill-health may trip the outage cooldown. Network
+// failures and timeouts aren't GitHubApiError at all; a 429 or 5xx means GitHub itself
+// is struggling. Caller-caused 4xx (bad ref, missing PR) must NOT open the breaker --
+// that would cool down the provider because one ticket references a deleted branch.
+function isProviderFault(err: unknown): boolean {
+  return !(err instanceof GitHubApiError) || err.status >= 500 || err.status === 429;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

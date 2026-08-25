@@ -15,6 +15,7 @@
 import type { CodingExecutor } from '../contracts/adapters.ts';
 import type { VCSHost } from '../contracts/adapters.ts';
 import type { ExecutionGrant, StatusTelemetry } from '../contracts/types.ts';
+import { GrantLedger } from '../control-plane/grant-ledger.ts';
 import { verifyGrant, type KeyInput } from '../control-plane/grant-verify.ts';
 import { codingBranchName, DEFAULT_BASE_REF, digestFor, grantId, rejectedTelemetry } from './prepare-stage.ts';
 
@@ -25,6 +26,13 @@ export interface FinalizeStageDeps {
   baseRef?: string;
   /** Public key used to verify the grant's signature. */
   verifyKey: KeyInput;
+  /**
+   * Consume ledger for replay detection (Track G): once a grant verifies, its
+   * consumption is recorded here, so finalizing the SAME issued grant again in this
+   * process is flagged loudly (ledger log + counter) instead of silently re-reported.
+   * Optional only so direct tests can skip it -- action-entry always supplies one.
+   */
+  grantLedger?: GrantLedger;
   /** Clock override for tests; defaults to the current time. */
   now?: Date;
 }
@@ -39,10 +47,11 @@ export interface ActionOutcome {
 export function finalizeJudgmentStage(
   grant: ExecutionGrant,
   outcome: ActionOutcome,
-  deps: Pick<FinalizeStageDeps, 'verifyKey' | 'now'>,
+  deps: Pick<FinalizeStageDeps, 'verifyKey' | 'now' | 'grantLedger'>,
 ): StatusTelemetry {
   const verification = verifyGrant(grant, deps.verifyKey, deps.now ?? new Date());
   if (!verification.ok) return rejectedTelemetry(grant, verification.reason);
+  deps.grantLedger?.markConsumed(grant, `${grant.stage}:${grant.ticketId}`);
 
   return {
     grantId: grantId(grant),
@@ -111,6 +120,10 @@ export async function finalizeCodingStage(
   if (!verification.ok) {
     return rejectedTelemetry(grant, verification.reason);
   }
+  // Replay guard (Track G): record this grant's consumption before reporting the
+  // result -- a second finalize of the same issued grant now announces itself via
+  // the ledger instead of producing a second indistinguishable telemetry.
+  deps.grantLedger?.markConsumed(grant, `${grant.stage}:${grant.ticketId}`);
 
   const branchName = codingBranchName(grant);
 

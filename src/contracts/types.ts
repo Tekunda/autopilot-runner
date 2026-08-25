@@ -94,6 +94,15 @@ export type ExecutionGrant = {
   gatePolicy: GatePolicy;
   expiresAt: string; // ISO 8601
   sig: string;
+  // A unique nonce for this ISSUED grant, minted server-side at issuance
+  // (grant.ts, node:crypto randomUUID) and part of the signed payload like every
+  // other field -- so a tampered jti fails verifyGrant, and two identical issueGrant
+  // calls yield distinct jtis. It is the key the consume ledger
+  // (control-plane/grant-ledger.ts) records executions under: replaying the SAME
+  // grant collides on its jti and is flagged, while every re-issued retry is a fresh,
+  // unconsumed id. Absent on legacy grants, which still verify; they fall back to
+  // sha256(sig), the same stable telemetry id both planes already derive.
+  jti?: string;
   // The branch a coding stage (build/fix) must base its work on and open its PR
   // against -- set server-side to the ticket's integration branch so subtask
   // work never targets the customer's live default branch directly. The only
