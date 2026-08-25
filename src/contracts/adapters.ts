@@ -154,6 +154,21 @@ export interface VCSHost {
   // a review summary with no inline comments has no thread to resolve, so a reply is the only
   // acknowledgement. Best-effort.
   replyToPr(repoId: string, prNumber: number, body: string): Promise<void>;
+  // The TAIL of a FAILED CI check's log -- the diagnostic evidence a fixer needs when
+  // name/conclusion/detailsUrl alone rarely say what broke (Track F red-check self-heal).
+  // Split-plane contract: log TEXT is diagnostic evidence, not source code and not a diff,
+  // and the implementation MUST redact secrets from it (token-shaped strings, credential
+  // assignments) before it crosses the boundary. Optional -- hosts that cannot read logs,
+  // or whose credential lacks the log-reading permission, simply don't implement it.
+  // Resolves undefined whenever the log isn't available (unknown check, expired logs,
+  // permission denied) and NEVER throws for absence, so a caller treats "no tail" as
+  // exactly today's name/conclusion/URL evidence. `headSha` is the head the check ran on
+  // (branch name or commit sha); `maxLines` bounds the tail (default ~150 lines).
+  getCheckLogTail?(
+    repoId: string,
+    checkRef: { name: string; detailsUrl?: string; headSha?: string },
+    maxLines?: number,
+  ): Promise<string | undefined>;
 }
 
 // An open pull request as seen by the external-PR QA sweep: enough to identify it,

@@ -92,6 +92,25 @@ export class GitHubClient {
     }
   }
 
+  /** Raw-body variant for endpoints that answer text/plain rather than JSON (today:
+   *  the Actions job-logs read behind VCSHost.getCheckLogTail). Resolves the body as a
+   *  string, or undefined when the call fails for ANY reason -- these reads are
+   *  best-effort diagnostics and their absence must degrade to "no evidence", never
+   *  break the drive loop (403 = token lacks actions:read, 404 = logs expired or gone).
+   *  Provider faults still count against the breaker: the throw happens inside run(). */
+  async requestText(method: string, path: string): Promise<string | undefined> {
+    try {
+      return await this.breaker.run(async () => {
+        const res = await this.send(method, path);
+        const text = await res.text();
+        if (!res.ok) throw new GitHubApiError(res.status, method, path, res.statusText || 'error');
+        return text;
+      });
+    } catch {
+      return undefined;
+    }
+  }
+
   /** One raw HTTP attempt (token resolution included). Never called while the breaker
    *  is open. */
   private async send(method: string, path: string, body?: unknown): Promise<Response> {

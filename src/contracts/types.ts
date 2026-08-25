@@ -126,6 +126,17 @@ export type ExecutionGrant = {
   // Absent -> the runner falls back to the repo's default branch. Part of the
   // signed payload like every other field, so a tampered base fails verifyGrant.
   baseBranch?: string;
+  // The EXACT commit the runner must check out when a stage judges a PINNED revision
+  // rather than "whatever the branch head is now": the Track E review round pins the
+  // assembled branch's sha once at dispatch (control-plane.ts driveAssembledAccept) and
+  // every reviewer grant carries it signed -- so the three parallel reviewer jobs, which
+  // may start minutes apart, can never silently inspect different revisions if the
+  // branch moves between snapshot and checkout (the external review finding: pinning was
+  // bookkeeping-only). The runner folds this over baseBranch into its checkout ref
+  // (runner/prepare-stage.ts); absent -> baseBranch's head is checked out exactly as
+  // before. Part of the signed payload like every other field: a tampered sha fails
+  // verifyGrant, so what was reviewed is provably what was pinned.
+  headSha?: string;
   // The ticket's human-readable title, carried so the runner can name branches
   // and PRs after it (a slug of this + a short id) instead of an opaque ticket
   // UUID. Metadata only (already present in the stepPrompt); never a secret.

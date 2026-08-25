@@ -17,15 +17,28 @@ export function grantLedgerId(grant: ExecutionGrant): string {
   return grant.jti ?? createHash('sha256').update(grant.sig).digest('hex');
 }
 
+// Detection window bound: past this many stored ids the OLDEST is dropped, so memory and
+// any persisted snapshot stay bounded. A grant older than the window loses replay detection
+// by definition -- grants are single-stage and short-lived, so 10k ids is far beyond any
+// live replay risk.
+export const GRANT_LEDGER_CAP = 10_000;
+
+export interface GrantLedgerRecord {
+  firstSeenAt: string;
+  replays: number;
+}
+
 export class GrantLedger {
-  #consumed = new Map<string, { firstSeenAt: string; replays: number }>();
+  #consumed = new Map<string, GrantLedgerRecord>();
   #replays = 0;
+  #cap: number;
   #now: () => Date;
 
   // Injectable clock so tests can pin firstSeenAt; defaults to wall time.
   // (Explicit field, not a ctor parameter property -- Node strip-only TS mode rejects those.)
-  constructor(now: () => Date = () => new Date()) {
+  constructor(now: () => Date = () => new Date(), options?: { cap?: number }) {
     this.#now = now;
+    this.#cap = options?.cap ?? GRANT_LEDGER_CAP;
   }
 
   /** Grants consumed so far. */
@@ -52,6 +65,11 @@ export class GrantLedger {
     const id = grantLedgerId(grant);
     const prior = this.#consumed.get(id);
     if (!prior) {
+      // Bounded window: at cap, evict the oldest record (Map preserves insertion order).
+      if (this.#consumed.size >= this.#cap) {
+        const oldest = this.#consumed.keys().next().value;
+        if (oldest !== undefined) this.#consumed.delete(oldest);
+      }
       this.#consumed.set(id, { firstSeenAt: this.#now().toISOString(), replays: 0 });
       return { fresh: true, id };
     }
@@ -70,5 +88,20 @@ export class GrantLedger {
     if (this.#consumed.has(id)) {
       throw new Error(`grant-ledger: grant ${id} was already consumed${context ? ` (${context})` : ''}`);
     }
+  }
+
+  /** Every stored record, oldest first — the exact form persistence round-trips. */
+  entries(): [string, GrantLedgerRecord][] {
+    return [...this.#consumed];
+  }
+
+  /**
+   * Reload persisted records (oldest first). The total replay count is derived from the
+   * per-id replays rather than carried separately: every duplicate consumption increments
+   * exactly one record's counter, so the sum IS the lifetime count.
+   */
+  restore(entries: Iterable<[string, GrantLedgerRecord]>): void {
+    for (const [id, rec] of entries) this.#consumed.set(id, rec);
+    this.#replays = [...this.#consumed.values()].reduce((n, r) => n + r.replays, 0);
   }
 }

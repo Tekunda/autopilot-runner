@@ -130,7 +130,12 @@ export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps
   // The grant's server-set baseBranch (the ticket's integration branch) wins over
   // the runner workflow's repo-default baseRef, so subtask coding never bases on --
   // or opens a PR against -- the customer's live default branch.
-  const baseRef = grant.baseBranch ?? deps.baseRef ?? DEFAULT_BASE_REF;
+  const baseBranch = grant.baseBranch ?? deps.baseRef ?? DEFAULT_BASE_REF;
+  // A signed headSha (the Track E round's pinned revision; judgment stages only) IS the
+  // revision to inspect: action.yml checks out `steps.prepare.outputs.base-ref` verbatim,
+  // so folding the sha in here pins the vendor step's tree even if the branch moves under
+  // the round -- three reviewers dispatched in parallel can never land on different heads.
+  const baseRef = grant.headSha ?? baseBranch;
 
   // The grant's signed tier decides the model for this stage; a customer-configured
   // model still wins (BYO config is never overridden). An unmapped provider yields

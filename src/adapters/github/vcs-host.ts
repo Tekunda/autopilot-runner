@@ -44,6 +44,12 @@ interface GhCheckRunsResponse {
   check_runs: GhCheckRun[];
 }
 
+interface GhJob {
+  id: number;
+  name: string;
+  conclusion: string | null;
+}
+
 interface GhReview {
   id?: number;
   user: ({ login: string; type?: string }) | null;
@@ -467,6 +473,52 @@ export class GitHubVCSHost implements VCSHost {
   async replyToPr(repoId: string, prNumber: number, body: string): Promise<void> {
     await this.client.request('POST', `/repos/${repoId}/issues/${prNumber}/comments`, { body });
   }
+
+  // Resolves the check run by name on the head (latest wins, same rule as listChecks),
+  // then follows it to its Actions jobs and reads each failing job's log. The jobs/logs
+  // endpoints need `actions: read` on the token (the App manifest's actions:write covers
+  // it); a token without it gets a 403, which degrades to undefined like any other
+  // absence. Non-Actions producers expose no jobs, so their checks yield undefined.
+  async getCheckLogTail(
+    repoId: string,
+    checkRef: { name: string; detailsUrl?: string; headSha?: string },
+    maxLines = DEFAULT_CHECK_LOG_TAIL_LINES,
+  ): Promise<string | undefined> {
+    try {
+      if (!checkRef.headSha) return undefined;
+      const sha = (await this.getBranchSha(repoId, checkRef.headSha)) ?? checkRef.headSha;
+      const runs = await this.client.request<GhCheckRunsResponse>(
+        'GET',
+        `/repos/${repoId}/commits/${sha}/check-runs?per_page=100`,
+      );
+      const run = latestNamedRun(runs?.check_runs ?? [], checkRef.name);
+      if (!run) return undefined;
+      const listed = await this.client.request<{ jobs?: GhJob[] }>(
+        'GET',
+        `/repos/${repoId}/check-runs/${run.id}/jobs`,
+      );
+      const jobs = listed?.jobs ?? [];
+      const failedJobs = jobs.filter(
+        (j) => j.conclusion !== 'success' && j.conclusion !== 'skipped' && j.conclusion !== 'neutral',
+      );
+      // ponytail: the first 3 failing jobs diagnose one stage; raise MAX_CHECK_LOG_JOBS if
+      // a wall-of-shards matrix ever needs more
+      const targets = (failedJobs.length > 0 ? failedJobs : jobs).slice(0, MAX_CHECK_LOG_JOBS);
+      // The line budget is split across job sections (header + each job's last lines), so
+      // every section keeps its `## job` label and the whole result stays within maxLines.
+      const perJobLines = Math.max(0, Math.floor((maxLines - targets.length) / targets.length));
+      const sections: string[] = [];
+      for (const job of targets) {
+        const log = await this.client.requestText('GET', `/repos/${repoId}/actions/jobs/${job.id}/logs`);
+        if (!log) continue;
+        sections.push(`## ${job.name}\n${logTail(redactSecrets(log), perJobLines)}`);
+      }
+      if (sections.length === 0) return undefined;
+      return sections.join('\n');
+    } catch {
+      return undefined; // contract: absence never throws (unknown check, transient, permission)
+    }
+  }
 }
 
 interface GhWorkflowRun {
@@ -503,6 +555,52 @@ function mapPRState(state: string, merged: boolean): 'open' | 'closed' | 'merged
 function mapCheckStatus(status: string, conclusion: string | null): 'pass' | 'fail' | 'pending' {
   if (status !== 'completed') return 'pending';
   return conclusion === 'success' || conclusion === 'neutral' || conclusion === 'skipped' ? 'pass' : 'fail';
+}
+
+// The newest check-run of one name on a commit -- the same latest-wins rule listChecks
+// applies across all names, scoped to the single failing check a log tail was asked for.
+function latestNamedRun(runs: GhCheckRun[], name: string): GhCheckRun | undefined {
+  let best: GhCheckRun | undefined;
+  for (const run of runs) {
+    if (run.name !== name) continue;
+    const newer =
+      !best ||
+      (run.started_at ?? '') > (best.started_at ?? '') ||
+      ((run.started_at ?? '') === (best.started_at ?? '') && (run.id ?? 0) > (best.id ?? 0));
+    if (newer) best = run;
+  }
+  return best;
+}
+
+const DEFAULT_CHECK_LOG_TAIL_LINES = 150;
+const MAX_CHECK_LOG_JOBS = 3;
+
+// Line-level secret redaction for log text crossing the split plane. Conservative:
+// mask the VALUE, keep the surrounding structure, so the fixer still sees what ran.
+// Covers the common token shapes (GitHub/App PATs, AWS access keys, Slack tokens,
+// Authorization/Bearer headers) plus password/secret/token/api-key assignments in
+// shell/env/log forms (`github_token=...`, `PASSWORD: ...`).
+const SECRET_PATTERNS: [RegExp, string][] = [
+  [/gh[posur]_[A-Za-z0-9_]{16,}/g, '***'],
+  [/\bAKIA[0-9A-Z]{16}\b/g, '***'],
+  [/\bxox[baprs]-[A-Za-z0-9-]{10,}/g, '***'],
+  [/(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}/gi, '$1***'],
+  [/((?:password|secret|token|api[_-]?key)\s*[=:]\s*)("[^"]*"|\S+)/gi, '$1***'],
+  // PEM private keys span lines; a leaked key block must never survive truncation to a prompt.
+  [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '***private key***'],
+  // JWTs (three base64url segments) carry embedded secrets and are high-entropy enough to spot.
+  [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, '***'],
+];
+
+export function redactSecrets(text: string): string {
+  let out = text;
+  for (const [pattern, replacement] of SECRET_PATTERNS) out = out.replace(pattern, replacement);
+  return out;
+}
+
+export function logTail(text: string, maxLines: number): string {
+  const lines = text.split('\n');
+  return lines.length <= maxLines ? text : lines.slice(-maxLines).join('\n');
 }
 
 // GitHub's mergeable_state has more values than the watchdog needs to act
