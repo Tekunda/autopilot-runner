@@ -24,6 +24,12 @@ export type TicketStatus =
   | 'blocked'
   | 'done';
 
+// The three independent review lenses (Track E) that judge the ASSEMBLED integration
+// branch. Each is its own signed grant and its own model session -- never one prompt
+// folding three perspectives (independence is the point; only the deterministic
+// aggregation ever sees more than one lens's output).
+export type ReviewLens = 'primary' | 'adversarial' | 'security';
+
 export interface GatePolicy {
   requireHumanApproval: boolean;
   requiredChecks: string[];
@@ -33,6 +39,16 @@ export interface GatePolicy {
   // catch an under-scoped/wrong plan before it wastes builds. Per-tenant: resolved from the
   // tenant's gates config like every other gate field. Optional; defaults to false (no hold).
   requirePlanApproval?: boolean;
+  // Which of the three independent assembled-branch reviewers (Track E) actually run.
+  // A lens explicitly disabled here is SKIPPED cleanly -- no grant, no check, and the
+  // aggregate `Autopilot / review` judges only the enabled lenses. Anything NOT disabled
+  // is mandatory: a missing/crashed reviewer fails the round (fail closed). Optional;
+  // defaults to all three enabled. Resolved per-lens so a layer can switch one off without
+  // restating the others.
+  reviewLenses?: Partial<Record<ReviewLens, boolean>>;
+  // Finding severities that fail the review round (and trigger the bounded repair loop).
+  // Case-insensitive match against each finding's severity text. Defaults to ['blocker'].
+  reviewBlockingSeverities?: string[];
 }
 
 // A `gate` stage's entitled gates, delivered JIT inside the signed grant so the runner
@@ -142,7 +158,36 @@ export type ExecutionGrant = {
   // own `show_full_output` input, revealing the raw SDK output instead of the minimal result
   // summary. Absent/false by default -- see config/types.ts DebugConfig for why it's opt-in.
   debugFullOutput?: boolean;
+  // Which independent review lens this grant runs, for a `review` stage. Part of the signed
+  // payload like every other field, so a tampered lens fails verifyGrant -- and the runner
+  // routes a lensed review grant through the read-only+plan.json profile while a lens-less
+  // `review` grant behaves exactly as before (the linear ticket pipeline's generic review).
+  reviewLens?: ReviewLens;
 } & ({ stepPrompt: string; ref?: never } | { ref: string; stepPrompt?: never });
+
+// One normalized, source-free defect a review lens reports (Track E). Metadata only --
+// a file/line POINTER and plain-language prose, never a diff, source, or secret -- so it
+// respects the split-plane boundary on its way back from the runner.
+export interface ReviewFinding {
+  // Free text matched case-insensitively against the tenant's configured blocking
+  // severities (gates.reviewBlockingSeverities). The prompts constrain the model to
+  // blocker|major|minor; anything else counts as non-blocking.
+  severity: string;
+  summary: string;
+  file?: string;
+  line?: number;
+  // Whether a code change can fix it at all ('fixable' | 'needs-human' | free text).
+  fixability?: string;
+}
+
+// A review lens's verdict on the pinned assembled revision: pass is true only when the
+// lens found no defect worth reporting; findings carry the structured evidence. A lens
+// that reports findings while claiming pass still fails aggregation if any finding's
+// severity blocks (a sloppy reviewer must not waive a named defect).
+export interface ReviewVerdict {
+  pass: boolean;
+  findings: ReviewFinding[];
+}
 
 // One planned subtask produced by the architect stage: the title that becomes its
 // tracker entry, the architect note written back to that entry, the file paths/globs
@@ -219,6 +264,10 @@ export interface StageResult {
   // integration branch, downloaded by the CIRunner from the run's artifact. Absent
   // for every other stage.
   acceptance?: AcceptanceVerdict;
+  // Only a lensed `review` stage populates this: the lens's structured findings on the
+  // assembled revision, downloaded by the CIRunner from the run's plan.json artifact.
+  // Absent for every other stage (and for a legacy lens-less review grant).
+  reviewVerdict?: ReviewVerdict;
   // Only an `architect` stage populates this: the PO/engineer plan writeback (For-review
   // block, plan narrative, touched areas, related tickets) the control plane renders onto
   // the PARENT ticket after decomposing. Absent for every other stage and for a HOLD.
@@ -363,6 +412,10 @@ export interface SubtaskState {
   // rollup/promotion/external-PR paths get). Bounds the conflict loop so a
   // genuinely unresolvable conflict blocks the subtask for a human.
   conflictFixAttempts?: number;
+  // How many times a fix has been dispatched to repair a RED CUSTOMER check on this
+  // subtask's build PR head (Track F's bounded self-heal, distinct from conflictFixAttempts
+  // so a conflicted-then-red PR gets its full budget of each).
+  ciFixAttempts?: number;
   // Why this subtask was blocked, when it was: an exhausted build/fix loop, a
   // real merge conflict on its PR, or an error that isolated to it (never the
   // whole ticket). Carried so a human sees a concrete reason.
@@ -371,6 +424,26 @@ export interface SubtaskState {
   // CHECKS it (non-blocking) instead of dispatching; cleared when the stage completes. This
   // is what makes driveSubtask a per-tick state machine (see InFlightStage).
   inFlight?: InFlightStage;
+}
+
+// One enabled lens's finalized telemetry within a review round: the run outcome plus the
+// parsed verdict when the run passed AND produced a readable artifact. A lens recorded
+// without a verdict failed closed (crash, unreadable plan.json) -- aggregation treats it
+// exactly like any other failed reviewer.
+export interface ReviewLensResult {
+  outcome: StageOutcome;
+  verdict?: ReviewVerdict;
+}
+
+// The in-progress independent-review round over the assembled integration branch
+// (Track E). Persisted on the TicketState so the fan-out survives ticks and restarts:
+// `sha` pins the exact revision all three reviewers inspect (a head that moves mid-round
+// discards the round and re-pins), `pending` carries one dispatch marker per lens until
+// its run finalizes, and `results` accumulates finalized lens outcomes until aggregation.
+export interface ReviewRoundState {
+  sha: string;
+  pending: Partial<Record<ReviewLens, InFlightStage>>;
+  results: Partial<Record<ReviewLens, ReviewLensResult>>;
 }
 
 export interface TicketState {
@@ -391,10 +464,10 @@ export interface TicketState {
   // set that lost or never persisted some of its planned children can't promote a
   // partial delivery. Undefined for non-decomposed tickets (no architect plan).
   plannedSubtaskCount?: number;
-  // How many times the acceptance walk found the assembled branch UNMET and the control
-  // plane dispatched a repair build to implement the missing criteria before re-verifying.
-  // Bounds the accept -> repair -> re-accept self-heal so a genuinely-unbuildable ticket
-  // blocks for a human instead of looping. Reset to 0 once acceptance passes.
+  // How many times the assembled review (acceptance walk, now the three-lens review
+  // round) found the branch UNMET and the control plane dispatched a repair build before
+  // re-reviewing. Bounds the review -> repair -> re-review self-heal so a
+  // genuinely-unbuildable ticket blocks for a human instead of looping.
   acceptRepairAttempts?: number;
   // Highest PR review/comment ids the control plane has already acted on, per source, so
   // corrective feedback (a Codex or human `changes_requested`/comment) drives a fix exactly
@@ -469,6 +542,8 @@ export interface TicketState {
   // How many times a `fix` has been dispatched to green an external PR after its QA failed
   // (a failing gate, or a QA that repeatedly could not complete). Bounds the external
   // autofix so a PR Autopilot can't get green is left for its author instead of looping.
+  // Track F reuses the same counter (and its fix.maxFixRounds bound) for the customer-CI
+  // autofix loop on PROMOTION PRs -- a ticket has one shared CI-repair budget either way.
   externalQaFixAttempts?: number;
   // Set when the control plane holds a decomposed ticket for a replan/continue decision --
   // its recorded plan is possibly stale (the ticket re-entered the ready status, or every
@@ -485,6 +560,10 @@ export interface TicketState {
   // the SECOND consecutive sighting: one sighting is indistinguishable from our own status
   // write not being indexed yet, and holding a live ticket over that would wedge delivery.
   readyDriftTicks?: number;
+  // The live independent-review round over the assembled branch (see ReviewRoundState).
+  // Absent whenever no round is running -- between rounds (e.g. while a repair build is
+  // in flight) and once the aggregate passes.
+  reviewRound?: ReviewRoundState;
 }
 
 // The ticketId prefix for an external-PR pseudo-ticket (see TicketState.externalPr). Such

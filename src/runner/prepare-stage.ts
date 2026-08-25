@@ -152,17 +152,19 @@ export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps
     return { mcpConfigPath: path, mcpAllowedTools: allowedTools };
   })();
 
-  // The architect and accept stages share one execution shape -- read-only repo plus a
-  // single Write to the artifact file (plan.json), no branch and no PR. action.yml gives
-  // the vendor step Write access (and uploads the artifact) on this kind, then finalize
+  // The architect, accept, and lensed-review stages share one execution shape -- read-only
+  // repo plus a single Write to the artifact file (plan.json), no branch and no PR. action.yml
+  // gives the vendor step Write access (and uploads the artifact) on this kind, then finalize
   // maps its conclusion to telemetry like any other judgment stage. `accept` reuses the
-  // architect plumbing deliberately: it checks out the ticket's assembled integration
-  // branch (grant.baseBranch) and writes its acceptance verdict to plan.json, which the
-  // control plane parses per grant.stage -- so no runner/action.yml change is needed to
-  // add the acceptance walk.
+  // architect plumbing deliberately: it checks out the ticket's assembled integration branch
+  // (grant.baseBranch) and writes its verdict to plan.json. A Track E review grant carries a
+  // signed reviewLens and routes here too -- each independent reviewer inspects the assembled
+  // branch read-only and writes its findings verdict to the same plan.json artifact. Backward
+  // compatibility: a lens-less `review` grant (the linear ticket pipeline's generic review)
+  // falls through to the strictly read-only judgment profile below, exactly as before.
   const debugFields = grant.debugFullOutput ? { debugFullOutput: true as const } : {};
 
-  if (grant.stage === 'architect' || grant.stage === 'accept') {
+  if (grant.stage === 'architect' || grant.stage === 'accept' || (grant.stage === 'review' && grant.reviewLens !== undefined)) {
     return {
       kind: 'architect',
       repoId: grant.repoId,
