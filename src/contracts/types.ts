@@ -461,6 +461,21 @@ export interface TicketState {
   // (a failing gate, or a QA that repeatedly could not complete). Bounds the external
   // autofix so a PR Autopilot can't get green is left for its author instead of looping.
   externalQaFixAttempts?: number;
+  // Set when the control plane holds a decomposed ticket for a replan/continue decision --
+  // its recorded plan is possibly stale (the ticket re-entered the ready status, or every
+  // ticket blocking it has shipped) and a human must choose: reply "replan" to discard the
+  // recorded plan and re-architect, or anything else to resume it with fresh budgets.
+  // Cleared by the answer. Ask-once: while set, the hold never re-fires.
+  replanPrompted?: boolean;
+  // Set the first time dependency-wake fires for this ticket (every ticket blocking it in
+  // the tracker's blocked-by relation has shipped). Wake-once: a ticket that blocks AGAIN
+  // after waking is not auto-woken a second time -- the relation was consumed.
+  dependencyWokenAt?: string;
+  // Consecutive ticks the tracker has reported this known, decomposed, non-terminal ticket
+  // at the ready status (the structure-drift signal). The replan/continue hold fires only on
+  // the SECOND consecutive sighting: one sighting is indistinguishable from our own status
+  // write not being indexed yet, and holding a live ticket over that would wedge delivery.
+  readyDriftTicks?: number;
 }
 
 // The ticketId prefix for an external-PR pseudo-ticket (see TicketState.externalPr). Such
