@@ -39,6 +39,12 @@ export interface GatePolicy {
   // catch an under-scoped/wrong plan before it wastes builds. Per-tenant: resolved from the
   // tenant's gates config like every other gate field. Optional; defaults to false (no hold).
   requirePlanApproval?: boolean;
+  // The replan-confirmation gate: when true, a blocked ticket whose blockers have ALL shipped
+  // (dependency-wake) HOLDS for a human replan/continue decision instead of resuming on its
+  // own -- the checkpoint for tenants who want a person to judge whether a plan that sat
+  // blocked is still valid. Per-tenant: resolved from the tenant's gates config like every
+  // other gate field. Optional; defaults to false (the wake resumes the recorded plan).
+  requireReplanConfirmation?: boolean;
   // Which of the three independent assembled-branch reviewers (Track E) actually run.
   // A lens explicitly disabled here is SKIPPED cleanly -- no grant, no check, and the
   // aggregate `Autopilot / review` judges only the enabled lenses. Anything NOT disabled
@@ -525,6 +531,16 @@ export interface TicketState {
   // architect prompt so it stops dropping them. Cleared once coverage passes.
   architectCoverageGaps?: string[];
   prs: string[];
+  // The promotion PR opened EARLY -- as soon as the rollup lands on the integration branch,
+  // before the assembled review runs -- purely so a human can watch the review happen: the
+  // diff is live and each lens's check-run lands on it as it finishes. Deliberately NOT in
+  // `prs`: that array means "the official promotion PR is open and awaiting approval" and is
+  // read as exactly that (independent of status) by the reply-handling path, which would
+  // otherwise deflect every tracker reply for the whole of accept/review. Set once (the open
+  // is find-or-open, so later ticks reuse it) and cleared when promote() folds the same PR
+  // into `prs` -- it is no longer a preview then. Left set, pointing at the still-open PR,
+  // when review blocks: that PR is the evidence the human needs.
+  draftPromotionPr?: string;
   lastEventAt: string; // ISO 8601
   // Consecutive fail count for the ticket's *current* judgment stage
   // (enrich/plan -- no PR exists yet for a `fix` stage to work against).
