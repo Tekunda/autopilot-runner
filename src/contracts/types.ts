@@ -455,6 +455,14 @@ export interface ReviewRoundState {
   sha: string;
   pending: Partial<Record<ReviewLens, InFlightStage>>;
   results: Partial<Record<ReviewLens, ReviewLensResult>>;
+  // Consecutive ticks this round failed a completion attempt -- every reviewer launch
+  // threw (e.g. a GitHub 422 on an oversized grant input) or the AI-run budget couldn't
+  // cover the lenses still missing. Bounds what would otherwise be a SILENT
+  // reviewing-forever loop (allSettled swallows rejections; nothing else observes them):
+  // at the cap the ticket blocks with the recorded evidence, mirroring rollupPendingTicks.
+  // A placeholder round ({pending:{}}) persists just this counter between failed START
+  // attempts; any successful start writes a fresh round without it, resetting the streak.
+  missingAttempts?: number;
 }
 
 export interface TicketState {

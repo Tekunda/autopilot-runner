@@ -44,6 +44,40 @@ export class GitHubApiError extends Error {
 // 15-minute wait for a run to finish is a sequence of these bounded requests, not one.
 const DEFAULT_TIMEOUT_MS = 30_000;
 
+/** Read cap for raw-text bodies (requestText): job logs reach tens of MB, so stream-read
+ *  only the first 512KB and cancel the rest. Diagnostic-only evidence -- a log whose
+ *  failure lives beyond the cap loses its tail; the check's name/conclusion still gate. */
+const MAX_TEXT_BYTES = 512 * 1024;
+
+// Stream-read at most maxBytes of the body, then cancel the reader (freeing the
+// connection instead of draining the remainder). Non-fatal decode: a cap cut mid-codepoint
+// becomes U+FFFD, which is fine for log diagnostics.
+async function readCapped(res: Response, maxBytes: number): Promise<string> {
+  const reader = res.body?.getReader();
+  if (!reader) return '';
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (total < maxBytes) {
+    const { done, value } = await reader.read();
+    if (done || !value) break;
+    chunks.push(value);
+    total += value.byteLength;
+  }
+  if (total >= maxBytes) await reader.cancel().catch(() => {});
+  // A single chunk may overshoot the cap (read granularity), so the COPY is clamped --
+  // the result never exceeds maxBytes.
+  const kept = Math.min(total, maxBytes);
+  const head = new Uint8Array(kept);
+  let offset = 0;
+  for (const chunk of chunks) {
+    if (offset >= kept) break;
+    const n = Math.min(chunk.byteLength, kept - offset);
+    head.set(chunk.subarray(0, n), offset);
+    offset += n;
+  }
+  return new TextDecoder().decode(head);
+}
+
 export class GitHubClient {
   private readonly fetchImpl: typeof fetch;
   private readonly baseUrl: string;
@@ -97,12 +131,15 @@ export class GitHubClient {
    *  string, or undefined when the call fails for ANY reason -- these reads are
    *  best-effort diagnostics and their absence must degrade to "no evidence", never
    *  break the drive loop (403 = token lacks actions:read, 404 = logs expired or gone).
-   *  Provider faults still count against the breaker: the throw happens inside run(). */
+   *  Provider faults still count against the breaker: the throw happens inside run().
+   *  The READ itself is capped at MAX_TEXT_BYTES -- job logs can be tens of MB, so bytes
+   *  past the cap are never buffered (a log whose failure lives beyond the cap loses its
+   *  tail; acceptable for diagnostic-only evidence). */
   async requestText(method: string, path: string): Promise<string | undefined> {
     try {
       return await this.breaker.run(async () => {
         const res = await this.send(method, path);
-        const text = await res.text();
+        const text = await readCapped(res, MAX_TEXT_BYTES);
         if (!res.ok) throw new GitHubApiError(res.status, method, path, res.statusText || 'error');
         return text;
       });

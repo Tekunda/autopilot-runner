@@ -474,11 +474,19 @@ export class GitHubVCSHost implements VCSHost {
     await this.client.request('POST', `/repos/${repoId}/issues/${prNumber}/comments`, { body });
   }
 
-  // Resolves the check run by name on the head (latest wins, same rule as listChecks),
-  // then follows it to its Actions jobs and reads each failing job's log. The jobs/logs
-  // endpoints need `actions: read` on the token (the App manifest's actions:write covers
-  // it); a token without it gets a 403, which degrades to undefined like any other
-  // absence. Non-Actions producers expose no jobs, so their checks yield undefined.
+  // Resolves a failing check's job-log evidence. The name-based lookup on the head
+  // (latest wins, same rule as listChecks) is ONLY the gate -- it answers "is this
+  // named check actually red on this sha". Jobs can NEVER be enumerated through the
+  // check-run: /check-runs/{id}/jobs is not a GitHub endpoint (every production call
+  // 404'd silently and the fixer got zero evidence). Jobs live under the Actions API,
+  // keyed by WORKFLOW-RUN id: list the commit's completed workflow runs by head sha,
+  // failures first / newest first, then walk each run's jobs for conclusion=failure.
+  // `checkRef.detailsUrl` is part of the frozen contract but deliberately unused:
+  // resolution goes by name + headSha, strictly more current than a captured URL. All
+  // reads degrade to undefined: requestText swallows any log-read failure, and a jobs
+  // read that throws (403 = token lacks actions:read) lands in the catch below --
+  // absence of evidence never breaks the drive loop. Non-Actions producers expose no
+  // workflow runs, so their checks yield undefined.
   async getCheckLogTail(
     repoId: string,
     checkRef: { name: string; detailsUrl?: string; headSha?: string },
@@ -487,28 +495,59 @@ export class GitHubVCSHost implements VCSHost {
     try {
       if (!checkRef.headSha) return undefined;
       const sha = (await this.getBranchSha(repoId, checkRef.headSha)) ?? checkRef.headSha;
-      const runs = await this.client.request<GhCheckRunsResponse>(
+
+      // Gate: confirm THIS named check is red on THIS sha before spending Actions reads
+      // (a green re-run means there is nothing left to diagnose).
+      const checkRuns = await this.client.request<GhCheckRunsResponse>(
         'GET',
         `/repos/${repoId}/commits/${sha}/check-runs?per_page=100`,
       );
-      const run = latestNamedRun(runs?.check_runs ?? [], checkRef.name);
-      if (!run) return undefined;
-      const listed = await this.client.request<{ jobs?: GhJob[] }>(
+      const check = latestNamedRun(checkRuns?.check_runs ?? [], checkRef.name);
+      if (!check || mapCheckStatus(check.status, check.conclusion) !== 'fail') return undefined;
+
+      // Same shape rerunDeployment uses below: Actions runs are keyed by head sha.
+      const listed = await this.client.requestOptional<{ workflow_runs?: GhWorkflowRun[] }>(
         'GET',
-        `/repos/${repoId}/check-runs/${run.id}/jobs`,
+        `/repos/${repoId}/actions/runs?head_sha=${encodeURIComponent(sha)}&per_page=50`,
       );
-      const jobs = listed?.jobs ?? [];
-      const failedJobs = jobs.filter(
-        (j) => j.conclusion !== 'success' && j.conclusion !== 'skipped' && j.conclusion !== 'neutral',
-      );
-      // ponytail: the first 3 failing jobs diagnose one stage; raise MAX_CHECK_LOG_JOBS if
-      // a wall-of-shards matrix ever needs more
-      const targets = (failedJobs.length > 0 ? failedJobs : jobs).slice(0, MAX_CHECK_LOG_JOBS);
+      const failedConclusion = (r: GhWorkflowRun): boolean =>
+        r.conclusion === 'failure' || r.conclusion === 'startup_failure';
+      const startedAt = (r: GhWorkflowRun): string => r.run_started_at ?? r.created_at ?? '';
+      // Failures diagnose a red check; other conclusions are a last resort. Newest first
+      // within each tier -- a re-run supersedes its ancestor.
+      const runs = (listed?.workflow_runs ?? [])
+        .filter((r) => r.status === 'completed')
+        .sort((a, b) =>
+          failedConclusion(a) === failedConclusion(b)
+            ? startedAt(b).localeCompare(startedAt(a))
+            : failedConclusion(a)
+              ? -1
+              : 1,
+        );
+
+      const targets: GhJob[] = [];
+      for (const run of runs) {
+        if (targets.length >= MAX_CHECK_LOG_JOBS) break;
+        const jobsOnRun = await this.client.request<{ jobs?: GhJob[] }>(
+          'GET',
+          `/repos/${repoId}/actions/runs/${run.id}/jobs?per_page=100`,
+        );
+        // Only genuinely failed jobs carry diagnostic logs; higher job ids are the
+        // newer attempts/shards within the run.
+        const failingJobs = (jobsOnRun?.jobs ?? [])
+          .filter((j) => j.conclusion === 'failure')
+          .sort((a, b) => b.id - a.id);
+        targets.push(...failingJobs.slice(0, MAX_CHECK_LOG_JOBS - targets.length));
+      }
+      if (targets.length === 0) return undefined;
       // The line budget is split across job sections (header + each job's last lines), so
       // every section keeps its `## job` label and the whole result stays within maxLines.
       const perJobLines = Math.max(0, Math.floor((maxLines - targets.length) / targets.length));
       const sections: string[] = [];
       for (const job of targets) {
+        // requestText caps each log READ at 512KB (memory bound on a multi-MB job log): a
+        // failure living beyond the cap yields no tail for this section -- diagnostic-only
+        // loss; the check's own status still gates.
         const log = await this.client.requestText('GET', `/repos/${repoId}/actions/jobs/${job.id}/logs`);
         if (!log) continue;
         sections.push(`## ${job.name}\n${logTail(redactSecrets(log), perJobLines)}`);
@@ -523,7 +562,10 @@ export class GitHubVCSHost implements VCSHost {
 
 interface GhWorkflowRun {
   id: number;
+  status: string | null;
   conclusion: string | null;
+  created_at?: string | null;
+  run_started_at?: string | null;
 }
 
 interface GhReviewThread {
