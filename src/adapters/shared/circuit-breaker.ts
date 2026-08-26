@@ -10,6 +10,12 @@
 // expiring under concurrency would thunder the whole queued backlog against a possibly
 // still-down provider at once. Cooldown grows exponentially per re-open and any success
 // resets everything.
+// The probe is time-bounded internally (probeTimeoutMs): a probe that NEVER settles would
+// otherwise hold the half-open gate forever and every later caller would fail fast on a
+// breaker that can no longer recover by itself. The timeout only settles the BREAKER's
+// bookkeeping (counted failure -> re-open with a grown cooldown, gate released); it cannot
+// cancel the operation, so `op` should still carry its own transport timeout -- today's
+// callers pass an AbortSignal.timeout into fetch, and this backstop is deliberately longer.
 // Fail-open philosophy: a BreakerOpenError is an ordinary thrown error, so it flows
 // through the exact paths a real API failure already takes (blocked ticket / notice) --
 // nothing is swallowed here.
@@ -37,6 +43,13 @@ export interface CircuitBreakerConfig {
    * responses (bad id, missing page) don't trip an outage breaker.
    */
   countsAsFailure?: (err: unknown) => boolean;
+  /**
+   * Ceiling on how long the half-open RECOVERY PROBE may stay unsettled before the breaker
+   * gives up on it, counts a failure and re-opens (releasing the single-probe gate). Guards
+   * against a hung operation wedging the breaker open forever. Backstop only -- longer than
+   * any per-request transport timeout the caller sets. Default 60s; 0 disables.
+   */
+  probeTimeoutMs?: number;
   /** Injectable clock for tests; defaults to Date.now. */
   now?: () => number;
   /**
@@ -64,8 +77,21 @@ export class BreakerOpenError extends Error {
   }
 }
 
+/** Thrown when the half-open recovery probe outlives probeTimeoutMs. The operation itself
+ *  keeps running (it cannot be cancelled from here); this only tells the caller -- and the
+ *  breaker's own failure counter -- that the probe is written off. */
+export class BreakerProbeTimeoutError extends Error {
+  readonly provider: string;
+
+  constructor(provider: string, timeoutMs: number) {
+    super(`${provider} recovery probe did not settle within ${timeoutMs}ms; treating it as a failure`);
+    this.name = 'BreakerProbeTimeoutError';
+    this.provider = provider;
+  }
+}
+
 export class CircuitBreaker {
-  private readonly cfg: Required<Pick<CircuitBreakerConfig, 'provider' | 'threshold' | 'baseCooldownMs' | 'maxCooldownMs' | 'burstWindowMs'>> & CircuitBreakerConfig;
+  private readonly cfg: Required<Pick<CircuitBreakerConfig, 'provider' | 'threshold' | 'baseCooldownMs' | 'maxCooldownMs' | 'burstWindowMs' | 'probeTimeoutMs'>> & CircuitBreakerConfig;
   // Consecutive failures since the last success -- the classic trip-wire.
   private failures = 0;
   // Failure timestamps within the burst window, trimmed as time passes.
@@ -83,6 +109,7 @@ export class CircuitBreaker {
       baseCooldownMs: 30_000,
       maxCooldownMs: 10 * 60_000,
       burstWindowMs: 60_000,
+      probeTimeoutMs: 60_000,
       now: Date.now,
       ...config,
     };
@@ -90,7 +117,8 @@ export class CircuitBreaker {
 
   /** Runs `op` under the breaker. While open — or while a recovery probe is in flight —
    *  this throws BreakerOpenError without invoking op at all; a success closes and
-   *  resets all state; a counted failure may open or re-open it. */
+   *  resets all state; a counted failure may open or re-open it. A recovery probe that
+   *  outlives probeTimeoutMs is written off as a failure so the gate can never wedge. */
   async run<T>(op: () => Promise<T>): Promise<T> {
     const start = this.cfg.now!();
     const retryInMs = this.cooldownUntil - start;
@@ -102,11 +130,15 @@ export class CircuitBreaker {
     const wasCooling = this.opens > 0;
     if (wasCooling) this.probing = true;
     try {
-      const value = await op();
+      const value = wasCooling ? await this.boundProbe(op()) : await op();
       this.settleHealthy(wasCooling);
       return value;
     } catch (err) {
-      if (!this.cfg.countsAsFailure || this.cfg.countsAsFailure(err)) {
+      // A written-off probe bypasses the classifier: the provider never answered, so
+      // "demonstrably up" reasoning must not apply -- it always counts and re-opens.
+      if (err instanceof BreakerProbeTimeoutError) {
+        this.recordFailure(this.cfg.now!());
+      } else if (!this.cfg.countsAsFailure || this.cfg.countsAsFailure(err)) {
         this.recordFailure(this.cfg.now!());
       } else if (wasCooling) {
         // Recovery probe came back with a caller-caused error: the provider answered,
@@ -116,6 +148,28 @@ export class CircuitBreaker {
       throw err;
     } finally {
       if (wasCooling) this.probing = false;
+    }
+  }
+
+  /** Races the in-flight probe against probeTimeoutMs. Losing the race rejects HERE only:
+   *  `probe` keeps running (Promise.race stays subscribed, so a late rejection is still
+   *  handled and never surfaces as an unhandled rejection) and its eventual outcome is
+   *  simply ignored -- the breaker has already moved on. */
+  private async boundProbe<T>(probe: Promise<T>): Promise<T> {
+    const timeoutMs = this.cfg.probeTimeoutMs;
+    if (!(timeoutMs > 0)) return probe;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        probe,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new BreakerProbeTimeoutError(this.cfg.provider, timeoutMs)), timeoutMs);
+          // Never keep the process alive just to time out a probe.
+          timer.unref?.();
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
     }
   }
 

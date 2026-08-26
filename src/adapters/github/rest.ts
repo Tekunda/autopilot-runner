@@ -46,7 +46,9 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 
 /** Read cap for raw-text bodies (requestText): job logs reach tens of MB, so stream-read
  *  only the first 512KB and cancel the rest. Diagnostic-only evidence -- a log whose
- *  failure lives beyond the cap loses its tail; the check's name/conclusion still gate. */
+ *  failure lives beyond the cap loses its tail; the check's name/conclusion still gate.
+ *  NOTE: this cut happens BEFORE redaction (redactSecrets in vcs-host.ts) and can split a
+ *  multi-line secret across it, so that redactor must also match an unterminated block. */
 const MAX_TEXT_BYTES = 512 * 1024;
 
 // Stream-read at most maxBytes of the body, then cancel the reader (freeing the

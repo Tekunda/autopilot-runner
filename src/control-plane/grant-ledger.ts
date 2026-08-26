@@ -6,6 +6,18 @@
 // result/telemetry for the same issued grant is flagged loudly (log + counter) instead
 // of being silently reprocessed. Re-issued retries never trip it: every issueGrant call
 // mints a fresh jti, which is what makes retry issuance explicit by construction.
+//
+// SCOPE -- DETECTION ONLY, NOT PREVENTION. Every production caller records and continues;
+// none refuses. Two structural reasons, both open (see the Track G open-edge table):
+//   1. Runner side (finalize-stage.ts) holds a per-PROCESS ledger. Each Actions step is a
+//      fresh Node process, so a captured grant re-dispatched into a NEW job meets an empty
+//      ledger and executes in full -- agent push, PR open, gate report and all.
+//   2. Control-plane side (telemetry-ingest.ts) only ever ledgers grants IT minted and
+//      dispatched, each with a fresh jti. A grant replayed straight at the customer's
+//      workflow_dispatch endpoint never reaches this ledger at all, and by the time any
+//      telemetry could, the stage has already run.
+// Real refusal needs the runner to consult a durable cross-process ledger before executing
+// -- a control-plane-gated dispatch check that does not exist yet.
 
 import { createHash } from 'node:crypto';
 
@@ -57,9 +69,11 @@ export class GrantLedger {
 
   /**
    * Record a grant's consumption atomically (single-threaded JS: check+record are one
-   * step) and report whether it was fresh. A duplicate is NOT an error thrown here --
-   * the caller decides policy -- but it is logged loudly with ids only (never secrets)
-   * and counted, so a replay can't slip through silently.
+   * step) and report whether it was fresh. A duplicate is NOT an error thrown here, and
+   * NO production caller acts on `fresh: false` beyond logging: the duplicate's work
+   * proceeds exactly as the first one's did. What this buys is the loud line (ids only,
+   * never secrets) and the counter -- a replay is visible, not stopped. See the module
+   * header for why refusing here would not prevent one.
    */
   markConsumed(grant: ExecutionGrant, context?: string): { fresh: boolean; id: string } {
     const id = grantLedgerId(grant);
@@ -82,7 +96,13 @@ export class GrantLedger {
     return { fresh: false, id };
   }
 
-  /** Hard-fail variant for callers that must refuse work on an already-consumed grant. */
+  /**
+   * Hard-fail variant for callers that must refuse work on an already-consumed grant.
+   * NOTHING IN PRODUCTION CALLS THIS -- only its unit test does. Its presence does not
+   * mean replays are refused anywhere; wiring it into either plane's current finalize
+   * path would still not prevent one (module header). Kept as the primitive the
+   * dispatch-time gate would use if that mechanism is built.
+   */
   assertFresh(grant: ExecutionGrant, context?: string): void {
     const id = grantLedgerId(grant);
     if (this.#consumed.has(id)) {

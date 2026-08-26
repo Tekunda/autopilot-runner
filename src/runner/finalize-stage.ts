@@ -31,6 +31,11 @@ export interface FinalizeStageDeps {
    * consumption is recorded here, so finalizing the SAME issued grant again in this
    * process is flagged loudly (ledger log + counter) instead of silently re-reported.
    * Optional only so direct tests can skip it -- action-entry always supplies one.
+   *
+   * DETECTION, NOT REFUSAL, and per-PROCESS: telemetry is reported whether or not the
+   * ledger flags a duplicate. A replayed grant arrives in a FRESH Actions job with a
+   * FRESH empty ledger, so the case this actually catches is a double finalize inside
+   * one process -- not the attacker replay. See the grant-ledger.ts header.
    */
   grantLedger?: GrantLedger;
   /** Clock override for tests; defaults to the current time. */
@@ -120,9 +125,11 @@ export async function finalizeCodingStage(
   if (!verification.ok) {
     return rejectedTelemetry(grant, verification.reason);
   }
-  // Replay guard (Track G): record this grant's consumption before reporting the
-  // result -- a second finalize of the same issued grant now announces itself via
-  // the ledger instead of producing a second indistinguishable telemetry.
+  // Replay DETECTION (Track G): record this grant's consumption before reporting the
+  // result, so a second finalize of the same issued grant announces itself via the ledger
+  // instead of producing a second indistinguishable telemetry. It does not refuse -- the
+  // PR-open below runs either way, and this process's ledger cannot see another job's
+  // consumption anyway (FinalizeStageDeps.grantLedger).
   deps.grantLedger?.markConsumed(grant, `${grant.stage}:${grant.ticketId}`);
 
   const branchName = codingBranchName(grant);

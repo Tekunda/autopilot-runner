@@ -155,7 +155,7 @@ export interface VCSHost {
   // acknowledgement. Best-effort.
   replyToPr(repoId: string, prNumber: number, body: string): Promise<void>;
   // The TAIL of a FAILED CI check's log -- the diagnostic evidence a fixer needs when
-  // name/conclusion/detailsUrl alone rarely say what broke (Track F red-check self-heal).
+  // name/conclusion alone rarely say what broke (Track F red-check self-heal).
   // Split-plane contract: log TEXT is diagnostic evidence, not source code and not a diff,
   // and the implementation MUST redact secrets from it (token-shaped strings, credential
   // assignments) before it crosses the boundary. Optional -- hosts that cannot read logs,
@@ -166,7 +166,7 @@ export interface VCSHost {
   // (branch name or commit sha); `maxLines` bounds the tail (default ~150 lines).
   getCheckLogTail?(
     repoId: string,
-    checkRef: { name: string; detailsUrl?: string; headSha?: string },
+    checkRef: { name: string; headSha?: string },
     maxLines?: number,
   ): Promise<string | undefined>;
 }
@@ -226,6 +226,18 @@ export interface StageHandle {
   dispatchedAt: string;
 }
 
+// Per-call knobs for dispatchStage.
+export interface DispatchStageOptions {
+  // When THIS generation of the stage started, ISO-8601. A dispatch adopts an already-running
+  // run for the same grant only when that run belongs to the same generation, and callers that
+  // can name the generation's start (the review round's pinned start, persisted with the round)
+  // must pass it: every driver of that round then agrees on the same floor no matter when it
+  // ticks, so two overlapping drivers share one run instead of dispatching duplicates, while a
+  // run left over from a DISCARDED earlier generation is still refused. Omit when the
+  // generation starts with this call.
+  adoptSince?: string;
+}
+
 export interface CIRunner {
   // Blocking: dispatch a stage and await its completion. Retained for on-demand callers
   // (e.g. runPack) and as the simple path; the non-blocking drive loop uses dispatch/check.
@@ -235,7 +247,7 @@ export interface CIRunner {
   // Optional during the blocking->non-blocking migration: the real GitHub Actions runner
   // implements it; a caller that wants non-blocking drive uses dispatchStage+checkStage when
   // present and falls back to the blocking runStage otherwise (so existing fakes keep working).
-  dispatchStage?(grant: ExecutionGrant): Promise<StageHandle>;
+  dispatchStage?(grant: ExecutionGrant, options?: DispatchStageOptions): Promise<StageHandle>;
   // Non-blocking probe: one check of a previously-dispatched run. Returns a terminal
   // StageResult once the run completes, `outcome:'running'` while it is still in flight
   // (within the stage timeout), or `outcome:'error'` once the timeout (anchored on the run's

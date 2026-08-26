@@ -377,11 +377,20 @@ export class GitHubVCSHost implements VCSHost {
 
   async listOpenPRs(repoId: string, baseBranch: string): Promise<OpenPR[]> {
     const base = encodeURIComponent(baseBranch);
-    const pulls = await this.client.requestOptional<GhListPull[]>(
-      'GET',
-      `/repos/${repoId}/pulls?state=open&base=${base}&per_page=100`,
-    );
-    return (pulls ?? []).map((p) => ({
+    // A busy base branch can carry more than one page of open PRs; callers use this list to
+    // decide which external-PR pseudo-tickets are still live, so a silent truncation would
+    // read a still-open PR past page 1 as closed. Paginate (bounded) like listPrFeedback.
+    const pulls: GhListPull[] = [];
+    for (let page = 1; page <= 20; page++) {
+      const batch =
+        (await this.client.requestOptional<GhListPull[]>(
+          'GET',
+          `/repos/${repoId}/pulls?state=open&base=${base}&per_page=100&page=${page}`,
+        )) ?? [];
+      pulls.push(...batch);
+      if (batch.length < 100) break;
+    }
+    return pulls.map((p) => ({
       number: p.number,
       url: p.html_url,
       title: p.title ?? '',
@@ -429,9 +438,7 @@ export class GitHubVCSHost implements VCSHost {
     );
     // Re-run the failed jobs of every failed run on this commit. rerun-failed-jobs is
     // idempotent-friendly (only the failed jobs re-execute) and cheaper than a full rerun.
-    const failed = (runs?.workflow_runs ?? []).filter(
-      (r) => r.conclusion === 'failure' || r.conclusion === 'timed_out' || r.conclusion === 'cancelled',
-    );
+    const failed = (runs?.workflow_runs ?? []).filter((r) => isFailedConclusion(r.conclusion));
     let reran = false;
     for (const run of failed) {
       try {
@@ -481,15 +488,14 @@ export class GitHubVCSHost implements VCSHost {
   // 404'd silently and the fixer got zero evidence). Jobs live under the Actions API,
   // keyed by WORKFLOW-RUN id: list the commit's completed workflow runs by head sha,
   // failures first / newest first, then walk each run's jobs for conclusion=failure.
-  // `checkRef.detailsUrl` is part of the frozen contract but deliberately unused:
-  // resolution goes by name + headSha, strictly more current than a captured URL. All
+  // Resolution goes by name + headSha, strictly more current than a captured URL. All
   // reads degrade to undefined: requestText swallows any log-read failure, and a jobs
   // read that throws (403 = token lacks actions:read) lands in the catch below --
   // absence of evidence never breaks the drive loop. Non-Actions producers expose no
   // workflow runs, so their checks yield undefined.
   async getCheckLogTail(
     repoId: string,
-    checkRef: { name: string; detailsUrl?: string; headSha?: string },
+    checkRef: { name: string; headSha?: string },
     maxLines = DEFAULT_CHECK_LOG_TAIL_LINES,
   ): Promise<string | undefined> {
     try {
@@ -510,8 +516,9 @@ export class GitHubVCSHost implements VCSHost {
         'GET',
         `/repos/${repoId}/actions/runs?head_sha=${encodeURIComponent(sha)}&per_page=50`,
       );
+      // startup_failure has no jobs to read, but it still sorts ahead of the green runs.
       const failedConclusion = (r: GhWorkflowRun): boolean =>
-        r.conclusion === 'failure' || r.conclusion === 'startup_failure';
+        isFailedConclusion(r.conclusion) || r.conclusion === 'startup_failure';
       const startedAt = (r: GhWorkflowRun): string => r.run_started_at ?? r.created_at ?? '';
       // Failures diagnose a red check; other conclusions are a last resort. Newest first
       // within each tier -- a re-run supersedes its ancestor.
@@ -533,9 +540,11 @@ export class GitHubVCSHost implements VCSHost {
           `/repos/${repoId}/actions/runs/${run.id}/jobs?per_page=100`,
         );
         // Only genuinely failed jobs carry diagnostic logs; higher job ids are the
-        // newer attempts/shards within the run.
+        // newer attempts/shards within the run. A job that timed out or was cancelled is
+        // red too (same convention rerunDeployment uses) and its log holds the evidence --
+        // for a timeout, the hung step is the ONLY place that evidence exists.
         const failingJobs = (jobsOnRun?.jobs ?? [])
-          .filter((j) => j.conclusion === 'failure')
+          .filter((j) => isFailedConclusion(j.conclusion))
           .sort((a, b) => b.id - a.id);
         targets.push(...failingJobs.slice(0, MAX_CHECK_LOG_JOBS - targets.length));
       }
@@ -617,6 +626,13 @@ function latestNamedRun(runs: GhCheckRun[], name: string): GhCheckRun | undefine
 const DEFAULT_CHECK_LOG_TAIL_LINES = 150;
 const MAX_CHECK_LOG_JOBS = 3;
 
+// One convention for "this workflow run / job went red", shared by rerunDeployment and
+// getCheckLogTail. A timed-out or cancelled job is an ordinary CI failure -- treating only
+// `failure` as red made a check that went red by timeout yield zero log evidence.
+function isFailedConclusion(conclusion: string | null | undefined): boolean {
+  return conclusion === 'failure' || conclusion === 'timed_out' || conclusion === 'cancelled';
+}
+
 // Line-level secret redaction for log text crossing the split plane. Conservative:
 // mask the VALUE, keep the surrounding structure, so the fixer still sees what ran.
 // Covers the common token shapes (GitHub/App PATs, AWS access keys, Slack tokens,
@@ -630,6 +646,12 @@ const SECRET_PATTERNS: [RegExp, string][] = [
   [/((?:password|secret|token|api[_-]?key)\s*[=:]\s*)("[^"]*"|\S+)/gi, '$1***'],
   // PEM private keys span lines; a leaked key block must never survive truncation to a prompt.
   [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '***private key***'],
+  // ...and the text handed here is itself already byte-capped upstream (requestText reads
+  // at most 512KB of a job log), so a key block can STRADDLE that cut: its BEGIN line is
+  // kept, its END delimiter was never read, and the pattern above -- which needs the closing
+  // delimiter -- would leave the key material in the clear. Every complete block is gone by
+  // now, so an opener with no closer means exactly that straddle: redact it to the end.
+  [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*$/g, '***private key***'],
   // JWTs (three base64url segments) carry embedded secrets and are high-entropy enough to spot.
   [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, '***'],
 ];

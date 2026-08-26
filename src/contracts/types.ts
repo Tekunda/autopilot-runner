@@ -427,6 +427,13 @@ export interface SubtaskState {
   // subtask's build PR head (Track F's bounded self-heal, distinct from conflictFixAttempts
   // so a conflicted-then-red PR gets its full budget of each).
   ciFixAttempts?: number;
+  // Consecutive ticks the customer-check READ itself threw (listChecks errored) while
+  // gating this subtask's merge. Distinct from reviewAttempts, which a healthy-but-slow
+  // customer check must never spend: a read that keeps throwing (the app lost access to
+  // the repo, the branch is gone, GitHub is down on that endpoint) is stuck forever, not
+  // waiting, so it escalates on this own bounded budget. Cleared by a successful read that
+  // keeps holding the subtask (a green read merges it, so the count dies with the subtask).
+  checkReadFailures?: number;
   // Why this subtask was blocked, when it was: an exhausted build/fix loop, a
   // real merge conflict on its PR, or an error that isolated to it (never the
   // whole ticket). Carried so a human sees a concrete reason.
@@ -453,6 +460,13 @@ export interface ReviewLensResult {
 // its run finalizes, and `results` accumulates finalized lens outcomes until aggregation.
 export interface ReviewRoundState {
   sha: string;
+  // When this round was pinned, ISO-8601. Threaded into a later tick's dispatch of a lens the
+  // round still misses (DispatchStageOptions.adoptSince) so that dispatch adopts a reviewer run
+  // this round already started -- a handle that never persisted (a dispatch that threw after
+  // its siblings launched) is minutes old by then, far outside a same-instant floor, and would
+  // otherwise be duplicate-dispatched. A DISCARDED round's runs stay unadoptable: the round
+  // that replaces it carries a later startedAt. Absent on rounds persisted before this field.
+  startedAt?: string;
   pending: Partial<Record<ReviewLens, InFlightStage>>;
   results: Partial<Record<ReviewLens, ReviewLensResult>>;
   // Consecutive ticks this round failed a completion attempt -- every reviewer launch
@@ -460,8 +474,10 @@ export interface ReviewRoundState {
   // cover the lenses still missing. Bounds what would otherwise be a SILENT
   // reviewing-forever loop (allSettled swallows rejections; nothing else observes them):
   // at the cap the ticket blocks with the recorded evidence, mirroring rollupPendingTicks.
-  // A placeholder round ({pending:{}}) persists just this counter between failed START
-  // attempts; any successful start writes a fresh round without it, resetting the streak.
+  // A placeholder round ({pending:{},results:{}}) persists just this counter between failed
+  // START attempts -- an EMPTY pending alone does not mean "no round" (a fully collected
+  // round awaiting aggregation looks the same); any successful start writes a fresh round
+  // without this counter, resetting the streak.
   missingAttempts?: number;
 }
 

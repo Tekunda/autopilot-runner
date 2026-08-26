@@ -125,10 +125,12 @@ export interface RunActionDeps {
   now?: Date;
 }
 
-// One consume ledger per runner process (Track G replay guard): each Actions step
+// One consume ledger per runner process (Track G replay DETECTION): each Actions step
 // process executes one grant's phase, so a second finalize of the same issued grant
-// within this process is a replay and is flagged by the ledger. Cross-process replays
-// are NOT caught here -- they need the control plane keying on the signed jti.
+// within this process is a replay and is flagged by the ledger. Cross-process replays --
+// the actual threat, a captured grant re-dispatched into a fresh job -- are NOT caught
+// here and are not refused anywhere: this ledger starts empty in every new process. See
+// the grant-ledger.ts header for the open boundary.
 const processGrantLedger = new GrantLedger();
 
 export type ActionResult =
