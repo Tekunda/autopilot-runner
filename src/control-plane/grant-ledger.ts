@@ -96,20 +96,6 @@ export class GrantLedger {
     return { fresh: false, id };
   }
 
-  /**
-   * Hard-fail variant for callers that must refuse work on an already-consumed grant.
-   * NOTHING IN PRODUCTION CALLS THIS -- only its unit test does. Its presence does not
-   * mean replays are refused anywhere; wiring it into either plane's current finalize
-   * path would still not prevent one (module header). Kept as the primitive the
-   * dispatch-time gate would use if that mechanism is built.
-   */
-  assertFresh(grant: ExecutionGrant, context?: string): void {
-    const id = grantLedgerId(grant);
-    if (this.#consumed.has(id)) {
-      throw new Error(`grant-ledger: grant ${id} was already consumed${context ? ` (${context})` : ''}`);
-    }
-  }
-
   /** Every stored record, oldest first — the exact form persistence round-trips. */
   entries(): [string, GrantLedgerRecord][] {
     return [...this.#consumed];

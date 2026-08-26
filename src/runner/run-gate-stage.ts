@@ -20,7 +20,12 @@ import { digestFor, grantId, rejectedTelemetry } from './prepare-stage.ts';
 // Runner-side PR targeting for the gate run: which PR/diff to run the
 // entitled gates against. Unlike `gateSpecs`, this is routing data, not
 // authorization, so it never needs to be signed -- same as the CIRunner
-// dispatch target not being part of the grant either.
+// dispatch target not being part of the grant either. It IS bound to the
+// grant at the one point where the grant makes a checkable claim about it:
+// `prNumber` must match the PR the signed `ref` names (see grantPRNumber).
+// `branch`/`baseRef`/`changedFiles` stay unbound -- the grant asserts nothing
+// about them, and mismatching them needs Actions-write on the customer's own
+// repo, which already outranks anything a gate report can do.
 export interface GateTarget {
   prNumber: number;
   branch: string;
@@ -60,6 +65,20 @@ function isGenericSpec(spec: GateSpec): spec is Extract<GateSpec, { kind: 'gener
   return spec.kind === 'generic';
 }
 
+// A gate grant's signed `ref` IS the PR under gate (control-plane/subtask-pipeline.ts issues
+// `ref: prUrl`, and the dispatcher derives the whole GateTarget from it -- adapters/
+// github-actions/ci-runner.ts gateTarget). So the unsigned `gate-target` workflow input has
+// exactly one claim on the grant to answer to: point at the same PR. Refuse otherwise, rather
+// than gate one PR's diff and report the verdict against another's grant. Deliberately narrow:
+// the pattern is the same `/pull/<n>` shape the control plane parses, and a grant whose ref
+// names no PR makes no claim to check.
+// (Rejecting here, not in verifyGrant: the target is runner-side input the signature never
+// covers -- this is the seam where the two meet.)
+function grantPRNumber(grant: ExecutionGrant): number | undefined {
+  const match = grant.ref ? /\/pull\/(\d+)/.exec(grant.ref) : null;
+  return match ? Number(match[1]) : undefined;
+}
+
 // Verify the grant, run exactly the gates named by its signed `gateSpecs`, and report the
 // resulting checks as StatusTelemetry -- only results/checks cross back, never source or
 // diffs (AGENTS.md, "split plane").
@@ -70,6 +89,14 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
   }
   if (grant.stage !== 'gate') {
     return rejectedTelemetry(grant, `runGateStage called with a "${grant.stage}" grant, expected "gate"`);
+  }
+
+  const claimedPR = grantPRNumber(grant);
+  if (claimedPR !== undefined && claimedPR !== deps.target.prNumber) {
+    return rejectedTelemetry(
+      grant,
+      `gate target PR #${deps.target.prNumber} does not match the grant's PR #${claimedPR}`,
+    );
   }
 
   const specs = grant.gateSpecs ?? [];
