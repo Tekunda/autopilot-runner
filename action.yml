@@ -151,6 +151,11 @@ runs:
         # instead of the minimal {is_error, duration_ms, ...} summary, so a failure's actual
         # reason (rate/usage limit vs. a real error) is visible in the log.
         show_full_output: ${{ steps.prepare.outputs.show-full-output || 'false' }}
+        # The grant's signed Claude Code plugin access (server-resolved from the tenant's
+        # config): marketplace git URLs to register and `pluginName@marketplaceName` plugins to
+        # install, newline-separated. Empty when the tenant configured none.
+        plugin_marketplaces: ${{ steps.prepare.outputs.plugin-marketplaces || '' }}
+        plugins: ${{ steps.prepare.outputs.plugins || '' }}
 
     - name: Run with codex-action
       id: codex

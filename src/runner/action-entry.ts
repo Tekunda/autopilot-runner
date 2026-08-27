@@ -227,6 +227,11 @@ export function reportResult(result: ActionResult, writeOutput: OutputWriter = d
     // for every agent stage kind; absent when the grant authorized no MCP.
     if (result.prepared.mcpConfigPath) writeOutput('mcp-config-path', result.prepared.mcpConfigPath);
     if (result.prepared.mcpAllowedTools?.length) writeOutput('mcp-allowed-tools', result.prepared.mcpAllowedTools.join(','));
+    // The grant's signed Claude Code plugin access: the marketplace URLs and plugin refs
+    // action.yml passes as claude-code-action's `plugin_marketplaces`/`plugins` inputs
+    // (newline-separated). Emitted for every agent stage kind; absent when unconfigured.
+    if (result.prepared.pluginMarketplaces?.length) writeOutput('plugin-marketplaces', result.prepared.pluginMarketplaces.join('\n'));
+    if (result.prepared.plugins?.length) writeOutput('plugins', result.prepared.plugins.join('\n'));
     // The grant's signed debug.showFullOutput toggle: tells action.yml to pass
     // claude-code-action's own `show_full_output` input. Emitted only when true --
     // claude-code-action already defaults it to 'false'.

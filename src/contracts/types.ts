@@ -100,6 +100,15 @@ export interface McpGrant {
   allowedTools: string[];
 }
 
+// The Claude Code plugin access a grant authorizes: the marketplace git URLs to register plus
+// the `pluginName@marketplaceName` plugins to install. Both are resolved SERVER-SIDE from the
+// tenant's config (never from ticket/tracker input), like mcp and gateSpecs. Unlike mcp these
+// flow to claude-code-action as action INPUTS (plugin_marketplaces / plugins), not a temp file.
+export interface PluginGrant {
+  marketplaces: string[];
+  plugins: string[];
+}
+
 export interface CheckResult {
   name: string;
   status: CheckStatus;
@@ -185,6 +194,11 @@ export type ExecutionGrant = {
   // ticket/tracker input). Part of the signed payload like every other field;
   // `authEnvVar` carries a NAME not a value, so no secret ever crosses the split plane.
   mcp?: McpGrant;
+  // The per-tenant Claude Code plugin access every agent stage runs with -- resolved
+  // server-side from the tenant's config (never from ticket/tracker input). Part of the
+  // signed payload like every other field; the runner passes it as claude-code-action's
+  // `plugin_marketplaces`/`plugins` inputs so the tenant's build runner installs them.
+  plugins?: PluginGrant;
   // Server-side resolved from the tenant's debug.showFullOutput config (never from ticket/
   // tracker input, like every other field here): tells the runner to pass claude-code-action's
   // own `show_full_output` input, revealing the raw SDK output instead of the minimal result
@@ -659,6 +673,11 @@ export interface TicketState {
   // compare against the new plan -- which doesn't exist yet at that point. Cleared by
   // reconcileReplanLeftovers once a plan lands.
   pendingReplanSubtasks?: ReplanLeftover[];
+  // Findings already published to the promotion PR (findingKey values). The repair loop
+  // re-reports whatever a round still finds, so without this every surviving finding is
+  // posted again each round and a three-repair ticket carries three copies of the same
+  // comment. Plan-scoped like the other review state: cleared by a replan.
+  postedFindingKeys?: string[];
 }
 
 // The ticketId prefix for an external-PR pseudo-ticket (see TicketState.externalPr). Such

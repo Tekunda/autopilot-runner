@@ -63,9 +63,9 @@ export const DEFAULT_BASE_REF = 'main';
 // raw SDK output for this run instead of the minimal result summary. Absent/false by default.
 export type PreparedStage =
   | { kind: 'resolved'; telemetry: StatusTelemetry }
-  | { kind: 'judgment'; repoId: string; baseRef: string; prompt: string; model?: string; effort?: string; mcpConfigPath?: string; mcpAllowedTools?: string[]; debugFullOutput?: true }
-  | { kind: 'architect'; repoId: string; baseRef: string; prompt: string; model?: string; effort?: string; mcpConfigPath?: string; mcpAllowedTools?: string[]; debugFullOutput?: true }
-  | { kind: 'coding'; repoId: string; baseRef: string; branchName: string; prompt: string; model?: string; effort?: string; mcpConfigPath?: string; mcpAllowedTools?: string[]; debugFullOutput?: true };
+  | { kind: 'judgment'; repoId: string; baseRef: string; prompt: string; model?: string; effort?: string; mcpConfigPath?: string; mcpAllowedTools?: string[]; pluginMarketplaces?: string[]; plugins?: string[]; debugFullOutput?: true }
+  | { kind: 'architect'; repoId: string; baseRef: string; prompt: string; model?: string; effort?: string; mcpConfigPath?: string; mcpAllowedTools?: string[]; pluginMarketplaces?: string[]; plugins?: string[]; debugFullOutput?: true }
+  | { kind: 'coding'; repoId: string; baseRef: string; branchName: string; prompt: string; model?: string; effort?: string; mcpConfigPath?: string; mcpAllowedTools?: string[]; pluginMarketplaces?: string[]; plugins?: string[]; debugFullOutput?: true };
 
 // A grant carries no id of its own -- its signature already uniquely
 // fingerprints the issued grant, so hash it into a stable telemetry id.
@@ -181,6 +181,13 @@ export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps
     return { mcpConfigPath: path, mcpAllowedTools: allowedTools };
   })();
 
+  // The grant's signed plugin access, carried straight through to the vendor step: unlike mcp
+  // there's no file to write -- the marketplace URLs and plugin refs become claude-code-action's
+  // `plugin_marketplaces`/`plugins` action inputs. Every agent stage kind gets this spread.
+  const pluginFields = grant.plugins
+    ? { pluginMarketplaces: grant.plugins.marketplaces, plugins: grant.plugins.plugins }
+    : {};
+
   // The architect, accept, and lensed-review stages share one execution shape -- read-only
   // repo plus a single Write to the artifact file (plan.json), no branch and no PR. action.yml
   // gives the vendor step Write access (and uploads the artifact) on this kind, then finalize
@@ -202,6 +209,7 @@ export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps
       ...(model ? { model } : {}),
       effort,
       ...mcpFields,
+      ...pluginFields,
       ...debugFields,
     };
   }
@@ -225,6 +233,7 @@ export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps
       ...(model ? { model } : {}),
       effort,
       ...mcpFields,
+      ...pluginFields,
       ...debugFields,
     };
   }
@@ -237,6 +246,7 @@ export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps
     ...(model ? { model } : {}),
     effort,
     ...mcpFields,
+    ...pluginFields,
     ...debugFields,
   };
 }
