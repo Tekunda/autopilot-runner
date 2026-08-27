@@ -36,6 +36,12 @@ export interface TaskBackend {
   get(ticketId: string): Promise<TicketState>;
   setStatus(ticketId: string, status: TicketStatus): Promise<void>;
   comment(ticketId: string, body: string): Promise<void>;
+  // Stamp a ticket/subtask's pull-request URL onto the tracker as structured data (e.g. Notion's
+  // "Pull Request" URL property), so the board surfaces the PR without reading comments. Called
+  // idempotently by the reconciler each tick; implementations MUST no-op when the value already
+  // matches (avoid edit-churn) and when there's no configured property/resolvable page. Optional:
+  // backends without a PR field (or where the host IS the PR, e.g. GitHub issues) don't implement it.
+  setPullRequestUrl?(ticketId: string, url: string): Promise<void>;
   readReplies(ticketId: string): Promise<TaskReply[]>;
   // Returns the tracker's own id for each subtask page/issue it created or adopted, so the
   // caller can record it durably (SubtaskState.externalId) and re-bind after a restart --
