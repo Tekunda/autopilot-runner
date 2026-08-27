@@ -272,6 +272,14 @@ export interface CIRunner {
   // (within the stage timeout), or `outcome:'error'` once the timeout (anchored on the run's
   // created_at, carried in `inFlight`) has passed without completion -- so a hung run escalates.
   checkStage?(grant: ExecutionGrant, inFlight: InFlightStage): Promise<StageResult>;
+  // Stop a dispatched run the control plane has decided to ABANDON -- the branch it was
+  // judging moved, or a replan discarded the plan it belonged to. Without this the run keeps
+  // going to completion: it holds one of the tenant's concurrent AI runs, spends the model
+  // budget on a revision nobody will act on, and reports a verdict for a tree that no longer
+  // exists, which is how a manual push mid-review ends up with two rounds racing. Optional
+  // and best-effort -- a runner that cannot cancel simply lets the run finish, today's
+  // behaviour. Never throws: abandoning is already the recovery path.
+  cancelStage?(repoId: string, inFlight: InFlightStage): Promise<void>;
 }
 
 // The pluggable coding-agent seam the thin runner drives for coding stages
