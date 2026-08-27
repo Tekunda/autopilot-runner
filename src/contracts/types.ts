@@ -61,6 +61,12 @@ export interface GatePolicy {
   // tenant that reviews in the tracker should not suddenly find the bot commenting on its
   // pull requests.
   publishReviewFindingsToPr?: boolean;
+  // When the bounded repair loop is spent, REPLAN instead of blocking for a human: discard
+  // the recorded plan and re-architect with every finding forwarded into the ticket, so the
+  // gaps come back as properly scoped subtasks with their own budgets instead of one repair
+  // stage being asked to close all of them at once. Optional; defaults to FALSE -- replanning
+  // is destructive (it discards a plan) and a tenant should choose it deliberately.
+  autoReplanOnExhaustedRepairs?: boolean;
 }
 
 // A `gate` stage's entitled gates, delivered JIT inside the signed grant so the runner
@@ -678,6 +684,11 @@ export interface TicketState {
   // posted again each round and a three-repair ticket carries three copies of the same
   // comment. Plan-scoped like the other review state: cleared by a replan.
   postedFindingKeys?: string[];
+  // How many times the repair loop has been auto-replanned (see
+  // gates.autoReplanOnExhaustedRepairs). Deliberately NOT reset by freshRestart: it is the
+  // loop guard, and a counter the replan clears would let a ticket replan forever, each round
+  // costing a full architect run plus a rebuild of every subtask.
+  autoReplans?: number;
 }
 
 // The ticketId prefix for an external-PR pseudo-ticket (see TicketState.externalPr). Such
