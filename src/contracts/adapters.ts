@@ -37,7 +37,20 @@ export interface TaskBackend {
   setStatus(ticketId: string, status: TicketStatus): Promise<void>;
   comment(ticketId: string, body: string): Promise<void>;
   readReplies(ticketId: string): Promise<TaskReply[]>;
-  createSubtasks(ticketId: string, subtasks: { id: string; title: string; body?: string }[]): Promise<void>;
+  // Returns the tracker's own id for each subtask page/issue it created or adopted, so the
+  // caller can record it durably (SubtaskState.externalId) and re-bind after a restart --
+  // see bindSubtaskPages. Returning nothing is allowed and means "no stable id to offer".
+  createSubtasks(
+    ticketId: string,
+    subtasks: { id: string; title: string; body?: string }[],
+  ): Promise<{ id: string; externalId: string }[] | void>;
+  // Re-establish the control-plane-id -> tracker-page mapping from the caller's durable
+  // state. A backend that resolves synthetic subtask ids through an in-memory map built at
+  // createSubtasks time loses it on restart, and rebuilding it by guesswork (relation order)
+  // mislabels children once a replan has left more than one plan's worth of them behind.
+  // Called each drive tick with whatever the store recorded; cheap and idempotent. Optional:
+  // backends whose subtask ids are already the tracker's own ids don't need it.
+  bindSubtaskPages?(bindings: { id: string; externalId: string }[]): void;
   linkBlockedBy(ticketId: string, blockingTicketId: string): Promise<void>;
   // Idempotently RE-assert a blocked-by dependency, safe to call every drive tick. Optional and
   // implemented ONLY by backends whose blocked-by write is idempotent + needs deferral -- Notion,

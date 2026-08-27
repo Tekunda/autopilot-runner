@@ -431,6 +431,14 @@ export interface SubtaskState {
   // has produced one.
   prUrl?: string;
   branch?: string;
+  // The tracker's OWN id for this subtask's page/issue, recorded when the plan was
+  // persisted. The control-plane id (`<parent>.<n>`) is a plan POSITION, not an identity: a
+  // replan mints the same ids for different work, and a tracker whose children accumulate
+  // across plans (Notion's child relation) cannot resolve one back to a page without help.
+  // This is that help, and it belongs in OUR durable state rather than in a property on the
+  // customer's database -- the fact is ours. Absent for plans persisted before this existed
+  // and for backends that don't expose a page id; resolution then falls back as before.
+  externalId?: string;
   // The branch this subtask must keep building on, overriding the title-derived name.
   // Set only when replan reconciliation matched this subtask to a RENAMED predecessor's
   // branch (see ExecutionGrant.buildBranch). Sticky for the subtask's life: dropping it
