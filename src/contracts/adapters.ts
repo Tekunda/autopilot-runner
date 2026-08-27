@@ -179,6 +179,18 @@ export interface VCSHost {
   // a review summary with no inline comments has no thread to resolve, so a reply is the only
   // acknowledgement. Best-effort.
   replyToPr(repoId: string, prNumber: number, body: string): Promise<void>;
+  // Publish a REVIEW on a PR: a summary body plus per-file inline comments. This is the
+  // emitting half of the feedback loop the pipeline already consumes -- listPrFeedback reads
+  // other people's reviews and dispatches fixes for them, but Autopilot's own findings had
+  // nowhere to go except the tracker and a check summary, so a maintainer never saw them
+  // against the code. Comments whose anchor no longer exists in the diff are rejected by the
+  // host, so callers should treat a failure as best-effort and keep the summary body
+  // authoritative. Optional: a host without PR reviews simply never gets them.
+  createReview?(
+    repoId: string,
+    prNumber: number,
+    review: { body: string; comments?: { path: string; line: number; body: string }[] },
+  ): Promise<void>;
   // The TAIL of a FAILED CI check's log -- the diagnostic evidence a fixer needs when
   // name/conclusion alone rarely say what broke (Track F red-check self-heal).
   // Split-plane contract: log TEXT is diagnostic evidence, not source code and not a diff,

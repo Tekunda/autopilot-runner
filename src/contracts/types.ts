@@ -55,6 +55,12 @@ export interface GatePolicy {
   // Finding severities that fail the review round (and trigger the bounded repair loop).
   // Case-insensitive match against each finding's severity text. Defaults to ['blocker'].
   reviewBlockingSeverities?: string[];
+  // Publish the review round's findings onto the ticket's promotion PR as a real PR review,
+  // inline on the file/line each finding names. Per-tenant like every other gate field.
+  // Optional; defaults to FALSE -- it writes into the customer's PR conversation, and a
+  // tenant that reviews in the tracker should not suddenly find the bot commenting on its
+  // pull requests.
+  publishReviewFindingsToPr?: boolean;
 }
 
 // A `gate` stage's entitled gates, delivered JIT inside the signed grant so the runner
