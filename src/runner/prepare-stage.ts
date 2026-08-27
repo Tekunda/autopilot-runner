@@ -83,7 +83,12 @@ export function digestFor(...parts: string[]): string {
 // `autopilot/<slug>-build-<newhash>` orphan behind on each attempt -- the accumulation
 // the 2026-08-19 review found on the customer repo (three orphan build branches and a
 // duplicate build PR for one ticket).
-function subtaskBranchKey(grant: ExecutionGrant): string {
+// The identity a build branch is keyed on. Deliberately NOT the grant and NOT the title:
+// only (tenant, repo, subtask, stage). A replan reuses positional subtask ids, so a
+// replanned subtask lands on this same key -- which is what lets the control plane
+// recognize an old plan's branch as the new plan's own (control-plane.ts, replan
+// reconciliation) instead of orphaning it.
+function subtaskBranchKey(grant: BranchIdentity): string {
   return createHash('sha256')
     .update([grant.tenantId, grant.repoId, grant.ticketId, grant.stage].join('/'))
     .digest('hex');
@@ -97,7 +102,13 @@ function subtaskBranchKey(grant: ExecutionGrant): string {
 // (issue #113). Prefers a readable slug of the ticket title over the opaque ticket
 // UUID, with a short hash of the subtask's identity as a collision-proof suffix (two
 // tickets can share a title).
-export function codingBranchName(grant: ExecutionGrant): string {
+// The fields codingBranchName actually reads. Narrower than ExecutionGrant so a caller that
+// has no signed grant in hand (the control plane, deriving where a not-yet-built subtask
+// WILL be built) can compute the same name without forging one. Real grants satisfy it.
+export type BranchIdentity = Pick<ExecutionGrant, 'tenantId' | 'repoId' | 'ticketId' | 'stage'> &
+  Partial<Pick<ExecutionGrant, 'ticketTitle' | 'baseBranch' | 'buildBranch'>>;
+
+export function codingBranchName(grant: BranchIdentity): string {
   // A `fix` stage self-heals the PR already under test: it pushes its changes
   // onto that PR's existing head branch (carried as the grant's baseBranch by
   // the subtask pipeline) so the re-gate re-checks the same PR, rather than
@@ -105,8 +116,21 @@ export function codingBranchName(grant: ExecutionGrant): string {
   // nowhere would exhaust the loop despite the agent doing real work). A
   // `build` stage always gets a fresh, per-grant branch to open its PR from.
   if (grant.stage === 'fix' && grant.baseBranch) return grant.baseBranch;
+  // A build whose subtask was RENAMED by a replan continues its predecessor's branch (the
+  // subtask identity below is unchanged by a rename, but the readable prefix isn't -- see
+  // ExecutionGrant.buildBranch). Without this the rebuild pushes to the new name and the
+  // work on the old one is orphaned despite being provably the same subtask's.
+  if (grant.stage === 'build' && grant.buildBranch) return grant.buildBranch;
   const label = slugify(grant.ticketTitle ?? '') || slugify(grant.ticketId) || 'ticket';
   return `autopilot/${label}-${grant.stage}-${subtaskBranchKey(grant).slice(0, 8)}`;
+}
+
+// The identity half of a build branch produced by codingBranchName: the trailing hash of
+// (tenant, repo, subtask id, stage). Everything before it is a readable title slug that a
+// replan's rename moves; this part does not. Comparing two branches by it answers "same
+// subtask?" independently of what the plan chose to call it.
+export function branchIdentitySuffix(branch: string): string {
+  return branch.slice(branch.lastIndexOf('-') + 1);
 }
 
 export function rejectedTelemetry(grant: ExecutionGrant, reason: string | undefined): StatusTelemetry {

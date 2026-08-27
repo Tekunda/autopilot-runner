@@ -147,6 +147,15 @@ export type ExecutionGrant = {
   // and PRs after it (a slug of this + a short id) instead of an opaque ticket
   // UUID. Metadata only (already present in the stepPrompt); never a secret.
   ticketTitle?: string;
+  // An EXPLICIT build branch, overriding the name codingBranchName would derive from the
+  // title. Set only by replan reconciliation: a replan that RENAMES a subtask keeps its
+  // identity (the branch hash is keyed on tenant/repo/subtask id/stage -- the title is only
+  // the readable prefix), so the old branch provably holds this same subtask's prior work,
+  // but the derived name has moved and the runner would push somewhere else and orphan it.
+  // Carrying the old name here makes the rebuild continue that branch, so the existing
+  // findOpenPR idempotency adopts its open PR. Signed like every other field, so a tampered
+  // branch fails verifyGrant -- it can never redirect a push on its own.
+  buildBranch?: string;
   // A short, high-entropy label for this grant's ticket (the uuid's last segment plus
   // any `.N` subtask suffix), computed server-side at issuance (grant.ts). The runner
   // names its workflow run "Autopilot <stage> <shortId>: <title>" from it, and the
@@ -391,6 +400,14 @@ export interface InFlightStage {
   origin?: 'conflict' | 'feedback' | 'qa';
 }
 
+// What a replan preserves about an old subtask it discarded, until the NEW plan exists and
+// can be compared against it. Only what reconciliation needs: the tracker id (does the new
+// plan still use this child page?) and the build branch (does the new plan reclaim it?).
+export interface ReplanLeftover {
+  id: string;
+  branch?: string;
+}
+
 export interface SubtaskState {
   id: string;
   title?: string;
@@ -414,6 +431,12 @@ export interface SubtaskState {
   // has produced one.
   prUrl?: string;
   branch?: string;
+  // The branch this subtask must keep building on, overriding the title-derived name.
+  // Set only when replan reconciliation matched this subtask to a RENAMED predecessor's
+  // branch (see ExecutionGrant.buildBranch). Sticky for the subtask's life: dropping it
+  // after one build would send the next tick back to the derived name and orphan the work
+  // all over again. Absent -> the derived name, i.e. every subtask that was never renamed.
+  adoptBranch?: string;
   // Consecutive failed build (coding) attempts for this subtask. The pipeline
   // re-drives the build while this is under `fix.maxBuildRetries` before
   // blocking the subtask for a human. Reset once a build produces a PR.
@@ -615,6 +638,13 @@ export interface TicketState {
   // Absent whenever no round is running -- between rounds (e.g. while a repair build is
   // in flight) and once the aggregate passes.
   reviewRound?: ReviewRoundState;
+  // Old subtasks a REPLAN discarded, held until the replacement plan exists. freshRestart
+  // wipes `subtasks`, so without this the branches/PRs/child pages that plan left behind
+  // have no record and orphan forever. Cleanup is DEFERRED rather than done at replan time
+  // because the only sound way to tell a leftover from work the new plan reclaims is to
+  // compare against the new plan -- which doesn't exist yet at that point. Cleared by
+  // reconcileReplanLeftovers once a plan lands.
+  pendingReplanSubtasks?: ReplanLeftover[];
 }
 
 // The ticketId prefix for an external-PR pseudo-ticket (see TicketState.externalPr). Such

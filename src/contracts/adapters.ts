@@ -75,6 +75,12 @@ export interface TaskBackend {
   // it to the tenant-configured merged status (e.g. a "test" column), instead of leaving it in
   // review. A one-way cosmetic write; no-op when the tenant hasn't configured it. Optional.
   notifyMergedToBase?(ticketId: string): Promise<void>;
+  // Retire a subtask's tracker page/issue outright, for a subtask a REPLAN discarded: its
+  // scope is gone from the new plan, so leaving the page linked to the parent hands the
+  // architect (and a human) a child that no longer describes any work. Recoverable, never a
+  // hard delete -- Notion archives to trash. Optional: backends without a delete simply
+  // leave the page behind. Reporting, not control flow; a failure never fails the replan.
+  deleteSubtask?(ticketId: string): Promise<void>;
 }
 
 export interface VCSHost {
