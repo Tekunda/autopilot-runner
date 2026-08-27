@@ -12,6 +12,7 @@ import type {
   ExecutorResult,
   PRStatus,
   Snippet,
+  Stage,
   InFlightStage,
   ArchitectReview,
   StageResult,
@@ -297,7 +298,15 @@ export interface CIRunner {
   // exists, which is how a manual push mid-review ends up with two rounds racing. Optional
   // and best-effort -- a runner that cannot cancel simply lets the run finish, today's
   // behaviour. Never throws: abandoning is already the recovery path.
-  cancelStage?(repoId: string, inFlight: InFlightStage): Promise<void>;
+  // Resolves TRUE only when the host accepted the cancellation. A marker that was never
+  // correlated to a run id has nothing to cancel and resolves false -- the caller can then
+  // fall back to cancelStagesFor, which does not need one.
+  cancelStage?(repoId: string, inFlight: InFlightStage): Promise<boolean>;
+  // Cancel every in-flight run of `stage` belonging to `shortId`, matched on the run NAME
+  // rather than a recorded run id. A round discarded seconds after dispatch has markers whose
+  // run ids were never correlated, so id-based cancellation silently does nothing there --
+  // which is exactly when a superseded round is most likely to still be running. Optional.
+  cancelStagesFor?(repoId: string, opts: { stage: Stage; shortId: string }): Promise<number>;
 }
 
 // The pluggable coding-agent seam the thin runner drives for coding stages
