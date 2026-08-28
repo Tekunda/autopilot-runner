@@ -56,6 +56,23 @@ export interface RunGateStageDeps {
    * so the overlay wins over any baseUrl a signed spec happened to carry.
    */
   configOverlay?: Record<string, Record<string, unknown>>;
+  /**
+   * Runner-side (unsigned) restriction: run ONLY the signed gate specs whose id is in this set,
+   * and report ONLY their results. It can only NARROW the signed `gateSpecs` (a filter), never
+   * add a gate, so it needs no signature. The heavy stage uses it to run the deterministic gates
+   * ONCE and the URL-bound gates ONCE PER SITE from the same signed grant, without the per-call
+   * `skip` results of the gates it isn't running colliding across calls. Absent -> every signed
+   * spec runs and every result is reported, exactly as before.
+   */
+  onlyGateIds?: ReadonlySet<string>;
+  /**
+   * Appended to each reported check's `name` (e.g. ` (tekunda)`), so a per-site heavy run
+   * publishes disambiguated `seo-site-crawl (tekunda)` / `(serpent)` checks -- the matrix-variant
+   * shape Track F's required-check matcher (customer-checks.ts matchesRequired) already accepts.
+   * Presentation only: the gate's own id, config and blocking verdict are unchanged. Absent ->
+   * the bare gate id is the check name.
+   */
+  checkNameSuffix?: string;
   /** Public key used to verify the grant's signature. */
   verifyKey: KeyInput;
   /** Clock override for tests; defaults to the current time. */
@@ -72,9 +89,9 @@ function toCheckStatus(status: GateResult['status']): CheckStatus {
   return 'pass';
 }
 
-function toChecks(results: GateResult[]): CheckResult[] {
+function toChecks(results: GateResult[], nameSuffix = ''): CheckResult[] {
   return results.map((result) => ({
-    name: result.id,
+    name: `${result.id}${nameSuffix}`,
     status: toCheckStatus(result.status),
     ...(result.findings?.length ? { findings: result.findings } : {}),
     ...(result.detailsUrl ? { detailsUrl: result.detailsUrl } : {}),
@@ -167,16 +184,28 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
   // arrive as signed `{kind:'command'}` specs. Build a createCommandGate instance for each
   // and register it (dynamically named) so the registry runs it exactly like a generic gate,
   // scoped to the PR checkout.
+  // Guard against a duplicate register: the heavy stage calls runGateStage more than once with
+  // the SAME registry (deterministic gates once, URL-bound gates once per site), so a command
+  // gate already built on a prior call must not be re-registered (GateRegistry.register throws).
   for (const spec of commandSpecs) {
+    if (deps.registry.get(spec.id)) continue;
     deps.registry.register(
       createCommandGate({ name: spec.id, run: spec.run, ...(spec.blocking !== undefined ? { blocking: spec.blocking } : {}) }, workspaceRoot),
     );
   }
 
-  const enabledIds = [...genericSpecs.map((spec) => spec.id), ...commandSpecs.map((spec) => spec.id)];
+  // `onlyGateIds` narrows the signed set to the gates THIS call runs (the heavy stage's per-site
+  // split). It never widens: an id absent from the signed specs still can't run.
+  const runnable = (id: string): boolean => !deps.onlyGateIds || deps.onlyGateIds.has(id);
+  const enabledIds = [...genericSpecs.map((spec) => spec.id), ...commandSpecs.map((spec) => spec.id)].filter(runnable);
   const genericReport = await deps.registry.run(enabledIds, ctx);
 
-  const results = genericReport.results;
+  // When `onlyGateIds` restricts the call, drop the `skip` results the registry emits for every
+  // OTHER registered gate -- otherwise each per-site call would republish the deterministic gates'
+  // checks (and the sites' checks would collide across calls). Absent -> report every result.
+  const results = deps.onlyGateIds
+    ? genericReport.results.filter((result) => deps.onlyGateIds!.has(result.id))
+    : genericReport.results;
   // Report-only generic gates (`blocking:false`, from PackConfig.gateConfig[id]) still publish
   // their per-gate check (toChecks below is unchanged), but their `fail` is excluded from the
   // stage's blocking verdict -- advisory, not merge-blocking. Command gates already degrade
@@ -200,7 +229,7 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
   return {
     grantId: grantId(grant),
     result: ok ? 'pass' : 'fail',
-    checks: toChecks(results),
+    checks: toChecks(results, deps.checkNameSuffix),
     logDigest: digestFor(grant.repoId, grant.ticketId, grant.stage, String(specs.length)),
   };
 }

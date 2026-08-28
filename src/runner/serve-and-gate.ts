@@ -19,18 +19,19 @@
 
 import { spawn as nodeSpawn } from 'node:child_process';
 
-import type { ExecutionGrant, ServeConfig, StatusTelemetry } from '../contracts/types.ts';
+import type { CheckResult, ExecutionGrant, ServeConfig, SiteConfig, StatusTelemetry } from '../contracts/types.ts';
 import type { ExecutorCredential } from '../gates/visual/judge.ts';
 import { verifyGrant } from '../control-plane/grant-verify.ts';
 import { runCommand as defaultRunCommand } from '../gates/exec.ts';
 import { registerHeavyGatesForSpecs } from './gate-registry.ts';
-import { rejectedTelemetry } from './prepare-stage.ts';
+import { digestFor, grantId, rejectedTelemetry } from './prepare-stage.ts';
 import { runGateStage, type RunGateStageDeps } from './run-gate-stage.ts';
 
-// The serve recipe (install/build/start/baseUrl) is a signed grant field -- see ServeConfig and
-// ExecutionGrant.serve in ../contracts/types.ts. Re-exported here for the modules and tests that
-// already reach for it through this heavy-stage entry point.
-export type { ServeConfig };
+// The serve recipe (install/build/start/baseUrl) and the multi-site recipe are signed grant
+// fields -- see ServeConfig / SiteConfig and ExecutionGrant.serve / .sites in
+// ../contracts/types.ts. Re-exported here for the modules and tests that already reach for them
+// through this heavy-stage entry point.
+export type { ServeConfig, SiteConfig };
 
 // A brought-up server. stop() must always be called (a finally) so the runner never leaks a
 // server process into later steps.
@@ -146,7 +147,7 @@ export async function serveSite(config: ServeConfig, deps: ServeSiteDeps): Promi
 
 // Gate ids whose runtime baseUrl is the served instance this stage just brought up. The overlay
 // wins over any baseUrl in the signed/target config (see run-gate-stage.ts configOverlay).
-export const URL_BOUND_HEAVY_GATE_IDS = ['seo-site-crawl', 'visual-qa'] as const;
+export const URL_BOUND_HEAVY_GATE_IDS = ['seo-site-crawl', 'visual-qa', 'e2e'] as const;
 
 export interface RunHeavyGateStageDeps extends RunGateStageDeps {
   // The serve recipe. Defaults to the grant's SIGNED `serve` field (never the unsigned target
@@ -154,6 +155,11 @@ export interface RunHeavyGateStageDeps extends RunGateStageDeps {
   // Absent on both -> the stage runs the gates WITHOUT bringing a server up (they skip cleanly
   // when they need a URL).
   serve?: ServeConfig;
+  // The MULTI-SITE recipe. Defaults to the grant's SIGNED `sites` field. When present (and
+  // non-empty) it TAKES PRECEDENCE over `serve`: the URL-bound gates run once per site, each
+  // against that site's own server, while the deterministic gates run once. Absent -> the
+  // single-`serve` path.
+  sites?: SiteConfig[];
   // Injected for tests; defaults to serveSite. Lets a test assert threading/teardown without a
   // real build+server.
   serveSiteImpl?: (config: ServeConfig, deps: ServeSiteDeps) => Promise<ServedSite>;
@@ -178,7 +184,6 @@ export async function runHeavyGateStage(grant: ExecutionGrant, deps: RunHeavyGat
   if (!verification.ok) {
     return rejectedTelemetry(grant, verification.reason);
   }
-  const serveConfig = deps.serve ?? grant.serve;
   const serveSiteImpl = deps.serveSiteImpl ?? serveSite;
 
   // Register the heavy-only gates (Visual-QA) for any id the grant names, so they resolve
@@ -188,6 +193,15 @@ export async function runHeavyGateStage(grant: ExecutionGrant, deps: RunHeavyGat
     .map((spec) => spec.id);
   registerHeavyGatesForSpecs(deps.registry, heavyIds);
 
+  // Multi-site takes precedence over `serve`: run the URL-bound gates once per site (each against
+  // its own server + per-site config) while the deterministic gates run once. Absent -> the
+  // single-`serve` path below, unchanged.
+  const sites = deps.sites ?? grant.sites;
+  if (sites && sites.length > 0) {
+    return runPerSiteHeavyGates(grant, sites, deps, workspaceRoot, serveSiteImpl);
+  }
+
+  const serveConfig = deps.serve ?? grant.serve;
   let served: ServedSite | undefined;
   try {
     let configOverlay: Record<string, Record<string, unknown>> | undefined;
@@ -210,4 +224,80 @@ export async function runHeavyGateStage(grant: ExecutionGrant, deps: RunHeavyGat
   } finally {
     if (served) await served.stop().catch(() => {});
   }
+}
+
+// The multi-site heavy run. The deterministic gates (and any command gates) run ONCE against the
+// PR checkout with no server; the URL-bound gates (seo-site-crawl, visual-qa) run ONCE PER SITE,
+// each against that site's freshly served instance, with its baseUrl + per-site gateConfig
+// overlaid and its checks named `<gate> (<site>)` so a legible per-site check lands. Every site
+// is served then torn down in its own try/finally, so one site's server never leaks into the
+// next. Results aggregate across all calls: a BLOCKING `fail` on ANY site fails the stage, while
+// a report-only gate's fail is published without blocking (each runGateStage call honours the
+// signed `blocking` flag). The loop is gate-agnostic, so an added URL-bound gate (e2e) reuses it.
+async function runPerSiteHeavyGates(
+  grant: ExecutionGrant,
+  sites: readonly SiteConfig[],
+  deps: RunHeavyGateStageDeps,
+  workspaceRoot: string,
+  serveSiteImpl: (config: ServeConfig, deps: ServeSiteDeps) => Promise<ServedSite>,
+): Promise<StatusTelemetry> {
+  const urlBound = new Set<string>(URL_BOUND_HEAVY_GATE_IDS);
+  const urlBoundIds = new Set(
+    (grant.gateSpecs ?? [])
+      .filter((spec): spec is Extract<typeof spec, { kind: 'generic' }> => spec.kind === 'generic')
+      .map((spec) => spec.id)
+      .filter((id) => urlBound.has(id)),
+  );
+  // Everything else the grant carries -- the deterministic generic gates AND the command gates --
+  // runs once, unsuffixed, without a server (a URL-bound gate is the only kind a per-site server
+  // changes). runGateStage re-derives command ids from the signed specs, so "rest" is just "not a
+  // URL-bound gate id".
+  const restIds = new Set((grant.gateSpecs ?? []).map((spec) => spec.id).filter((id) => !urlBound.has(id)));
+
+  const checks: CheckResult[] = [];
+  let ok = true;
+  const absorb = (telemetry: StatusTelemetry): void => {
+    checks.push(...telemetry.checks);
+    if (telemetry.result !== 'pass') ok = false;
+  };
+
+  if (restIds.size > 0) {
+    absorb(await runGateStage(grant, { ...deps, workspaceRoot, onlyGateIds: restIds }));
+  }
+
+  if (urlBoundIds.size > 0) {
+    for (const site of sites) {
+      let served: ServedSite | undefined;
+      try {
+        served = await serveSiteImpl(site.serve, { cwd: workspaceRoot, ...(deps.serveDeps ?? {}) });
+        const configOverlay: Record<string, Record<string, unknown>> = {};
+        for (const id of urlBoundIds) {
+          // Per-site gateConfig (routes/brands/budgets) first, the served baseUrl over it -- the
+          // baseUrl is the whole point of the served instance, so it always wins.
+          configOverlay[id] = { ...(site.gateConfig?.[id] ?? {}), baseUrl: served.baseUrl };
+        }
+        if (deps.executorCredential && urlBoundIds.has('visual-qa')) {
+          configOverlay['visual-qa'] = { ...configOverlay['visual-qa'], executorCredential: deps.executorCredential };
+        }
+        absorb(
+          await runGateStage(grant, {
+            ...deps,
+            workspaceRoot,
+            configOverlay,
+            onlyGateIds: urlBoundIds,
+            checkNameSuffix: ` (${site.name})`,
+          }),
+        );
+      } finally {
+        if (served) await served.stop().catch(() => {});
+      }
+    }
+  }
+
+  return {
+    grantId: grantId(grant),
+    result: ok ? 'pass' : 'fail',
+    checks,
+    logDigest: digestFor(grant.repoId, grant.ticketId, grant.stage, String((grant.gateSpecs ?? []).length)),
+  };
 }

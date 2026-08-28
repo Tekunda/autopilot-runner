@@ -148,6 +148,26 @@ export interface ServeConfig {
   readyIntervalMs?: number;
 }
 
+// One site of a MULTI-SITE tenant (e.g. Tekunda/Website serves both `tekunda` and `serpent`
+// from one repo): its own serve recipe and its own per-URL-bound-gate config, so each site is
+// brought up on its own server and crawled/screenshotted with its own routes/brand-lists. Rides
+// in the SIGNED grant (ExecutionGrant.sites) exactly like ServeConfig -- `serve.startCommand` is
+// a shell command, so it must be signed, never taken from the unsigned GateTarget. The heavy
+// gate stage (src/runner/serve-and-gate.ts) runs the URL-bound gates ONCE PER site, naming each
+// site's checks `<gate> (<name>)` so a fail on either site is legible and blocks. Absent (no
+// `sites`) -> the single-`serve` path is used unchanged.
+export interface SiteConfig {
+  // Disambiguates this site's per-gate checks (`seo-site-crawl (tekunda)`), so keep it short and
+  // stable -- it becomes part of the published check name Track F matches as a matrix variant.
+  name: string;
+  // How to bring THIS site up (install/build/start/baseUrl), same shape as the single-site path.
+  serve: ServeConfig;
+  // Per-site overrides for the URL-bound heavy gates (routes, brand lists, budgets), keyed by
+  // gate id, merged ON TOP of the signed base gateConfig at run time -- the site's baseUrl is
+  // added over it. Absent -> only the base config plus this site's baseUrl.
+  gateConfig?: Record<string, Record<string, unknown>>;
+}
+
 export interface CheckResult {
   name: string;
   status: CheckStatus;
@@ -245,6 +265,13 @@ export type ExecutionGrant = {
   // gates (seo-site-crawl, visual-qa) run. Absent -> the heavy stage skips serving and those
   // gates skip cleanly. NOT taken from the unsigned GateTarget.config.
   serve?: ServeConfig;
+  // A MULTI-SITE tenant's per-site serve+gate recipes, resolved server-side from PackConfig.sites
+  // at gate-grant issuance and signed like every other field (each site's `serve.startCommand` is
+  // a shell command). When present, the heavy stage (src/runner/serve-and-gate.ts) runs the
+  // URL-bound gates once per site instead of once for `serve`, naming each site's checks
+  // `<gate> (<name>)`. Absent -> the single-`serve` path runs unchanged. Takes precedence over
+  // `serve` when both are set.
+  sites?: SiteConfig[];
   // Server-side resolved from the tenant's debug.showFullOutput config (never from ticket/
   // tracker input, like every other field here): tells the runner to pass claude-code-action's
   // own `show_full_output` input, revealing the raw SDK output instead of the minimal result

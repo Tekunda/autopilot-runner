@@ -26,9 +26,7 @@
 // logic is unit-testable with fakes and never needs a real browser or API key in tests -- but the
 // DEFAULT judge does the real model call (judge.ts), never a stubbed pass.
 
-import path from 'node:path';
-
-import { isContentFile } from '../../packs/seo/content.ts';
+import { createContentReader, type ContentFormat } from '../../packs/seo/content.ts';
 import type { Gate, GateContext, GateResult } from '../types.ts';
 import { createPlaywrightBrowser, type ScreenshotBrowser } from './browser.ts';
 import { createAnthropicVisionJudge, type ExecutorCredential, type VisionJudge } from './judge.ts';
@@ -51,9 +49,14 @@ export interface VisualQaConfig {
   // falls back to ANTHROPIC_API_KEY, else fails closed (never a silent pass).
   executorCredential?: ExecutorCredential;
   // Directory (relative to the checkout root) whose files are renderable content pages, mirroring
-  // the SEO pack's convention. A changed `.md` file under it maps to the route it serves. Default
+  // the SEO pack's convention. A changed content file under it maps to the route it serves. Default
   // `content`.
   contentDir?: string;
+  // Content-tree format the file->route mapping uses: markdown pages ('md', default), Website JSON
+  // pages ('json', route taken from each page's `slug`), or a mix ('auto'). Mirrors the SEO pack.
+  contentFormat?: ContentFormat;
+  // Locale a JSON page is read from when deriving its route (json/auto only). Default 'en'.
+  baseLocale?: string;
   // Substrings that mark a changed file as a SHARED/global asset (a global layout, CSS, a
   // widely-used component) -- a change to one can break every page, so it maps to the
   // representative route sample rather than a single page. Matched as a substring of the changed
@@ -111,16 +114,6 @@ function normalizeRoute(route: string): string {
   return route.startsWith('/') ? route : `/${route}`;
 }
 
-// The route a changed content file serves, mirroring the SEO pack's content convention:
-// `<contentDir>/foo/bar.md` -> `/foo/bar`, and an `index.md` collapses to its parent route
-// (`<contentDir>/index.md` -> `/`, `<contentDir>/blog/index.md` -> `/blog`).
-function contentRoute(rootDir: string, contentDir: string, file: string): string {
-  const rel = path.relative(path.resolve(rootDir, contentDir), path.resolve(rootDir, file));
-  const noExt = rel.replace(/\.md$/, '');
-  const trimmed = noExt.replace(/(?:^|\/)index$/, '');
-  return normalizeRoute(trimmed);
-}
-
 function isGlobalAsset(file: string, patterns: string[]): boolean {
   return patterns.some((pattern) => file.includes(pattern));
 }
@@ -128,8 +121,13 @@ function isGlobalAsset(file: string, patterns: string[]): boolean {
 // Turn the diff into the SET of routes to screenshot, deduped by path (first reason wins). A
 // changed content file -> its own route; any changed shared asset -> the representative sample;
 // `alwaysCheck` routes -> always, independent of the diff.
-function deriveTargets(ctx: GateContext, config: VisualQaConfig): RenderTarget[] {
+async function deriveTargets(ctx: GateContext, config: VisualQaConfig): Promise<RenderTarget[]> {
   const contentDir = config.contentDir ?? DEFAULT_CONTENT_DIR;
+  const reader = createContentReader(config.contentFormat ?? 'md', {
+    rootDir: ctx.workspaceRoot,
+    contentDir,
+    ...(config.baseLocale ? { baseLocale: config.baseLocale } : {}),
+  });
   const globalPatterns = config.globalPatterns ?? DEFAULT_GLOBAL_PATTERNS;
   const representativeRoutes =
     config.representativeRoutes && config.representativeRoutes.length > 0
@@ -145,8 +143,8 @@ function deriveTargets(ctx: GateContext, config: VisualQaConfig): RenderTarget[]
   for (const route of config.alwaysCheck ?? []) add(route, 'alwaysCheck override');
 
   for (const file of ctx.changedFiles) {
-    if (isContentFile(ctx.workspaceRoot, contentDir, file)) {
-      add(contentRoute(ctx.workspaceRoot, contentDir, file), `changed page ${file}`);
+    if (reader.isContentFile(file)) {
+      add(await reader.routeFor(file), `changed page ${file}`);
     }
   }
 
@@ -170,7 +168,7 @@ export function createVisualQaGate(deps: VisualQaDeps = {}): Gate {
         return { id: VISUAL_QA_GATE_ID, status: 'skip' };
       }
 
-      const targets = deriveTargets(ctx, config);
+      const targets = await deriveTargets(ctx, config);
       if (targets.length === 0) {
         // The diff maps to no renderable route -> nothing THIS PR touched can be screenshotted.
         // Skip with a reason rather than fail (a diff that changes no page/asset is not a defect).
