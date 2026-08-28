@@ -27,17 +27,6 @@ export interface GitHubClientConfig {
    *  so every client instance cools down independently; inject a shared instance (or a
    *  short-cooldown one in tests) to override. */
   breaker?: CircuitBreaker;
-  /**
-   * Optional git identity for pipeline commits (author + committer). Consumed by
-   * `action.yml`, not the REST client: the deterministic "Commit and push" step configs
-   * git with these, and the coding vendor Action's own commit identity (claude-code-action's
-   * `bot_name`/`bot_id`) is set from them too, so no pushed commit is authored `claude[bot]`.
-   * Unset defaults to `github-actions[bot]` / `41898282+github-actions[bot]@users.noreply.github.com`
-   * — valid on any repo and clearly not claude. Set both to a tenant's own bot identity to
-   * match its merge-commit author; `committerEmail` should be the GitHub noreply form
-   * `<id>+<name>@users.noreply.github.com` so the vendor step reconstructs the same address. */
-  committerName?: string;
-  committerEmail?: string;
 }
 
 export class GitHubApiError extends Error {

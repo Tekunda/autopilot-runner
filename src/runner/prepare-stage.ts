@@ -65,7 +65,7 @@ export type PreparedStage =
   | { kind: 'resolved'; telemetry: StatusTelemetry }
   | { kind: 'judgment'; repoId: string; baseRef: string; prompt: string; model?: string; effort?: string; mcpConfigPath?: string; mcpAllowedTools?: string[]; pluginMarketplaces?: string[]; plugins?: string[]; debugFullOutput?: true }
   | { kind: 'architect'; repoId: string; baseRef: string; prompt: string; model?: string; effort?: string; mcpConfigPath?: string; mcpAllowedTools?: string[]; pluginMarketplaces?: string[]; plugins?: string[]; debugFullOutput?: true }
-  | { kind: 'coding'; repoId: string; baseRef: string; branchName: string; prompt: string; model?: string; effort?: string; mcpConfigPath?: string; mcpAllowedTools?: string[]; pluginMarketplaces?: string[]; plugins?: string[]; debugFullOutput?: true };
+  | { kind: 'coding'; repoId: string; baseRef: string; branchName: string; prompt: string; model?: string; effort?: string; mcpConfigPath?: string; mcpAllowedTools?: string[]; pluginMarketplaces?: string[]; plugins?: string[]; debugFullOutput?: true; committerName?: string; committerEmail?: string };
 
 // A grant carries no id of its own -- its signature already uniquely
 // fingerprints the issued grant, so hash it into a stable telemetry id.
@@ -224,6 +224,14 @@ export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps
       branchName,
     });
 
+    // The grant's signed committer identity (Autopilot's own bot), surfaced only here on the
+    // coding path -- it drives action.yml's vendor `bot_name`/`bot_id` and the deterministic
+    // "Commit and push" step's git identity, so no pushed pipeline commit is authored
+    // claude[bot]. Absent on a legacy grant -> action.yml's non-claude default applies.
+    const committerFields = grant.committerName && grant.committerEmail
+      ? { committerName: grant.committerName, committerEmail: grant.committerEmail }
+      : {};
+
     return {
       kind: 'coding',
       repoId: grant.repoId,
@@ -235,6 +243,7 @@ export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps
       ...mcpFields,
       ...pluginFields,
       ...debugFields,
+      ...committerFields,
     };
   }
 

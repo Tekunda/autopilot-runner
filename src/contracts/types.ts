@@ -282,6 +282,18 @@ export type ExecutionGrant = {
   // routes a lensed review grant through the read-only+plan.json profile while a lens-less
   // `review` grant behaves exactly as before (the linear ticket pipeline's generic review).
   reviewLens?: ReviewLens;
+  // The git identity every pipeline commit a CODING stage (build/fix) pushes is authored and
+  // committed under -- Autopilot's OWN bot, resolved server-side from the control plane (never
+  // the customer's runner.yml), so the identity of its own App bot isn't a leaky per-customer
+  // config. Signed like every other field: a tampered committer fails verifyGrant. The runner
+  // reads them only on the coding path (action.yml's vendor `bot_name`/`bot_id` and the
+  // deterministic "Commit and push" step's `git config user.*`); other stages ignore them.
+  // `committerEmail` is the GitHub noreply form `<id>+<name>@users.noreply.github.com`, whose
+  // numeric `<id>` prefix the runner derives into the vendor Action's `bot_id`. Absent on a
+  // legacy grant -> the runner falls back to `github-actions[bot]`, valid anywhere and never
+  // `claude[bot]`.
+  committerName?: string;
+  committerEmail?: string;
 } & ({ stepPrompt: string; ref?: never } | { ref: string; stepPrompt?: never });
 
 // One normalized, source-free defect a review lens reports (Track E). Metadata only --

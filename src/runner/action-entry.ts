@@ -274,6 +274,12 @@ export function reportResult(result: ActionResult, writeOutput: OutputWriter = d
     // claude-code-action's own `show_full_output` input. Emitted only when true --
     // claude-code-action already defaults it to 'false'.
     if (result.prepared.debugFullOutput) writeOutput('show-full-output', 'true');
+    // The grant's signed committer identity (Autopilot's own bot), emitted only on the coding
+    // kind: action.yml drives the vendor `bot_name`/`bot_id` and the "Commit and push" step's
+    // git identity from these so no pushed commit is authored claude[bot]. Absent -> action.yml
+    // falls back to its non-claude github-actions[bot] default.
+    if (result.prepared.kind === 'coding' && result.prepared.committerName) writeOutput('committer-name', result.prepared.committerName);
+    if (result.prepared.kind === 'coding' && result.prepared.committerEmail) writeOutput('committer-email', result.prepared.committerEmail);
     return;
   }
 
