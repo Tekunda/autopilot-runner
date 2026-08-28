@@ -29,7 +29,12 @@
 import { createContentReader, type ContentFormat } from '../../packs/seo/content.ts';
 import type { Gate, GateContext, GateResult } from '../types.ts';
 import { createPlaywrightBrowser, type ScreenshotBrowser } from './browser.ts';
-import { createAnthropicVisionJudge, type ExecutorCredential, type VisionJudge } from './judge.ts';
+import {
+  createAnthropicVisionJudge,
+  VisionRateLimitError,
+  type ExecutorCredential,
+  type VisionJudge,
+} from './judge.ts';
 
 export const VISUAL_QA_GATE_ID = 'visual-qa';
 
@@ -198,7 +203,13 @@ export function createVisualQaGate(deps: VisualQaDeps = {}): Gate {
           ...(config.executorCredential ? { credential: config.executorCredential } : {}),
         });
 
+      // Real visual defects (or non-transient errors): these BLOCK the merge.
       const failures: string[] = [];
+      // Pages the vision judge could not score because the model API stayed rate-limited/overloaded
+      // even after the judge's own backoff+retries. This is a TRANSIENT INFRA failure, not a visual
+      // defect, so it must not read as one -- it's tracked separately and downgrades the gate to a
+      // report-only `warn` (see aggregation below) rather than failing the merge on a 429 burst.
+      const inconclusive: string[] = [];
       try {
         for (const target of targets) {
           const url = new URL(target.path, baseUrl).toString();
@@ -211,9 +222,17 @@ export function createVisualQaGate(deps: VisualQaDeps = {}): Gate {
                 failures.push(`${label}: ${verdict.reason || 'visual-qa verdict: fail'}`);
               }
             } catch (err) {
-              // Could not render or could not judge -> fail closed. A page we cannot verify is
-              // NOT a pass (the judge is never stubbed to pass); report why.
-              failures.push(`${label}: could not verify (${errMsg(err)})`);
+              if (err instanceof VisionRateLimitError) {
+                // Rate-limited past the retry budget -> inconclusive, not a defect. Labeled so a
+                // reader (and the aggregation) can tell it apart from a real visual failure.
+                inconclusive.push(
+                  `${label}: could not verify -- model API rate-limited (${err.status}); transient infra issue, not a visual defect`,
+                );
+              } else {
+                // Could not render or could not judge for a non-transient reason -> fail closed. A
+                // page we cannot verify is NOT a pass (the judge is never stubbed to pass); report why.
+                failures.push(`${label}: could not verify (${errMsg(err)})`);
+              }
             }
           }
         }
@@ -224,10 +243,21 @@ export function createVisualQaGate(deps: VisualQaDeps = {}): Gate {
         }
       }
 
-      // Blocking gate: any failing (or unverifiable) page fails the merge.
-      return failures.length > 0
-        ? { id: VISUAL_QA_GATE_ID, status: 'fail', findings: failures }
-        : { id: VISUAL_QA_GATE_ID, status: 'pass' };
+      // Aggregation:
+      // - Any real defect (or non-transient error) -> `fail` (blocks the merge). Its findings carry
+      //   the inconclusive ones too, so nothing is hidden when the run also hit rate limits.
+      // - No real defect but some page was rate-limited into inconclusive -> `warn`: report-only
+      //   per the gate framework (types.ts), so a transient 429 burst surfaces its findings loudly
+      //   WITHOUT blocking the merge as if it were a visual defect (the failure the retries could
+      //   not recover from is the API's, not the page's).
+      // - Everything scored and passed -> `pass`.
+      if (failures.length > 0) {
+        return { id: VISUAL_QA_GATE_ID, status: 'fail', findings: [...failures, ...inconclusive] };
+      }
+      if (inconclusive.length > 0) {
+        return { id: VISUAL_QA_GATE_ID, status: 'warn', findings: inconclusive };
+      }
+      return { id: VISUAL_QA_GATE_ID, status: 'pass' };
     },
   };
 }
