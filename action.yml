@@ -145,6 +145,18 @@ runs:
         path: gate-report.json
         if-no-files-found: ignore
 
+    # bot_id must be the numeric prefix of the committer noreply email. GitHub Actions
+    # expressions have no split(), so derive it in bash from the resolved email instead.
+    - name: Resolve committer bot id
+      id: commit-id
+      shell: bash
+      env:
+        COMMITTER_EMAIL: ${{ fromJSON(inputs.vcs-host-config).committerEmail || '41898282+github-actions[bot]@users.noreply.github.com' }}
+      run: |
+        id="${COMMITTER_EMAIL%%+*}"
+        case "$COMMITTER_EMAIL" in *+*) ;; *) id="41898282" ;; esac
+        echo "id=$id" >> "$GITHUB_OUTPUT"
+
     # The ONLY non-deterministic, non-ours step (issue #70's settled execution boundary):
     # the selected vendor Action performs read-only judgment or edits the checkout. Git
     # control stays in the deterministic step below, shared by both vendors (issue #113).
@@ -167,7 +179,7 @@ runs:
         # identity. bot_id is the numeric prefix of the noreply committerEmail; the Action rebuilds
         # the address as "<bot_id>+<bot_name>@users.noreply.github.com", matching committerEmail.
         bot_name: ${{ fromJSON(inputs.vcs-host-config).committerName || 'github-actions[bot]' }}
-        bot_id: ${{ split(fromJSON(inputs.vcs-host-config).committerEmail || '41898282+github-actions[bot]@users.noreply.github.com', '+')[0] }}
+        bot_id: ${{ steps.commit-id.outputs.id }}
         # `--model` carries the grant's signed modelTier (prepare resolves it via
         # src/config/model-tiers.ts): a "deep" stage runs on the deep model instead of
         # claude-code-action's own default. Empty only for an unmapped provider.
