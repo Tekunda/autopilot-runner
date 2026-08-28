@@ -286,7 +286,13 @@ export function reportResult(result: ActionResult, writeOutput: OutputWriter = d
   const telemetry = resolvedTelemetry(result);
   if (!telemetry) return; // unreachable: excluded by the guard above
   writeOutput('resolved', 'true');
-  writeOutput('telemetry', JSON.stringify(telemetry));
+  // A heavy gate's telemetry carries every finding (~45KB), and emitting it here would
+  // balloon the Actions `steps` context past GitHub's template object-size limit, failing
+  // the run at the tail with "Maximum object size exceeded" even though the gate passed.
+  // Gate findings already travel back via the gate-report.json artifact (written in main
+  // before this call), which is the only channel the control plane reads; the run
+  // conclusion carries pass/fail. So skip the bulky `telemetry` output for gate results.
+  if (result.mode !== 'gate') writeOutput('telemetry', JSON.stringify(telemetry));
   writeOutput('result', telemetry.result);
 }
 
