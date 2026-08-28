@@ -10,7 +10,11 @@
 
 import type { VCSHost } from '../contracts/adapters.ts';
 
-export type GateStatus = 'pass' | 'fail' | 'skip';
+// `warn` is a report-only failure: the gate's check did not pass, but the gate
+// is non-blocking (a `blocking:false` command gate), so it must NOT fail the
+// grant. Aggregation treats it like a pass for the verdict while still carrying
+// its findings -- see runGates and run-gate-stage's toCheckStatus.
+export type GateStatus = 'pass' | 'fail' | 'skip' | 'warn';
 
 export interface GateContext {
   repoId: string;
@@ -18,6 +22,10 @@ export interface GateContext {
   branch: string;
   baseRef: string;
   changedFiles: string[];
+  // The customer PR checkout the gates run against (GITHUB_WORKSPACE), NOT the
+  // runner's own action directory. Deterministic tree-scanning gates (cve's
+  // `npm audit`) must audit this, never process.cwd().
+  workspaceRoot: string;
   vcsHost: VCSHost;
   config: Record<string, unknown>;
 }

@@ -22,6 +22,10 @@ inputs:
     description: 'JSON GateTarget (prNumber, branch, baseRef, changedFiles) identifying which PR/diff to run the grant''s gates against. Only used, and required, for a `gate` stage grant -- routing data, never signed (see src/runner/run-gate-stage.ts).'
     required: false
     default: '{}'
+  gate-mode:
+    description: 'For a `gate` stage: `fast` (default, deterministic gates against the PR checkout) or `heavy` (the dedicated stage that builds+serves the site and runs the SEO crawl / Visual-QA gates against it -- provisions a browser). Set by the control plane per the gates the grant carries.'
+    required: false
+    default: 'fast'
 
 outputs:
   telemetry:
@@ -79,11 +83,31 @@ runs:
         ref: ${{ fromJSON(inputs.grant).stage == 'gate' && fromJSON(inputs.gate-target).branch || steps.prepare.outputs.base-ref }}
         token: ${{ fromJSON(inputs.vcs-host-config).token }}
 
+    # HEAVY gate stage only (docs/ci-gate-refit-plan.md §5): provision the browser the fast gate
+    # path never needs. Playwright is installed into the runner's own action dir so the gate's
+    # dynamic `import('playwright')` resolves here; the customer's site build/serve (yarn
+    # install/build/start) runs in the checkout via the gate's own serve orchestration. The fast
+    # gate path skips this step entirely, keeping heavy tooling off it.
+    #
+    # RUNNER-INFRA NOTE (see PR): the customer toolchain itself (yarn/pnpm and its own devDeps)
+    # is assumed present after corepack; a repo whose start command needs a global CLI beyond
+    # this may need an extra install line here.
+    - name: Provision heavy gate stage
+      if: fromJSON(inputs.grant).stage == 'gate' && inputs.gate-mode == 'heavy'
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: |
+        corepack enable || true
+        npm install playwright@1 --no-save
+        npx playwright install --with-deps chromium
+
     # Runs only for a `gate` stage grant: verifies the grant, builds a GateContext from the
     # checked-out tree above, and runs exactly the gates named in the grant's signed
     # `gateSpecs` -- never a gate outside that set, even if it's registered runner-side (see
-    # src/runner/run-gate-stage.ts, issues #106, #129). Only deterministic `{kind:'generic'}`
-    # gates run under the current stopgap; there is no model in this step.
+    # src/runner/run-gate-stage.ts, issues #106, #129). `gate-mode: heavy` selects the dedicated
+    # stage (src/runner/serve-and-gate.ts) that builds+serves the site and runs the browser/
+    # server-capable gates (SEO crawl, Visual-QA) against the served instance; `fast` (default)
+    # runs the deterministic gates against the PR checkout only, with no model and no browser.
     # Resolves telemetry right here; no vendor Action step and no finalize phase follow it.
     - name: Run gates
       id: gate
@@ -91,11 +115,17 @@ runs:
       shell: bash
       working-directory: ${{ github.action_path }}
       env:
-        INPUT_MODE: gate
+        INPUT_MODE: ${{ inputs.gate-mode == 'heavy' && 'heavy-gate' || 'gate' }}
         INPUT_GRANT: ${{ inputs.grant }}
         INPUT_VERIFY-KEY: ${{ inputs.verify-key }}
         INPUT_VCS-HOST-CONFIG: ${{ inputs.vcs-host-config }}
         INPUT_GATE-TARGET: ${{ inputs.gate-target }}
+        # The heavy stage's Visual-QA vision judge authenticates with the tenant's executor
+        # credential -- the SAME coding-executor-config the reviewer/architect vendor steps use
+        # (src/runner/adapters.ts executorCredential). Carries either the OAuth/subscription token
+        # or the raw API key, so an OAuth tenant's Visual-QA runs on their subscription instead of
+        # failing closed for lack of a standalone ANTHROPIC_API_KEY.
+        INPUT_CODING-EXECUTOR-CONFIG: ${{ inputs.coding-executor-config }}
       run: node src/runner/action-entry.ts
 
     # Upload the per-gate results+findings the "Run gates" step wrote (the StatusTelemetry

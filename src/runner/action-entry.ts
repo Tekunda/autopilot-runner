@@ -18,6 +18,7 @@ import type { ExecutionGrant, StatusTelemetry } from '../contracts/types.ts';
 import {
   createCodingExecutor,
   createVCSHost,
+  executorCredential,
   type CodingExecutorConfig,
   type VCSHostConfig,
 } from './adapters.ts';
@@ -27,6 +28,7 @@ import { finalizeCodingStage, finalizeJudgmentStage, type ActionOutcome } from '
 import { createRunnerGateRegistry } from './gate-registry.ts';
 import { CODING_STAGES, computeChangedFiles, DEFAULT_BASE_REF, prepareStage, type PreparedStage } from './prepare-stage.ts';
 import { runGateStage, type GateTarget } from './run-gate-stage.ts';
+import { runHeavyGateStage } from './serve-and-gate.ts';
 
 export class ActionInputError extends Error {}
 
@@ -47,12 +49,31 @@ export type ActionInputs =
       vcsHost: VCSHostConfig;
       actionOutcome: ActionOutcome;
     }
+  // `gate` runs the fast deterministic gates against the PR checkout only. `heavy-gate` runs the
+  // dedicated browser/server-capable stage (docs/ci-gate-refit-plan.md §5): it builds + serves the
+  // site, threads the served base URL into the URL-bound gates, runs the heavy gates (SEO crawl,
+  // Visual-QA), then tears the server down. Identical inputs -- action.yml provisions the extra
+  // toolchain/browser only for `heavy-gate`. Kept as two single-literal variants (not one
+  // `'gate' | 'heavy-gate'` member) so the discriminated-union narrowing in runActionEntry stays
+  // clean.
   | {
       mode: 'gate';
       grant: ExecutionGrant;
       verifyKey: string;
       vcsHost: VCSHostConfig;
       target: GateTarget;
+      // The tenant's executor config, forwarded so the heavy stage can derive the vision judge's
+      // credential from it (the SAME one the reviewer/architect steps use). Optional: the fast
+      // gate path never calls a model, and a malformed value must not break deterministic gates.
+      codingExecutor?: CodingExecutorConfig;
+    }
+  | {
+      mode: 'heavy-gate';
+      grant: ExecutionGrant;
+      verifyKey: string;
+      vcsHost: VCSHostConfig;
+      target: GateTarget;
+      codingExecutor?: CodingExecutorConfig;
     };
 
 function requireEnv(env: NodeJS.ProcessEnv, name: string): string {
@@ -99,17 +120,22 @@ export function parseInputs(env: NodeJS.ProcessEnv = process.env): ActionInputs 
     };
   }
 
-  if (mode === 'gate') {
+  if (mode === 'gate' || mode === 'heavy-gate') {
     return {
       mode,
       grant,
       verifyKey,
       vcsHost: requireJsonEnv<VCSHostConfig>(env, 'INPUT_VCS-HOST-CONFIG'),
       target: requireJsonEnv<GateTarget>(env, 'INPUT_GATE-TARGET'),
+      ...(env['INPUT_CODING-EXECUTOR-CONFIG']
+        ? { codingExecutor: requireJsonEnv<CodingExecutorConfig>(env, 'INPUT_CODING-EXECUTOR-CONFIG') }
+        : {}),
     };
   }
 
-  throw new ActionInputError(`input "mode" must be "prepare", "finalize", or "gate", got "${mode}"`);
+  throw new ActionInputError(
+    `input "mode" must be "prepare", "finalize", "gate", or "heavy-gate", got "${mode}"`,
+  );
 }
 
 export interface RunActionDeps {
@@ -148,16 +174,28 @@ function resolvedTelemetry(result: ActionResult): StatusTelemetry | undefined {
 // Verify the grant and run the requested phase. Adapter construction is injectable so
 // tests can run against fakes instead of live credentials.
 export async function runActionEntry(inputs: ActionInputs, deps: RunActionDeps = {}): Promise<ActionResult> {
-  if (inputs.mode === 'gate') {
+  if (inputs.mode === 'gate' || inputs.mode === 'heavy-gate') {
     const vcsHost = deps.vcsHost ?? createVCSHost(inputs.vcsHost);
     const registry = deps.gateRegistry ?? createRunnerGateRegistry();
-    const telemetry = await runGateStage(inputs.grant, {
+    const stageDeps = {
       vcsHost,
       registry,
       target: inputs.target,
+      workspaceRoot: workspaceRoot(),
       verifyKey: inputs.verifyKey,
       now: deps.now,
-    });
+    };
+    // The heavy stage wraps the same gate execution with build/serve/teardown around it, so a
+    // URL-bound gate (SEO crawl, Visual-QA) runs against the freshly served local instance.
+    const telemetry =
+      inputs.mode === 'heavy-gate'
+        ? await runHeavyGateStage(inputs.grant, {
+            ...stageDeps,
+            ...(inputs.codingExecutor
+              ? { executorCredential: executorCredential(inputs.codingExecutor) }
+              : {}),
+          })
+        : await runGateStage(inputs.grant, stageDeps);
     return { mode: 'gate', telemetry };
   }
 
@@ -274,10 +312,10 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Gate mode: compute the changed-file scope from this checkout. The dispatch input
-  // carries only prNumber/branch/baseRef routing data, so a large PR's changed paths
+  // Gate mode (fast or heavy): compute the changed-file scope from this checkout. The dispatch
+  // input carries only prNumber/branch/baseRef routing data, so a large PR's changed paths
   // (~12KB) never ride through it -- the list is computed where the tree lives.
-  if (inputs.mode === 'gate') {
+  if (inputs.mode === 'gate' || inputs.mode === 'heavy-gate') {
     inputs = {
       ...inputs,
       target: { ...inputs.target, changedFiles: await computeChangedFiles(inputs.target.baseRef, workspaceRoot()) },
@@ -290,7 +328,7 @@ async function main(): Promise<void> {
   // findings), written into the checked-out tree for upload as an artifact. GitHub exposes
   // no API for step outputs of a dispatched run, so this file is the only channel that
   // carries the real gate results back -- the same one the architect's plan.json uses.
-  if (inputs.mode === 'gate' && result.mode === 'gate') {
+  if ((inputs.mode === 'gate' || inputs.mode === 'heavy-gate') && result.mode === 'gate') {
     writeFileSync(`${workspaceRoot()}/gate-report.json`, JSON.stringify(result.telemetry));
   }
 

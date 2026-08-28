@@ -79,9 +79,15 @@ export interface GatePolicy {
 //   - `prompt` carried a licensed pack gate's full JIT instruction. Prompt gates are
 //     disabled under the current stopgap (only deterministic generic gates run), so this
 //     variant has no producer today; it is retained for the signed-payload shape.
+//   - `command` names an H3 command gate: a tenant-declared shell command line (`run`) the
+//     runner executes against the customer PR checkout, exit code -> pass/fail. Synthesized
+//     one-per-configured-gate from the tenant's PackConfig.commandGates (packs/registry.ts),
+//     so a tenant declaring `yarn lint`/`yarn build` gets a signed spec per command. `blocking`
+//     rides here so a report-only gate's failure never fails the grant (see GateStatus).
 export type GateSpec =
   | { kind: 'generic'; id: string; config?: Record<string, unknown> }
-  | { kind: 'prompt'; id: string; prompt: string };
+  | { kind: 'prompt'; id: string; prompt: string }
+  | { kind: 'command'; id: string; run: string; blocking?: boolean };
 
 // One MCP server an agent stage may use, carried in the signed grant (control-plane
 // authority) so the runner writes a claude-code-action `--mcp-config` file for it. The
@@ -641,6 +647,12 @@ export interface TicketState {
   // ready-but-unmergeable (auto-merge disabled, unmet checks, a host merge refusal)
   // is announced once per reason-change rather than on every 60s tick.
   lastNotice?: string;
+  // The gate/check coverage recorded when THIS ticket's promotion merged onto `branch` (the
+  // P6 guardrail, docs/ci-gate-refit-plan.md §7). `gateIds` is the set of gate ids and customer
+  // checks that gated the promotion; the next promotion onto the same branch (any of the
+  // tenant's tickets) diffs against the most recently recorded set to catch silent coverage
+  // loss. Keyed by branch because coverage is a per-protected-branch property, not per-ticket.
+  promotionCoverage?: { branch: string; gateIds: string[]; recordedAt: string };
   // Present ONLY on an external-PR pseudo-ticket (id "external-pr-<n>"): a human/automation
   // PR into a protected branch that the ticket pipeline did NOT open, which the control
   // plane picks up as a first-class driven workflow (QA -> autofix-on-fail -> conflict

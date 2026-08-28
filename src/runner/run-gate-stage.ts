@@ -13,8 +13,10 @@
 import type { VCSHost } from '../contracts/adapters.ts';
 import type { CheckResult, CheckStatus, ExecutionGrant, GateSpec, StatusTelemetry } from '../contracts/types.ts';
 import { verifyGrant, type KeyInput } from '../control-plane/grant-verify.ts';
+import { createCommandGate } from '../gates/command/command-gate.ts';
 import type { GateRegistry } from '../gates/registry.ts';
 import type { GateContext, GateResult } from '../gates/types.ts';
+import { registerPackGatesForSpecs } from './gate-registry.ts';
 import { digestFor, grantId, rejectedTelemetry } from './prepare-stage.ts';
 
 // Runner-side PR targeting for the gate run: which PR/diff to run the
@@ -38,6 +40,22 @@ export interface RunGateStageDeps {
   vcsHost: VCSHost;
   registry: GateRegistry;
   target: GateTarget;
+  /**
+   * The customer's checked-out PR tree (GITHUB_WORKSPACE) the gates scan --
+   * runner-local environment, not part of the signed grant or the dispatched
+   * target. Tree-scanning gates (cve's `npm audit`) must run here, not in the
+   * runner's own action directory (process.cwd()). Defaults to process.cwd().
+   */
+  workspaceRoot?: string;
+  /**
+   * Runtime, runner-side config values merged ON TOP of each gate's signed/target config,
+   * keyed by gate id. This is for facts the signed grant CANNOT carry because they only exist
+   * at run time -- above all the base URL of the server the heavy stage just brought up
+   * (serve-and-gate.ts injects `{ 'seo-site-crawl': { baseUrl }, 'visual-qa': { baseUrl } }`).
+   * The served instance is the whole point of the heavy stage (docs/ci-gate-refit-plan.md §11),
+   * so the overlay wins over any baseUrl a signed spec happened to carry.
+   */
+  configOverlay?: Record<string, Record<string, unknown>>;
   /** Public key used to verify the grant's signature. */
   verifyKey: KeyInput;
   /** Clock override for tests; defaults to the current time. */
@@ -45,7 +63,9 @@ export interface RunGateStageDeps {
 }
 
 // GateStatus has a `skip` a CheckStatus has no room for; the closest honest
-// mapping is `pending` -- a skipped gate was never evaluated, not passed.
+// mapping is `pending` -- a skipped gate was never evaluated, not passed. A
+// `warn` is a non-blocking gate's report-only failure: it must not fail the
+// grant, so it maps to `pass` (its findings still ride through toChecks).
 function toCheckStatus(status: GateResult['status']): CheckStatus {
   if (status === 'fail') return 'fail';
   if (status === 'skip') return 'pending';
@@ -63,6 +83,10 @@ function toChecks(results: GateResult[]): CheckResult[] {
 
 function isGenericSpec(spec: GateSpec): spec is Extract<GateSpec, { kind: 'generic' }> {
   return spec.kind === 'generic';
+}
+
+function isCommandSpec(spec: GateSpec): spec is Extract<GateSpec, { kind: 'command' }> {
+  return spec.kind === 'command';
 }
 
 // A gate grant's signed `ref` IS the PR under gate (control-plane/subtask-pipeline.ts issues
@@ -101,6 +125,7 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
 
   const specs = grant.gateSpecs ?? [];
   const genericSpecs = specs.filter(isGenericSpec);
+  const commandSpecs = specs.filter(isCommandSpec);
 
   // A generic spec's signed `config` is authorization-adjacent policy (severity thresholds,
   // forbidden-path lists, ...) -- it overrides the runner-supplied, unsigned
@@ -110,20 +135,46 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
     if (spec.config !== undefined) config[spec.id] = spec.config;
   }
 
+  // Runtime overlay wins over the signed config for the same gate id: a served baseUrl only
+  // exists after the heavy stage brings the server up, so it can never ride in the signed
+  // grant -- it is merged here, on top of whatever policy the spec carried.
+  for (const [id, overlay] of Object.entries(deps.configOverlay ?? {})) {
+    const existing = (config[id] as Record<string, unknown> | undefined) ?? {};
+    config[id] = { ...existing, ...overlay };
+  }
+
+  const workspaceRoot = deps.workspaceRoot ?? process.cwd();
+
   const ctx: GateContext = {
     repoId: grant.repoId,
     prNumber: deps.target.prNumber,
     branch: deps.target.branch,
     baseRef: deps.target.baseRef,
     changedFiles: deps.target.changedFiles,
+    workspaceRoot,
     vcsHost: deps.vcsHost,
     config,
   };
 
-  const genericReport = await deps.registry.run(
-    genericSpecs.map((spec) => spec.id),
-    ctx,
-  );
+  // Deterministic pack gates (SEO crawl/changed-file, docs, security regex) ride in the grant
+  // as ordinary `{kind:'generic'}` specs (packs/registry.ts enabledGateSpecs). The runner's
+  // static registry holds only the always-on generic gates, so register the pack gate for any
+  // grant-named id here -- only then does its spec resolve to an executable Gate. Their signed
+  // config (e.g. `seo-site-crawl`) already reached `config` above via the generic loop.
+  registerPackGatesForSpecs(deps.registry, genericSpecs.map((spec) => spec.id));
+
+  // Command gates aren't in the runner's static bundle -- they are declared per tenant and
+  // arrive as signed `{kind:'command'}` specs. Build a createCommandGate instance for each
+  // and register it (dynamically named) so the registry runs it exactly like a generic gate,
+  // scoped to the PR checkout.
+  for (const spec of commandSpecs) {
+    deps.registry.register(
+      createCommandGate({ name: spec.id, run: spec.run, ...(spec.blocking !== undefined ? { blocking: spec.blocking } : {}) }, workspaceRoot),
+    );
+  }
+
+  const enabledIds = [...genericSpecs.map((spec) => spec.id), ...commandSpecs.map((spec) => spec.id)];
+  const genericReport = await deps.registry.run(enabledIds, ctx);
 
   const results = genericReport.results;
   const ok = results.every((result) => result.status !== 'fail');

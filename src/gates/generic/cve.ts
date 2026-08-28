@@ -5,8 +5,7 @@
 // testable without shelling out; the default factory wires up the real
 // `npm audit --json` tool. See issue #77.
 
-import { execFile } from 'node:child_process';
-
+import { runCommand } from '../exec.ts';
 import { readGateConfig } from './config.ts';
 import type { Gate, GateContext, GateResult } from '../types.ts';
 
@@ -23,7 +22,9 @@ export interface DependencyAdvisory {
 }
 
 export interface DependencyAuditor {
-  audit(): Promise<DependencyAdvisory[]>;
+  // `cwd` is the tree to audit -- the customer's checked-out PR (ctx.workspaceRoot),
+  // not the runner's own action directory. Falls back to process.cwd() when empty.
+  audit(cwd?: string): Promise<DependencyAdvisory[]>;
 }
 
 export interface CveGateConfig {
@@ -71,26 +72,14 @@ export function parseNpmAuditReport(report: NpmAuditReport): DependencyAdvisory[
   return advisories;
 }
 
-export function createNpmAuditor(cwd: string = process.cwd()): DependencyAuditor {
+export function createNpmAuditor(): DependencyAuditor {
   return {
-    async audit() {
-      const stdout = await new Promise<string>((resolve, reject) => {
-        execFile(
-          'npm',
-          ['audit', '--json'],
-          { cwd, maxBuffer: 10 * 1024 * 1024, encoding: 'utf8' },
-          (err, out) => {
-            // npm audit exits non-zero when it finds vulnerabilities; its JSON
-            // report is still on stdout in that case, so recover it rather
-            // than treating a non-zero exit as a tooling failure.
-            if (err && !out) {
-              reject(err);
-              return;
-            }
-            resolve(out);
-          },
-        );
-      });
+    async audit(cwd?: string) {
+      // npm audit exits non-zero when it finds vulnerabilities; its JSON report
+      // is still on stdout in that case, so runCommand recovers the exit as a
+      // result and we parse stdout regardless of the code. A process that could
+      // not spawn rejects out of runCommand and propagates as before.
+      const { stdout } = await runCommand('npm', ['audit', '--json'], cwd || process.cwd());
       return parseNpmAuditReport(JSON.parse(stdout) as NpmAuditReport);
     },
   };
@@ -102,7 +91,7 @@ export function createCveGate(auditor: DependencyAuditor = createNpmAuditor()): 
     async run(ctx: GateContext): Promise<GateResult> {
       const config = readGateConfig(ctx.config, 'cve', DEFAULT_CONFIG);
       const threshold = SEVERITY_RANK[config.minSeverity];
-      const advisories = await auditor.audit();
+      const advisories = await auditor.audit(ctx.workspaceRoot);
       const findings = advisories
         .filter((advisory) => SEVERITY_RANK[advisory.severity] >= threshold)
         .map((advisory) => `${advisory.id}: ${advisory.packageName} (${advisory.severity}) — ${advisory.title}`);
