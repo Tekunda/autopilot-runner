@@ -51,13 +51,28 @@ runs:
       working-directory: ${{ github.action_path }}
       run: npm ci
 
+    # Extract the grant's stage ONCE. GitHub's template evaluator has a cumulative
+    # "Maximum object size exceeded" budget across the whole job, and re-materializing the
+    # ~8-10KB signed grant with fromJSON(inputs.grant) in every step's `if:`/`ref:`/`env:`
+    # overflows it and fails the run at the tail steps even when the gate itself passed. The
+    # grant is passed via env (a plain string, no fromJSON) so reading it here doesn't itself
+    # re-trigger the materialization; every later step reads steps.parse-grant.outputs.stage.
+    - name: Parse grant stage
+      id: parse-grant
+      shell: bash
+      env:
+        INPUT_GRANT: ${{ inputs.grant }}
+      run: |
+        stage=$(node -e "process.stdout.write(JSON.parse(process.env.INPUT_GRANT).stage || '')")
+        echo "stage=$stage" >> "$GITHUB_OUTPUT"
+
     # Verifies the grant and translates its prompt into the selected vendor Action step's
     # inputs below -- no git operations, no I/O beyond that (src/runner/prepare-stage.ts).
     # A rejected grant resolves telemetry here and every later step is skipped. A `gate` stage grant never reaches
     # this step at all -- see "Run gates" below.
     - name: Prepare stage
       id: prepare
-      if: fromJSON(inputs.grant).stage != 'gate'
+      if: steps.parse-grant.outputs.stage != 'gate'
       shell: bash
       working-directory: ${{ github.action_path }}
       env:
@@ -74,13 +89,13 @@ runs:
     # or at the gate target's own branch for a `gate` stage, since some gates (e.g. `cve`)
     # run real tooling against the checked-out tree, not just diff metadata.
     - name: Checkout customer repo
-      if: steps.prepare.outputs.resolved == 'false' || fromJSON(inputs.grant).stage == 'gate'
+      if: steps.prepare.outputs.resolved == 'false' || steps.parse-grant.outputs.stage == 'gate'
       uses: actions/checkout@v7
       with:
         # Full history: computeChangedFiles three-dot-diffs HEAD against the base, which
         # needs the merge-base -- unreachable from a default depth-1 checkout.
         fetch-depth: 0
-        ref: ${{ fromJSON(inputs.grant).stage == 'gate' && fromJSON(inputs.gate-target).branch || steps.prepare.outputs.base-ref }}
+        ref: ${{ steps.parse-grant.outputs.stage == 'gate' && fromJSON(inputs.gate-target).branch || steps.prepare.outputs.base-ref }}
         token: ${{ fromJSON(inputs.vcs-host-config).token }}
 
     # HEAVY gate stage only (docs/ci-gate-refit-plan.md §5): provision the browser the fast gate
@@ -93,7 +108,7 @@ runs:
     # is assumed present after corepack; a repo whose start command needs a global CLI beyond
     # this may need an extra install line here.
     - name: Provision heavy gate stage
-      if: fromJSON(inputs.grant).stage == 'gate' && inputs.gate-mode == 'heavy'
+      if: steps.parse-grant.outputs.stage == 'gate' && inputs.gate-mode == 'heavy'
       shell: bash
       working-directory: ${{ github.action_path }}
       run: |
@@ -111,7 +126,7 @@ runs:
     # Resolves telemetry right here; no vendor Action step and no finalize phase follow it.
     - name: Run gates
       id: gate
-      if: fromJSON(inputs.grant).stage == 'gate'
+      if: steps.parse-grant.outputs.stage == 'gate'
       shell: bash
       working-directory: ${{ github.action_path }}
       env:
@@ -138,7 +153,7 @@ runs:
     # such a report and falls back to job-name checks. if-no-files-found keeps a missing
     # file a skip, not an error.
     - name: Upload gate report
-      if: always() && fromJSON(inputs.grant).stage == 'gate'
+      if: always() && steps.parse-grant.outputs.stage == 'gate'
       uses: actions/upload-artifact@v4
       with:
         name: gate-report
@@ -249,7 +264,7 @@ runs:
       env:
         BRANCH_NAME: ${{ steps.prepare.outputs.branch-name }}
         BASE_REF: ${{ steps.prepare.outputs.base-ref }}
-        STAGE: ${{ fromJSON(inputs.grant).stage }}
+        STAGE: ${{ steps.parse-grant.outputs.stage }}
         # Single source for the git identity of every pushed pipeline commit (this step's own
         # commit for the codex/no-vendor-commit path, and the identity the claude step is told
         # to use above): the SIGNED grant's committer, emitted by prepare -- Autopilot's own bot,
