@@ -19,31 +19,18 @@
 
 import { spawn as nodeSpawn } from 'node:child_process';
 
-import type { ExecutionGrant, StatusTelemetry } from '../contracts/types.ts';
+import type { ExecutionGrant, ServeConfig, StatusTelemetry } from '../contracts/types.ts';
 import type { ExecutorCredential } from '../gates/visual/judge.ts';
+import { verifyGrant } from '../control-plane/grant-verify.ts';
 import { runCommand as defaultRunCommand } from '../gates/exec.ts';
 import { registerHeavyGatesForSpecs } from './gate-registry.ts';
+import { rejectedTelemetry } from './prepare-stage.ts';
 import { runGateStage, type RunGateStageDeps } from './run-gate-stage.ts';
 
-// The tenant-supplied recipe for bringing the site up. Rides in the gate target's unsigned
-// config under the `serve` key (routing/runner-side data, like the rest of GateTarget.config).
-export interface ServeConfig {
-  // Optional dependency install (e.g. `yarn install --frozen-lockfile`), run before build.
-  installCommand?: string;
-  // Optional build (e.g. `yarn build:site`). A pure `yarn start` tenant can omit it.
-  buildCommand?: string;
-  // The long-running server command (e.g. `yarn start:site`). Required.
-  startCommand: string;
-  // The base URL the started server listens on (e.g. `http://localhost:3000`). Required -- this
-  // is what gets threaded into the heavy gates as their runtime baseUrl.
-  baseUrl: string;
-  // Path polled to decide readiness. Default `/`.
-  readyPath?: string;
-  // How long to wait for the first OK response before giving up. Default 120s.
-  readyTimeoutMs?: number;
-  // Poll interval while waiting. Default 1s.
-  readyIntervalMs?: number;
-}
+// The serve recipe (install/build/start/baseUrl) is a signed grant field -- see ServeConfig and
+// ExecutionGrant.serve in ../contracts/types.ts. Re-exported here for the modules and tests that
+// already reach for it through this heavy-stage entry point.
+export type { ServeConfig };
 
 // A brought-up server. stop() must always be called (a finally) so the runner never leaks a
 // server process into later steps.
@@ -162,8 +149,10 @@ export async function serveSite(config: ServeConfig, deps: ServeSiteDeps): Promi
 export const URL_BOUND_HEAVY_GATE_IDS = ['seo-site-crawl', 'visual-qa'] as const;
 
 export interface RunHeavyGateStageDeps extends RunGateStageDeps {
-  // The serve recipe. Defaults to the gate target's `serve` config entry. Absent on both -> the
-  // stage runs the gates WITHOUT bringing a server up (they skip cleanly when they need a URL).
+  // The serve recipe. Defaults to the grant's SIGNED `serve` field (never the unsigned target
+  // config -- the startCommand is a shell command, so it must come from the verified grant).
+  // Absent on both -> the stage runs the gates WITHOUT bringing a server up (they skip cleanly
+  // when they need a URL).
   serve?: ServeConfig;
   // Injected for tests; defaults to serveSite. Lets a test assert threading/teardown without a
   // real build+server.
@@ -182,7 +171,14 @@ export interface RunHeavyGateStageDeps extends RunGateStageDeps {
 // path), so a `{kind:'generic', id:'visual-qa'}` spec in the grant resolves to an executable gate.
 export async function runHeavyGateStage(grant: ExecutionGrant, deps: RunHeavyGateStageDeps): Promise<StatusTelemetry> {
   const workspaceRoot = deps.workspaceRoot ?? process.cwd();
-  const serveConfig = deps.serve ?? (deps.target.config?.serve as ServeConfig | undefined);
+  // Verify the grant HERE, before serving -- the serve recipe's startCommand runs a shell
+  // command, so a forged/tampered grant must be rejected before any command executes. runGateStage
+  // verifies again (harmlessly) when we delegate to it below.
+  const verification = verifyGrant(grant, deps.verifyKey, deps.now ?? new Date());
+  if (!verification.ok) {
+    return rejectedTelemetry(grant, verification.reason);
+  }
+  const serveConfig = deps.serve ?? grant.serve;
   const serveSiteImpl = deps.serveSiteImpl ?? serveSite;
 
   // Register the heavy-only gates (Visual-QA) for any id the grant names, so they resolve

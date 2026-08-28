@@ -177,7 +177,15 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
   const genericReport = await deps.registry.run(enabledIds, ctx);
 
   const results = genericReport.results;
-  const ok = results.every((result) => result.status !== 'fail');
+  // Report-only generic gates (`blocking:false`, from PackConfig.gateConfig[id]) still publish
+  // their per-gate check (toChecks below is unchanged), but their `fail` is excluded from the
+  // stage's blocking verdict -- advisory, not merge-blocking. Command gates already degrade
+  // fail->warn inside createCommandGate; this is the generic-gate equivalent, applied here
+  // because the runner keeps the gate's honest `fail` status in the check it publishes.
+  const nonBlockingIds = new Set(
+    genericSpecs.filter((spec) => spec.blocking === false).map((spec) => spec.id),
+  );
+  const ok = results.every((result) => result.status !== 'fail' || nonBlockingIds.has(result.id));
 
   // Make the run's log self-describing: a legitimate gate failure must be legible in
   // Actions logs, not byte-identical to a crash (the 75-file diff that failed `risk`

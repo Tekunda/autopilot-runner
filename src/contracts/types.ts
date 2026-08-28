@@ -75,7 +75,9 @@ export interface GatePolicy {
 //     -- npm-audit thresholds, forbidden-path predicates; no licensed IP), optionally
 //     narrowed by signed `config` (severity thresholds, path lists, ...) that -- being part
 //     of the signed payload -- overrides anything the unsigned runner-side GateTarget.config
-//     tries to set for that same gate id.
+//     tries to set for that same gate id. `blocking` (default true) also rides here: a
+//     report-only generic gate (`blocking:false`, from PackConfig.gateConfig[id]) still
+//     publishes its per-gate check but its `fail` is excluded from the stage's blocking verdict.
 //   - `prompt` carried a licensed pack gate's full JIT instruction. Prompt gates are
 //     disabled under the current stopgap (only deterministic generic gates run), so this
 //     variant has no producer today; it is retained for the signed-payload shape.
@@ -85,7 +87,7 @@ export interface GatePolicy {
 //     so a tenant declaring `yarn lint`/`yarn build` gets a signed spec per command. `blocking`
 //     rides here so a report-only gate's failure never fails the grant (see GateStatus).
 export type GateSpec =
-  | { kind: 'generic'; id: string; config?: Record<string, unknown> }
+  | { kind: 'generic'; id: string; config?: Record<string, unknown>; blocking?: boolean }
   | { kind: 'prompt'; id: string; prompt: string }
   | { kind: 'command'; id: string; run: string; blocking?: boolean };
 
@@ -119,6 +121,31 @@ export interface McpGrant {
 export interface PluginGrant {
   marketplaces: string[];
   plugins: string[];
+}
+
+// The tenant-supplied recipe for bringing the customer site up in the dedicated heavy gate
+// stage (src/runner/serve-and-gate.ts): install -> build -> start -> wait-for-ready. Because
+// `startCommand` is an arbitrary shell command, this rides ONLY in the SIGNED grant
+// (ExecutionGrant.serve, resolved server-side from the tenant's PackConfig.serve like mcp/
+// plugins) -- never the unsigned, attacker-influenceable GateTarget.config -- so a forged
+// serve recipe fails verifyGrant before any command runs. The runner reads it only in the
+// heavy stage; the fast gate path ignores it.
+export interface ServeConfig {
+  // Optional dependency install (e.g. `yarn install --frozen-lockfile`), run before build.
+  installCommand?: string;
+  // Optional build (e.g. `yarn build:site`). A pure `yarn start` tenant can omit it.
+  buildCommand?: string;
+  // The long-running server command (e.g. `yarn start:site`). Required.
+  startCommand: string;
+  // The base URL the started server listens on (e.g. `http://localhost:3000`). Required -- this
+  // is what gets threaded into the heavy gates as their runtime baseUrl.
+  baseUrl: string;
+  // Path polled to decide readiness. Default `/`.
+  readyPath?: string;
+  // How long to wait for the first OK response before giving up. Default 120s.
+  readyTimeoutMs?: number;
+  // Poll interval while waiting. Default 1s.
+  readyIntervalMs?: number;
 }
 
 export interface CheckResult {
@@ -211,6 +238,13 @@ export type ExecutionGrant = {
   // signed payload like every other field; the runner passes it as claude-code-action's
   // `plugin_marketplaces`/`plugins` inputs so the tenant's build runner installs them.
   plugins?: PluginGrant;
+  // The tenant's heavy-gate serve recipe (install/build/start/baseUrl), resolved server-side
+  // from PackConfig.serve at gate-grant issuance. Signed like every other field so the shell
+  // commands it carries can't be tampered with in transit, and read ONLY by the heavy gate
+  // stage (src/runner/serve-and-gate.ts) to bring the customer site up before the URL-bound
+  // gates (seo-site-crawl, visual-qa) run. Absent -> the heavy stage skips serving and those
+  // gates skip cleanly. NOT taken from the unsigned GateTarget.config.
+  serve?: ServeConfig;
   // Server-side resolved from the tenant's debug.showFullOutput config (never from ticket/
   // tracker input, like every other field here): tells the runner to pass claude-code-action's
   // own `show_full_output` input, revealing the raw SDK output instead of the minimal result
