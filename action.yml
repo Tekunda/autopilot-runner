@@ -159,6 +159,15 @@ runs:
         allowed_bots: 'delivery-autopilot'
         prompt: ${{ steps.prepare.outputs.prompt }}
         base_branch: ${{ steps.prepare.outputs.base-ref }}
+        # Commit identity for the edits this Action makes and commits itself. Without these it
+        # defaults to bot_name "claude[bot]" (id 41898282), so the pushed coding commit would be
+        # authored claude[bot] and the deterministic step's identity override below would be a
+        # no-op (nothing left to commit). Single-source it from vcs-host-config so every pipeline
+        # commit -- vendor-made or deterministic -- carries the SAME configured non-claude
+        # identity. bot_id is the numeric prefix of the noreply committerEmail; the Action rebuilds
+        # the address as "<bot_id>+<bot_name>@users.noreply.github.com", matching committerEmail.
+        bot_name: ${{ fromJSON(inputs.vcs-host-config).committerName || 'github-actions[bot]' }}
+        bot_id: ${{ split(fromJSON(inputs.vcs-host-config).committerEmail || '41898282+github-actions[bot]@users.noreply.github.com', '+')[0] }}
         # `--model` carries the grant's signed modelTier (prepare resolves it via
         # src/config/model-tiers.ts): a "deep" stage runs on the deep model instead of
         # claude-code-action's own default. Empty only for an unmapped provider.
@@ -225,14 +234,23 @@ runs:
         BRANCH_NAME: ${{ steps.prepare.outputs.branch-name }}
         BASE_REF: ${{ steps.prepare.outputs.base-ref }}
         STAGE: ${{ fromJSON(inputs.grant).stage }}
+        # Single source for the git identity of every pushed pipeline commit (this step's own
+        # commit for the codex/no-vendor-commit path, and the identity the claude step is told
+        # to use above). Defaults to github-actions[bot] -- valid on any repo, never claude.
+        COMMITTER_NAME: ${{ fromJSON(inputs.vcs-host-config).committerName || 'github-actions[bot]' }}
+        COMMITTER_EMAIL: ${{ fromJSON(inputs.vcs-host-config).committerEmail || '41898282+github-actions[bot]@users.noreply.github.com' }}
       run: |
-        git config user.name "github-actions[bot]"
-        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git config user.name "$COMMITTER_NAME"
+        git config user.email "$COMMITTER_EMAIL"
         git switch -C "$BRANCH_NAME"
         git add -A
         if ! git diff --cached --quiet; then
           git commit -m "Delivery Autopilot: $STAGE"
         fi
+        # Empirical identity check: prove no pushed commit is authored claude[bot]. Lists every
+        # commit this stage adds on top of base with its author AND committer.
+        echo "Pipeline commit identities ($BASE_REF..HEAD):"
+        git log "origin/$BASE_REF..HEAD" --format='%h %an <%ae> / %cn <%ce>' || true
         if [ "$(git rev-parse HEAD)" != "$(git rev-parse "origin/$BASE_REF")" ]; then
           # Two push modes, by branch ownership:
           #   * autopilot/* -- a deterministic build branch solely owned by Autopilot: FORCE-push,
