@@ -863,6 +863,14 @@ export interface TicketState {
   // loop guard, and a counter the replan clears would let a ticket replan forever, each round
   // costing a full architect run plus a rebuild of every subtask.
   autoReplans?: number;
+  // Consecutive drive ticks whose only failure was a TRANSIENT infrastructure fault (a dropped
+  // connection, timeout, 429, or 5xx -- see isTransientFault). Such a blip is not a ticket
+  // defect: the next tick usually sails through, so the drive retries rather than escalating a
+  // human on a network hiccup. Bounded: after MAX_TRANSIENT_FAILURES consecutive transient
+  // ticks the fault is treated as a real outage and the ticket blocks for a human. Reset to
+  // undefined on any successful drive tick, so intermittent blips never accumulate into a
+  // false escalation.
+  transientFailureCount?: number;
 }
 
 // The ticketId prefix for an external-PR pseudo-ticket (see TicketState.externalPr). Such
