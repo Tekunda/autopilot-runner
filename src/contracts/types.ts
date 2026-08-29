@@ -878,4 +878,10 @@ export interface PRStatus {
   // status checks (branch protection + rulesets) so a merge can't push past a
   // gate the repo enforces. Optional; adapters that don't surface it omit it.
   baseRef?: string;
+  // The sha of the merge commit once the PR is merged (GitHub's merge_commit_sha).
+  // The host reports a PR merged a beat BEFORE it advances the base branch ref, so a
+  // caller pinning work to the base head can catch the pre-merge revision; comparing
+  // the base head against this confirms the merge has actually settled. Absent until
+  // merged / when the adapter doesn't surface it.
+  mergeCommitSha?: string;
 }

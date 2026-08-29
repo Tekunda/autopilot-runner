@@ -27,6 +27,7 @@ interface GhPullDetail {
   merged: boolean;
   mergeable: boolean | null;
   mergeable_state: string;
+  merge_commit_sha: string | null;
   head: { ref: string };
   base: { ref: string };
 }
@@ -350,6 +351,7 @@ export class GitHubVCSHost implements VCSHost {
       mergeable: mapMergeability(pr.mergeable_state),
       headRef: pr.head.ref,
       ...(pr.base?.ref ? { baseRef: pr.base.ref } : {}),
+      ...(pr.merge_commit_sha ? { mergeCommitSha: pr.merge_commit_sha } : {}),
     };
   }
 
