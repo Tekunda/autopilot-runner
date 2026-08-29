@@ -24,9 +24,11 @@ import {
 } from './adapters.ts';
 import type { GateRegistry } from '../gates/registry.ts';
 import { GrantLedger } from '../control-plane/grant-ledger.ts';
+import { verifyGrant } from '../control-plane/grant-verify.ts';
 import { finalizeCodingStage, finalizeJudgmentStage, type ActionOutcome } from './finalize-stage.ts';
 import { createRunnerGateRegistry } from './gate-registry.ts';
-import { CODING_STAGES, computeChangedFiles, DEFAULT_BASE_REF, prepareStage, type PreparedStage } from './prepare-stage.ts';
+import { CODING_STAGES, computeChangedFiles, DEFAULT_BASE_REF, prepareStage, rejectedTelemetry, type PreparedStage } from './prepare-stage.ts';
+import { resolveClaimSha, tryClaimGrant, type ClaimEmitter } from './replay-claim.ts';
 import { runGateStage, type GateTarget } from './run-gate-stage.ts';
 import { runHeavyGateStage } from './serve-and-gate.ts';
 
@@ -39,6 +41,9 @@ export type ActionInputs =
       verifyKey: string;
       baseRef: string;
       codingExecutor: CodingExecutorConfig;
+      // The VCS host config for the durable replay claim placed before the vendor step. Optional:
+      // absent -> no claim (the run proceeds unchanged, without replay prevention).
+      vcsHost?: VCSHostConfig;
     }
   | {
       mode: 'finalize';
@@ -105,6 +110,9 @@ export function parseInputs(env: NodeJS.ProcessEnv = process.env): ActionInputs 
       verifyKey,
       baseRef: env['INPUT_BASE-REF'] || DEFAULT_BASE_REF,
       codingExecutor: requireJsonEnv<CodingExecutorConfig>(env, 'INPUT_CODING-EXECUTOR-CONFIG'),
+      ...(env['INPUT_VCS-HOST-CONFIG']
+        ? { vcsHost: requireJsonEnv<VCSHostConfig>(env, 'INPUT_VCS-HOST-CONFIG') }
+        : {}),
     };
   }
 
@@ -147,6 +155,8 @@ export interface RunActionDeps {
   gateRegistry?: GateRegistry;
   /** Override the grant consume ledger; defaults to this process's shared one. */
   grantLedger?: GrantLedger;
+  /** Observability seam for the replay-claim attempt; defaults to replay-claim's own emitter. */
+  emitClaimEvent?: ClaimEmitter;
   /** Clock override for tests; defaults to the current time. */
   now?: Date;
 }
@@ -176,6 +186,18 @@ function resolvedTelemetry(result: ActionResult): StatusTelemetry | undefined {
 export async function runActionEntry(inputs: ActionInputs, deps: RunActionDeps = {}): Promise<ActionResult> {
   if (inputs.mode === 'gate' || inputs.mode === 'heavy-gate') {
     const vcsHost = deps.vcsHost ?? createVCSHost(inputs.vcsHost);
+    // Durable replay claim for the gate stage: verify the signature, then atomically claim the
+    // grant before running (and publishing) any gate. A replayed gate grant re-dispatched into a
+    // fresh job would otherwise re-publish a stale verdict; the claim rejects it here. runGateStage
+    // verifies again harmlessly. Fail-open on any non-definitive claim outcome (see replay-claim.ts).
+    const gateVerification = verifyGrant(inputs.grant, inputs.verifyKey, deps.now ?? new Date());
+    if (gateVerification.ok) {
+      const sha = await resolveClaimSha(inputs.grant, vcsHost, inputs.target.branch || inputs.target.baseRef);
+      const claim = await tryClaimGrant(inputs.grant, vcsHost, sha, deps.emitClaimEvent);
+      if (claim.status === 'replayed') {
+        return { mode: 'gate', telemetry: rejectedTelemetry(inputs.grant, 'replayed grant') };
+      }
+    }
     const registry = deps.gateRegistry ?? createRunnerGateRegistry();
     const stageDeps = {
       vcsHost,
@@ -210,6 +232,10 @@ export async function runActionEntry(inputs: ActionInputs, deps: RunActionDeps =
       ...('model' in inputs.codingExecutor && inputs.codingExecutor.model
         ? { configuredModel: inputs.codingExecutor.model }
         : {}),
+      // The replay claim runs only when the runner supplied a VCS host (action.yml passes it to
+      // the prepare step); a test or install without one proceeds unclaimed.
+      ...(deps.vcsHost ?? inputs.vcsHost ? { vcsHost: deps.vcsHost ?? createVCSHost(inputs.vcsHost!) } : {}),
+      ...(deps.emitClaimEvent ? { emitClaimEvent: deps.emitClaimEvent } : {}),
       now: deps.now,
     });
     return { mode: 'prepare', prepared };

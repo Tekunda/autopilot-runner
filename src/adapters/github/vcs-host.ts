@@ -1,8 +1,8 @@
 // GitHub implementation of the VCSHost contract (src/contracts/adapters.ts).
 
-import type { OpenPR, PrFeedback, PublishedCheck, VCSHost } from '../../contracts/adapters.ts';
+import type { ClaimRefResult, OpenPR, PrFeedback, PublishedCheck, VCSHost } from '../../contracts/adapters.ts';
 import type { CheckResult, PRStatus } from '../../contracts/types.ts';
-import { GitHubClient, type GitHubClientConfig } from './rest.ts';
+import { GitHubApiError, GitHubClient, type GitHubClientConfig } from './rest.ts';
 
 interface GhRef {
   object: { sha: string };
@@ -592,6 +592,62 @@ export class GitHubVCSHost implements VCSHost {
       return undefined; // contract: absence never throws (unknown check, transient, permission)
     }
   }
+
+  // Atomic create-if-not-exists via git ref creation: POST /git/refs is 201 for the first
+  // creator and 422 "Reference already exists" for every one after (the replay signal). Only
+  // that specific 422 becomes 'exists'; any OTHER 422 (e.g. "Object does not exist" for a bad
+  // sha) and every other failure throws, so the caller fails-open rather than mistaking an
+  // unrelated error for a replay.
+  // COUPLING (re-verify if it ever misbehaves): the replay-vs-other-422 distinction is a match
+  // on GitHub's error WORDING (/already exists/i), not a machine-readable code the API exposes.
+  // If GitHub reworded that message, a genuine "already exists" 422 would fall through to `throw`
+  // -> the caller fails open -> the replay proceeds. That's consistent with the module's fail-open
+  // stance (a replay is resource-abuse, not priv-esc), but the guard silently weakens, so a future
+  // reader who sees replays slipping through should check this string first.
+  async createClaimRef(repoId: string, ref: string, sha: string): Promise<ClaimRefResult> {
+    try {
+      await this.client.request('POST', `/repos/${repoId}/git/refs`, { ref, sha });
+      return 'created';
+    } catch (err) {
+      if (err instanceof GitHubApiError && err.status === 422 && /already exists/i.test(err.message)) {
+        return 'exists';
+      }
+      throw err;
+    }
+  }
+
+  async listClaimRefs(repoId: string): Promise<string[]> {
+    // matching-refs takes the ref WITHOUT the leading `refs/` and returns every ref under it.
+    // 200 with [] when none match (never 404 for a valid namespace); requestOptional guards a
+    // repo/namespace that returns 404 anyway. PAGINATE (bounded): the endpoint pages at ~30/ref
+    // by default, so a single fetch would show the GC sweep only page 1 and leak every claim ref
+    // beyond it. The claim names DO sort the oldest/expired first onto page 1 today (equal-length
+    // 13-digit `<epochMs>-` prefixes sort ascending), but relying on that is a latent assumption --
+    // walk every page so GC provably sees them all regardless of volume or naming. Same page-100/
+    // stop-on-short-batch shape listOpenPRs/listPrFeedback use.
+    const refs: GhNamedRef[] = [];
+    for (let page = 1; page <= 50; page++) {
+      const batch =
+        (await this.client.requestOptional<GhNamedRef[]>(
+          'GET',
+          `/repos/${repoId}/git/matching-refs/autopilot-claims/?per_page=100&page=${page}`,
+        )) ?? [];
+      refs.push(...batch);
+      if (batch.length < 100) break;
+    }
+    return refs.map((r) => r.ref).filter((ref): ref is string => typeof ref === 'string');
+  }
+
+  // A claim ref already gone is the desired end state, so a 404 from the delete is success
+  // (requestOptional swallows it). The endpoint wants the ref without its leading `refs/`.
+  async deleteClaimRef(repoId: string, ref: string): Promise<void> {
+    await this.client.requestOptional('DELETE', `/repos/${repoId}/git/refs/${ref.replace(/^refs\//, '')}`);
+  }
+}
+
+interface GhNamedRef {
+  ref: string;
+  object: { sha: string };
 }
 
 interface GhWorkflowRun {

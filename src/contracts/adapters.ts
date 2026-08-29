@@ -212,7 +212,25 @@ export interface VCSHost {
     checkRef: { name: string; headSha?: string },
     maxLines?: number,
   ): Promise<string | undefined>;
+  // Atomically create a replay-claim ref (refs/autopilot-claims/*) pointing at `sha`, using git
+  // ref creation as a create-if-not-exists: resolves 'created' when this call made the ref and
+  // 'exists' when it was already there. The 'exists' case is the replay signal the runner acts on
+  // (src/runner/replay-claim.ts), so the distinction is returned, never thrown -- a 422 "Reference
+  // already exists" becomes 'exists', while any OTHER failure (network/5xx/403, an unresolvable
+  // sha) throws so the caller can fail-open. Optional: a host without git-refs write (or a
+  // read-only install) simply doesn't implement it and the guard is inert (harmless).
+  createClaimRef?(repoId: string, ref: string, sha: string): Promise<ClaimRefResult>;
+  // Every claim ref in the repo (refs/autopilot-claims/*), full ref names. Read by the control
+  // plane's GC sweep to reclaim expired claims. Optional, paired with createClaimRef/deleteClaimRef.
+  listClaimRefs?(repoId: string): Promise<string[]>;
+  // Delete a claim ref by its full name (refs/autopilot-claims/*). Used by the GC sweep; deleting
+  // one already gone is a no-op, never an error. Optional, paired with createClaimRef.
+  deleteClaimRef?(repoId: string, ref: string): Promise<void>;
 }
+
+// The result of an atomic claim-ref creation: 'created' when this caller won the ref, 'exists'
+// when it was already present (the replay signal). Any hard failure throws instead.
+export type ClaimRefResult = 'created' | 'exists';
 
 // An open pull request as seen by the external-PR QA sweep: enough to identify it,
 // route a QA grant at its head, and decide whether Autopilot itself opened it.

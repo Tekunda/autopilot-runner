@@ -20,13 +20,14 @@ import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type { CodingExecutor } from '../contracts/adapters.ts';
+import type { CodingExecutor, VCSHost } from '../contracts/adapters.ts';
 import { effortForTier, resolveModel } from '../config/model-tiers.ts';
 import type { ExecutionGrant, Stage, StatusTelemetry } from '../contracts/types.ts';
 import { slugify } from '../control-plane/branch-names.ts';
 import { verifyGrant, type KeyInput } from '../control-plane/grant-verify.ts';
 import { resolveBaseSha } from '../gates/git.ts';
 import { buildMcpConfig } from './mcp-config.ts';
+import { resolveClaimSha, tryClaimGrant, type ClaimEmitter } from './replay-claim.ts';
 
 export interface PrepareStageDeps {
   codingExecutor: CodingExecutor;
@@ -43,6 +44,15 @@ export interface PrepareStageDeps {
   executorProvider?: string;
   /** Customer-configured model id, which wins over the tier mapping. */
   configuredModel?: string;
+  /**
+   * The VCS host used to place the durable replay claim (src/runner/replay-claim.ts) before any
+   * vendor step runs. Absent -> no claim is attempted (the pure prepare path, and any runner
+   * install without git-refs write): the run proceeds exactly as before, without replay
+   * prevention.
+   */
+  vcsHost?: VCSHost;
+  /** Observability seam for the claim attempt; defaults to replay-claim's console/stdout emitter. */
+  emitClaimEvent?: ClaimEmitter;
   /** Clock override for tests; defaults to the current time. */
   now?: Date;
 }
@@ -161,6 +171,19 @@ export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps
   // so folding the sha in here pins the vendor step's tree even if the branch moves under
   // the round -- three reviewers dispatched in parallel can never land on different heads.
   const baseRef = grant.headSha ?? baseBranch;
+
+  // Durable replay claim: this is the FIRST runner step for the grant, so before any vendor step
+  // (and before the MCP file this phase writes), atomically claim the grant against GitHub. A
+  // replay -- the same signed grant re-dispatched into a fresh job within its TTL -- collides on
+  // the claim ref and is rejected here, before any AI spend or push. Any other claim-store outcome
+  // fails open (see replay-claim.ts). Skipped entirely when no VCS host is supplied.
+  if (deps.vcsHost) {
+    const sha = await resolveClaimSha(grant, deps.vcsHost, baseBranch);
+    const claim = await tryClaimGrant(grant, deps.vcsHost, sha, deps.emitClaimEvent);
+    if (claim.status === 'replayed') {
+      return { kind: 'resolved', telemetry: rejectedTelemetry(grant, 'replayed grant') };
+    }
+  }
 
   // The grant's signed tier decides the model for this stage; a customer-configured
   // model still wins (BYO config is never overridden). An unmapped provider yields

@@ -80,6 +80,10 @@ runs:
         INPUT_GRANT: ${{ inputs.grant }}
         INPUT_VERIFY-KEY: ${{ inputs.verify-key }}
         INPUT_CODING-EXECUTOR-CONFIG: ${{ inputs.coding-executor-config }}
+        # The VCS-host config lets prepare place the durable replay claim (refs/autopilot-claims/*)
+        # before any vendor step runs -- the FIRST runner step for the grant, so a replayed grant
+        # aborts here before any AI spend or push (src/runner/replay-claim.ts).
+        INPUT_VCS-HOST-CONFIG: ${{ inputs.vcs-host-config }}
         INPUT_BASE-REF: ${{ github.event.repository.default_branch }}
       run: node src/runner/action-entry.ts
 
