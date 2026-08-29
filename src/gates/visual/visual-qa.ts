@@ -263,7 +263,12 @@ export function createVisualQaGate(deps: VisualQaDeps = {}): Gate {
         return { id: VISUAL_QA_GATE_ID, status: 'fail', findings: [...failures, ...inconclusive] };
       }
       if (inconclusive.length > 0) {
-        return { id: VISUAL_QA_GATE_ID, status: 'unjudged', findings: inconclusive };
+        // Every `inconclusive` entry came from a VisionRateLimitError (the ONLY branch that pushes
+        // to it): the judge could not RUN because the model API stayed rate-limited past its
+        // backoff. That is INFRA-class, not a no-verdict-about-the-page -- tag it so the fix loop
+        // grants one gate-only retry (a 429 may clear) before escalating, instead of escalating a
+        // human straight away. It stays `unjudged`, so it still fails closed and NEVER passes.
+        return { id: VISUAL_QA_GATE_ID, status: 'unjudged', unjudgedReason: 'infra', findings: inconclusive };
       }
       return { id: VISUAL_QA_GATE_ID, status: 'pass' };
     },

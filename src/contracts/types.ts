@@ -193,6 +193,14 @@ export interface CheckResult {
   // not "judged and failed". `CheckStatus` stays a three-value union; this flag rides
   // alongside it.
   unjudged?: true;
+  // When `unjudged`, WHY the gate reached no verdict -- it NEVER lets an unjudged pass, it only
+  // routes escalation. 'infra': the judge could not RUN (the vision model stayed rate-limited/429
+  // past its own backoff -- a transient infra fault). No code edit clears a 429, so a `fix` stage
+  // is useless, but a re-run might reach a verdict: the fix loop grants exactly ONE gate-only retry
+  // before escalating. 'content': the judge RAN but reached no verdict about the page -- no re-run
+  // helps, so it escalates to a human immediately. Absent -> treated as 'content' (fail closed,
+  // escalate now).
+  unjudgedReason?: 'infra' | 'content';
   // The gate NEVER RAN (returned `skip`) -- the complement of `unjudged`'s "ran, no verdict". It
   // publishes with `status:'pending'` (a skip was never evaluated, not passed), but a skip is not
   // the same as a not-yet-run pending: this flag makes the two distinguishable so a perpetual-skip

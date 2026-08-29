@@ -62,6 +62,12 @@ export interface GateResult {
   // artifact (ci-runner parseGateReport) so the promotion record can tell a benign skip from a
   // suspicious perpetual one.
   skipReason?: SkipReason;
+  // Set on `status:'unjudged'` to say WHY the gate reached no verdict. 'infra': the judge could
+  // not RUN (the vision model stayed rate-limited/429 past its backoff -- transient infra); a
+  // re-run may succeed, so downstream grants one gate-only retry before escalating. 'content':
+  // the judge RAN but reached no verdict about the page; a re-run won't help, so escalate now.
+  // Absent -> treated as 'content'. It NEVER makes an unjudged pass -- it only routes escalation.
+  unjudgedReason?: 'infra' | 'content';
   findings?: string[];
   detailsUrl?: string;
 }

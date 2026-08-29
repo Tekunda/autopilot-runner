@@ -100,7 +100,9 @@ function toChecks(results: GateResult[], nameSuffix = ''): CheckResult[] {
   return results.map((result) => ({
     name: `${result.id}${nameSuffix}`,
     status: toCheckStatus(result.status),
-    ...(result.status === 'unjudged' ? { unjudged: true as const } : {}),
+    ...(result.status === 'unjudged'
+      ? { unjudged: true as const, ...(result.unjudgedReason ? { unjudgedReason: result.unjudgedReason } : {}) }
+      : {}),
     ...(result.status === 'skip'
       ? { skipped: true as const, ...(result.skipReason ? { skipReason: result.skipReason } : {}) }
       : {}),
