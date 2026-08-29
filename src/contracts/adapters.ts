@@ -335,6 +335,18 @@ export interface KnowledgeSource {
   fetch(ref: string): Promise<Snippet>;
 }
 
+// Optional structured correlation fields a caller may attach to a notify() call so
+// operators can filter logs by ticket/stage/run/tenant instead of grepping prose.
+// Observability only -- implementations render these when present and are otherwise
+// unchanged; nothing in the engine requires them.
+export interface NotifyFields {
+  ticketId?: string;
+  stage?: Stage;
+  runId?: number;
+  tenantId?: string;
+  gateIds?: string[];
+}
+
 export interface Notifier {
-  notify(event: string, plainText: string): Promise<void>;
+  notify(event: string, plainText: string, fields?: NotifyFields): Promise<void>;
 }
