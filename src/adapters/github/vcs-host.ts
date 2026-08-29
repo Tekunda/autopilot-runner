@@ -230,11 +230,12 @@ export class GitHubVCSHost implements VCSHost {
     // endpoints, so fetch them via GraphQL and surface each UNRESOLVED thread's first comment
     // as a `comment` carrying its thread node id (so the fix can resolve exactly that thread).
     // Paginate every page (a PR can carry >100 open threads; dropping the tail silently loses
-    // reviewer feedback). A transient GraphQL error is retried once per page rather than
-    // silently swallowed -- but we still can't throw on repeated failure: the caller wraps this
-    // in `.catch(() => [])`, so throwing would drop the REST feedback too. On repeated failure
-    // we keep whatever threads we already paged plus the REST feedback, and let the next tick
-    // re-read (the missing threads stay below the cursor, so they aren't marked seen).
+    // reviewer feedback). A transient GraphQL error is already retried under the breaker by
+    // client.request (resilient-request.ts), so a throw here means a non-transient or
+    // retry-exhausted failure -- and we still can't rethrow: the caller wraps this in
+    // `.catch(() => [])`, so throwing would drop the REST feedback too. On failure we keep
+    // whatever threads we already paged plus the REST feedback, and let the next tick re-read
+    // (the missing threads stay below the cursor, so they aren't marked seen).
     const [owner, repo] = repoId.split('/');
     if (owner && repo) {
       const query = `query($owner:String!,$repo:String!,$pr:Int!,$after:String){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor}nodes{id isResolved comments(first:1){nodes{databaseId body author{login __typename}}}}}}}}`;
@@ -242,21 +243,15 @@ export class GitHubVCSHost implements VCSHost {
       let after: string | null = null;
       for (let page = 0; page < 50; page++) {
         let conn: GhReviewThreadsConnection | undefined;
-        let failed = false;
-        for (let attempt = 0; attempt < 2; attempt++) {
-          try {
-            const res = await this.client.request<{ data?: GhReviewThreadsData }>('POST', '/graphql', {
-              query,
-              variables: { owner, repo, pr: prNumber, after },
-            });
-            conn = res?.data?.repository?.pullRequest?.reviewThreads;
-            failed = false;
-            break;
-          } catch {
-            failed = true;
-          }
+        try {
+          const res: { data?: GhReviewThreadsData } | undefined = await this.client.request<{ data?: GhReviewThreadsData }>('POST', '/graphql', {
+            query,
+            variables: { owner, repo, pr: prNumber, after },
+          });
+          conn = res?.data?.repository?.pullRequest?.reviewThreads;
+        } catch {
+          break; // non-transient or retry-exhausted: keep prior pages + REST, retry next tick
         }
-        if (failed) break; // repeated failure: keep prior pages + REST, retry next tick
         threads.push(...(conn?.nodes ?? []));
         if (!conn?.pageInfo?.hasNextPage) break;
         after = conn.pageInfo.endCursor ?? null;
