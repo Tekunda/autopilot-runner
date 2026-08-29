@@ -8,7 +8,9 @@
 // TARGET DERIVATION mirrors Visual-QA: a changed content/page file maps to the route it serves; a
 // changed app-router source file (page/layout/i18n) under the tenant's `appDir` maps to the route of
 // its own directory, so a page whose copy lives only in the app i18n dictionary (no content/site
-// record) still maps; a changed shared/global asset fans out to a representative route sample. Those
+// record) still maps; a changed `layout`/`template` additionally fans out to the representative route
+// sample, since it WRAPS a subtree of descendant routes whose regressions never show on its own
+// directory route; a changed shared/global asset fans out to a representative route sample. Those
 // diff-derived routes are then filtered by the config `routes` globs, and any GLOB-FREE (literal)
 // `routes` entry is ALWAYS checked regardless of the diff (a tenant pins its key pages that way). No
 // resulting route -> skip.
@@ -26,7 +28,7 @@ import { readGateConfig } from '../generic/config.ts';
 import { createContentReader, type ContentFormat } from '../../packs/seo/content.ts';
 import type { Gate, GateContext, GateResult } from '../types.ts';
 import { createPlaywrightLayoutBrowser, type LayoutBrowser, type Viewport } from './browser.ts';
-import { evaluateRules, measureSpecFor, normalizeRules, rulesForViewport, type LayoutRule } from './rules.ts';
+import { evaluateRules, measureSpecFor, normalizeRulesDetailed, rulesForViewport } from './rules.ts';
 
 export const LAYOUT_RULES_GATE_ID = 'layout-rules';
 
@@ -132,8 +134,26 @@ function matchesAnyGlob(file: string, globs: string[]): boolean {
 const ROUTE_FILE_BASENAME_RE = /^(?:page|layout|template|default|loading|error|not-found)\.[jt]sx?$/;
 const I18N_FILE_BASENAME_RE = /(?:^|[-.])i18n\.[jt]sx?$/;
 
+// A `layout`/`template` is a WRAPPER: it renders around every descendant route in its subtree, so a
+// regression in one (a broken shared grid, a stray max-width) can only be seen on the pages it wraps,
+// NOT on its own directory route -- which is often not even navigable. A leaf `page` is deliberately
+// excluded: it renders only its own route, so it maps there and nowhere else (the over-trigger guard).
+const WRAPPER_FILE_BASENAME_RE = /^(?:layout|template)\.[jt]sx?$/;
+
 function isRouteSourceFile(basename: string): boolean {
   return ROUTE_FILE_BASENAME_RE.test(basename) || I18N_FILE_BASENAME_RE.test(basename);
+}
+
+// True when the changed file is a `layout`/`template` route source under `appDir` -- a wrapper whose
+// subtree of descendant routes must be re-checked, not just its own directory. The descendant set is
+// not derivable from the diff alone, so the gate fans it out to the representative route sample (the
+// same bounded mechanism a shared/global asset uses), keeping the over-trigger scoped.
+function isWrapperRouteFile(file: string, appDir: string): boolean {
+  const prefix = appDir.replace(/\/+$/, '') + '/';
+  if (!file.startsWith(prefix)) return false;
+  const segments = file.slice(prefix.length).split('/');
+  const basename = segments[segments.length - 1] ?? '';
+  return WRAPPER_FILE_BASENAME_RE.test(basename);
 }
 
 // The route a changed app-source file serves, or null if it does not derive one. A file under
@@ -188,7 +208,10 @@ async function diffRoutes(ctx: GateContext, config: LayoutRulesConfig): Promise<
     }
   }
   const fansOut = ctx.changedFiles.some(
-    (file) => isGlobalAsset(file, globalPatterns) || matchesAnyGlob(file, sharedSourceGlobs),
+    (file) =>
+      isGlobalAsset(file, globalPatterns) ||
+      matchesAnyGlob(file, sharedSourceGlobs) ||
+      (config.appDir !== undefined && isWrapperRouteFile(file, config.appDir)),
   );
   if (fansOut) {
     for (const route of representativeRoutes) routes.add(normalizeRoute(route));
@@ -229,8 +252,24 @@ export function createLayoutRulesGate(deps: LayoutRulesDeps = {}): Gate {
         return { id: LAYOUT_RULES_GATE_ID, status: 'skip', skipReason: 'no-baseurl', findings: ['no served baseUrl (serve stage not wired)'] };
       }
 
-      const rules: LayoutRule[] = normalizeRules(config.rules);
+      const { rules, dropped } = normalizeRulesDetailed(config.rules);
       if (rules.length === 0) {
+        if (dropped.length > 0) {
+          // Rules WERE declared but every entry failed to parse (a typo'd field/type). Silently
+          // treating this as "nothing configured" is the never-run hole the TEK-3691 verdict ledger
+          // exists to catch: it would bank a permanent no-op as a benign skip forever. Surface the
+          // dropped entries and mark the skip `invalid-config` (a SUSPICIOUS reason) so the
+          // never-fired tracker alarms instead of staying silent on a config typo.
+          return {
+            id: LAYOUT_RULES_GATE_ID,
+            status: 'skip',
+            skipReason: 'invalid-config',
+            findings: [
+              `${dropped.length} declared layout rule${dropped.length === 1 ? '' : 's'} dropped as malformed; none parsed`,
+              ...dropped.map((d) => `rule[${d.index}]: ${d.reason}`),
+            ],
+          };
+        }
         // No declared rule set -> the gate is a zero-cost no-op for this tenant/repo.
         return { id: LAYOUT_RULES_GATE_ID, status: 'skip', skipReason: 'no-config', findings: ['no layout rules configured'] };
       }
@@ -244,7 +283,11 @@ export function createLayoutRulesGate(deps: LayoutRulesDeps = {}): Gate {
       const injectedBrowser = deps.browser;
       let browser: LayoutBrowser | undefined;
       const failures: string[] = [];
-      const notes: string[] = [];
+      // A partial-malformed config (some valid rules, some dropped) still RUNS on its valid rules, but
+      // the dropped entries must stay VISIBLE on the resulting verdict -- otherwise a typo'd rule
+      // silently never enforces and the never-fired ledger can't catch it (the gate DID fire). Seed the
+      // notes with them so they ride along on whatever pass/fail verdict an operator sees.
+      const notes: string[] = dropped.map((d) => `dropped malformed rule[${d.index}]: ${d.reason}`);
       try {
         const targets = await deriveTargets(ctx, config);
         if (targets.length === 0) {

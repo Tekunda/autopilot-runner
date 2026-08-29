@@ -44,8 +44,16 @@ export interface GateContext {
 // indistinguishable from a pass (the exact hole that let a perpetual-skip `layout-rules` be flipped
 // to blocking though it never produced a verdict). The reason drives escalation: `no-config`/
 // `disabled` are benign (the gate has nothing to do), while a gate WITH rules that skips every time
-// (`no-matching-route`/`no-baseurl`) is a diagnosable misconfiguration worth surfacing.
-export type SkipReason = 'no-baseurl' | 'no-matching-route' | 'no-config' | 'disabled' | 'infra';
+// (`no-matching-route`/`no-baseurl`) is a diagnosable misconfiguration worth surfacing. `invalid-config`
+// is a rule set that WAS declared but parsed to nothing (every entry malformed) -- a typo'd config
+// that would otherwise masquerade as a benign `no-config` no-op forever, so it is suspicious too.
+export type SkipReason =
+  | 'no-baseurl'
+  | 'no-matching-route'
+  | 'no-config'
+  | 'invalid-config'
+  | 'disabled'
+  | 'infra';
 
 export interface GateResult {
   id: string;

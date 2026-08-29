@@ -187,31 +187,71 @@ const RULE_TYPES = new Set([
   'section_height',
 ]);
 
-// Normalize ONE declared rule. Accepts both the terse bare-key YAML form
-// (`{ sibling_height_delta: { within, max_px } }`) and the already-tagged
-// (`{ type: 'sibling_height_delta', within, max_px }`) form. Returns null for anything
-// unrecognized or malformed so it is dropped rather than crashing the gate.
-export function normalizeRule(raw: unknown): LayoutRule | null {
-  if (!isObject(raw)) return null;
+const MALFORMED_FIELD_REASON = 'missing or malformed required field';
+
+// Normalize ONE declared rule to either the typed rule or a human reason it was dropped. Accepts
+// both the terse bare-key YAML form (`{ sibling_height_delta: { within, max_px } }`) and the
+// already-tagged (`{ type: 'sibling_height_delta', within, max_px }`) form. A drop reason (rather
+// than a bare null) lets the gate SURFACE a typo'd rule set instead of silently swallowing it.
+function normalizeRuleResult(raw: unknown): { rule: LayoutRule } | { drop: string } {
+  if (!isObject(raw)) return { drop: 'entry is not a rule object' };
   const tagged = asString(raw.type);
-  if (tagged && RULE_TYPES.has(tagged)) return buildRule(tagged, raw);
+  if (tagged && RULE_TYPES.has(tagged)) {
+    const rule = buildRule(tagged, raw);
+    return rule ? { rule } : { drop: `rule '${tagged}': ${MALFORMED_FIELD_REASON}` };
+  }
   const keys = Object.keys(raw).filter((key) => RULE_TYPES.has(key));
-  if (keys.length !== 1) return null;
+  if (keys.length === 0) {
+    return { drop: tagged ? `unknown rule type '${tagged}'` : 'no recognized rule type' };
+  }
+  if (keys.length > 1) return { drop: `ambiguous: multiple rule types (${keys.join(', ')})` };
   const key = keys[0]!;
   const body = raw[key];
-  return isObject(body) ? buildRule(key, body) : null;
+  if (!isObject(body)) return { drop: `rule '${key}': body is not an object` };
+  const rule = buildRule(key, body);
+  return rule ? { rule } : { drop: `rule '${key}': ${MALFORMED_FIELD_REASON}` };
 }
 
-// Normalize a declared rule LIST, dropping any entry that does not parse. A non-array (or absent)
-// value yields an empty list, which the gate reads as "no rule set -> skip".
-export function normalizeRules(raw: unknown): LayoutRule[] {
-  if (!Array.isArray(raw)) return [];
+// Returns the typed rule, or null for anything unrecognized or malformed so it is dropped rather
+// than crashing the gate.
+export function normalizeRule(raw: unknown): LayoutRule | null {
+  const result = normalizeRuleResult(raw);
+  return 'rule' in result ? result.rule : null;
+}
+
+// One dropped rule-list entry: its index in the declared list and why it did not parse.
+export interface DroppedRule {
+  index: number;
+  reason: string;
+}
+
+// The valid rules from a declared list PLUS the entries that were dropped and why. The gate needs
+// both: an all-dropped list (rules declared, none valid) is a typo'd config to ALARM on, distinct
+// from a genuinely absent rule set (a benign no-op) -- and the dropped reasons become skip findings.
+export interface NormalizedRules {
+  rules: LayoutRule[];
+  dropped: DroppedRule[];
+}
+
+// Normalize a declared rule LIST. A non-array (or absent) value yields empty rules AND no dropped
+// entries -- "no rule set declared", which the gate reads as a benign no-op skip. A non-empty list
+// whose entries all fail to parse yields empty rules but a non-empty `dropped`, which the gate reads
+// as a typo'd config (invalid-config) rather than "nothing configured".
+export function normalizeRulesDetailed(raw: unknown): NormalizedRules {
+  if (!Array.isArray(raw)) return { rules: [], dropped: [] };
   const rules: LayoutRule[] = [];
-  for (const entry of raw) {
-    const rule = normalizeRule(entry);
-    if (rule) rules.push(rule);
-  }
-  return rules;
+  const dropped: DroppedRule[] = [];
+  raw.forEach((entry, index) => {
+    const result = normalizeRuleResult(entry);
+    if ('rule' in result) rules.push(result.rule);
+    else dropped.push({ index, reason: result.drop });
+  });
+  return { rules, dropped };
+}
+
+// The valid rules only, dropping any entry that does not parse.
+export function normalizeRules(raw: unknown): LayoutRule[] {
+  return normalizeRulesDetailed(raw).rules;
 }
 
 // The subset of `rules` that applies at a viewport of the given WIDTH: a rule with a non-empty
