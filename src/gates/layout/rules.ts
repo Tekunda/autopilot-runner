@@ -50,12 +50,19 @@ export interface MeasureQuery {
 
 export type MeasureSpec = MeasureQuery[];
 
+// Every rule may carry an optional `viewports`: the viewport WIDTHS (in CSS px) it is scoped to. Set
+// -> the rule is evaluated ONLY at those widths (e.g. a 1600px section cap for desktop and a separate
+// 3200px cap for mobile, each viewport with its own threshold). Unset/empty -> the rule applies at
+// ALL configured viewports (the default). The gate does the width-match filtering (rulesForViewport);
+// the evaluators below never see a rule at a viewport it excludes.
+
 // F1 (sibling-height void): within each `within` match, direct children are grouped into rows
 // (shared top within tolerance); the largest intra-row height delta greater than `max_px` fails.
 export interface SiblingHeightDeltaRule {
   type: 'sibling_height_delta';
   within: string;
   max_px: number;
+  viewports?: number[];
 }
 
 // F5 (width-ratio): width(of) / width(nearest `within` ancestor) below `min` fails.
@@ -64,6 +71,7 @@ export interface ContentWidthRatioRule {
   of: string;
   within: string;
   min: number;
+  viewports?: number[];
 }
 
 // Within each `within` match, the largest vertical gap between direct-children content boxes that
@@ -72,6 +80,7 @@ export interface LargestEmptyRegionRule {
   type: 'largest_empty_region';
   within: string;
   max_px: number;
+  viewports?: number[];
 }
 
 // F2 (over-tall section): any element matching `selector` (default `section[id]`) taller than
@@ -80,6 +89,7 @@ export interface SectionHeightRule {
   type: 'section_height';
   selector?: string;
   max_px: number;
+  viewports?: number[];
 }
 
 export type LayoutRule =
@@ -114,6 +124,28 @@ function asNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
+// The optional viewport-width scope. Valid only as an array of positive integers; anything malformed
+// (a non-array, a fractional/negative/zero width, a non-number entry) drops the whole field rather
+// than throwing -- the rule then falls back to its all-viewports default. An empty array is likewise
+// treated as unset.
+function asViewports(value: unknown): number[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const widths: number[] = [];
+  for (const entry of value) {
+    const width = asNumber(entry);
+    if (width === undefined || !Number.isInteger(width) || width <= 0) return undefined;
+    widths.push(width);
+  }
+  return widths.length > 0 ? widths : undefined;
+}
+
+// Attach the parsed `viewports` scope to a built rule when present; a malformed/absent scope leaves
+// the rule unchanged (applies at all viewports).
+function withViewports<T extends LayoutRule>(rule: T, body: Record<string, unknown>): T {
+  const viewports = asViewports(body.viewports);
+  return viewports ? { ...rule, viewports } : rule;
+}
+
 // Build a typed rule from an already-flattened `{ type, ...fields }` object, or null if a required
 // field is missing/mistyped. Returning null (rather than throwing) keeps a single malformed rule
 // from wedging the whole gate -- it simply does not run.
@@ -122,24 +154,26 @@ function buildRule(type: string, body: Record<string, unknown>): LayoutRule | nu
     case 'sibling_height_delta': {
       const within = asString(body.within);
       const max_px = asNumber(body.max_px);
-      return within !== undefined && max_px !== undefined ? { type, within, max_px } : null;
+      return within !== undefined && max_px !== undefined ? withViewports({ type, within, max_px }, body) : null;
     }
     case 'content_width_ratio': {
       const of = asString(body.of);
       const within = asString(body.within);
       const min = asNumber(body.min);
-      return of !== undefined && within !== undefined && min !== undefined ? { type, of, within, min } : null;
+      return of !== undefined && within !== undefined && min !== undefined
+        ? withViewports({ type, of, within, min }, body)
+        : null;
     }
     case 'largest_empty_region': {
       const within = asString(body.within);
       const max_px = asNumber(body.max_px);
-      return within !== undefined && max_px !== undefined ? { type, within, max_px } : null;
+      return within !== undefined && max_px !== undefined ? withViewports({ type, within, max_px }, body) : null;
     }
     case 'section_height': {
       const max_px = asNumber(body.max_px);
       if (max_px === undefined) return null;
       const selector = asString(body.selector);
-      return selector !== undefined ? { type, selector, max_px } : { type, max_px };
+      return withViewports(selector !== undefined ? { type, selector, max_px } : { type, max_px }, body);
     }
     default:
       return null;
@@ -178,6 +212,13 @@ export function normalizeRules(raw: unknown): LayoutRule[] {
     if (rule) rules.push(rule);
   }
   return rules;
+}
+
+// The subset of `rules` that applies at a viewport of the given WIDTH: a rule with a non-empty
+// `viewports` scope survives only if that width is listed; a rule without one applies everywhere.
+// The gate calls this per viewport so each viewport measures and evaluates only its own rules.
+export function rulesForViewport(rules: readonly LayoutRule[], width: number): LayoutRule[] {
+  return rules.filter((rule) => !rule.viewports || rule.viewports.length === 0 || rule.viewports.includes(width));
 }
 
 // The DOM queries the in-page routine must run for `rules`, aligned by index so the returned

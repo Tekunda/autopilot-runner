@@ -23,7 +23,7 @@ import { readGateConfig } from '../generic/config.ts';
 import { createContentReader, type ContentFormat } from '../../packs/seo/content.ts';
 import type { Gate, GateContext, GateResult } from '../types.ts';
 import { createPlaywrightLayoutBrowser, type LayoutBrowser, type Viewport } from './browser.ts';
-import { evaluateRules, measureSpecFor, normalizeRules, type LayoutRule } from './rules.ts';
+import { evaluateRules, measureSpecFor, normalizeRules, rulesForViewport, type LayoutRule } from './rules.ts';
 
 export const LAYOUT_RULES_GATE_ID = 'layout-rules';
 
@@ -61,7 +61,8 @@ export interface LayoutRulesConfig {
   // entry is ALWAYS checked regardless of the diff. `*`/`?` are wildcards. Absent/empty -> no filter
   // (every diff-derived route is a target).
   routes?: string[];
-  // Defaults to a single 1280x800 desktop viewport when unset.
+  // Defaults to a single 1280x800 desktop viewport when unset. A rule may pin itself to a subset of
+  // these via its own `viewports` (list of widths); a rule without one runs at every viewport.
   viewports?: LayoutViewport[];
 }
 
@@ -168,7 +169,6 @@ export function createLayoutRulesGate(deps: LayoutRulesDeps = {}): Gate {
 
       const baseUrl = config.baseUrl.replace(/\/$/, '') + '/';
       const viewports = config.viewports && config.viewports.length > 0 ? config.viewports : DEFAULT_VIEWPORTS;
-      const spec = measureSpecFor(rules);
 
       // Everything that can hit infra -- content-read target derivation and the lazy Chromium
       // launch -- lives inside this try so a thrown Playwright/serve/content error SKIPS the gate
@@ -189,7 +189,13 @@ export function createLayoutRulesGate(deps: LayoutRulesDeps = {}): Gate {
         for (const route of targets) {
           const url = new URL(route, baseUrl).toString();
           for (const viewport of viewports) {
+            // Each viewport measures and evaluates only the rules scoped to its width; a rule with a
+            // `viewports` filter that excludes this width contributes nothing here (not a fail, not an
+            // N/A note). No applicable rule -> nothing to measure at this viewport, skip it entirely.
+            const scopedRules = rulesForViewport(rules, viewport.width);
+            if (scopedRules.length === 0) continue;
             const label = viewportLabel(route, viewport);
+            const spec = measureSpecFor(scopedRules);
             let measurements;
             try {
               measurements = await browser.measure(url, viewport as Viewport, spec);
@@ -202,7 +208,7 @@ export function createLayoutRulesGate(deps: LayoutRulesDeps = {}): Gate {
                 findings: [`could not measure ${label}: ${errMsg(err)}`],
               };
             }
-            for (const finding of evaluateRules(rules, measurements)) {
+            for (const finding of evaluateRules(scopedRules, measurements)) {
               const line = `${label}: ${finding.message}`;
               if (finding.status === 'fail') failures.push(line);
               else notes.push(line);
