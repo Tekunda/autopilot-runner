@@ -91,6 +91,11 @@ export interface TaskBackend {
   // Returns whether the questions were actually rendered on the ticket, so the caller can fall
   // back to putting them in a comment (the durable, backend-agnostic surface) when it couldn't.
   writeHoldNotice?(ticketId: string, holdText: string): Promise<boolean>;
+  // Remove the hold notice from the ticket once the hold is RESOLVED (the control plane lifts the
+  // block on resume), so a stale "answer these" callout doesn't linger -- and so its raw remove/
+  // keep text can never be re-read as spec and re-trip the contradiction detector. Best-effort and
+  // idempotent (no notice present is a no-op). Optional: paired with writeHoldNotice.
+  archiveHoldNotice?(ticketId: string): Promise<void>;
   // Reflect "the ticket's promotion PR merged into the base branch" on the tracker by moving
   // it to the tenant-configured merged status (e.g. a "test" column), instead of leaving it in
   // review. A one-way cosmetic write; no-op when the tenant hasn't configured it. Optional.
