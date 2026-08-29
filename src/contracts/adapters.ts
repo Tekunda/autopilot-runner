@@ -163,7 +163,18 @@ export interface VCSHost {
   // telemetry. Requires the host app to hold check-write permission; adapters whose
   // credential lacks it should surface the failure to the caller, which treats
   // publishing as best-effort.
-  publishCheck(repoId: string, ref: string, check: PublishedCheck): Promise<void>;
+  // Id-aware: WITHOUT `checkRunId`, a `pending` progress publish and its later pass/fail
+  // completion would otherwise create TWO separate check-runs of the same name -- the
+  // first left `in_progress` forever, hiding the completion's findings from a human on the
+  // PR (the check-run never transitions). Callers that captured the id from an earlier
+  // publish of the SAME check-run pass it here so the implementation UPDATES that run
+  // instead of creating a new one. Callers that can't (a fresh process, an exception path
+  // that never captured one) omit it; the implementation should still try to find and
+  // update the latest same-name run on this ref's commit before falling back to creating
+  // one, so a stray `pending` left by any path still gets completed. Resolves the id of
+  // the check-run that was created or updated, so the caller can capture it for the next
+  // publish in this same stage's lifecycle.
+  publishCheck(repoId: string, ref: string, check: PublishedCheck, checkRunId?: number): Promise<{ id: number }>;
   // Re-trigger a FAILED deployment on `ref` (a merge commit sha): re-run the failed jobs of
   // the workflow run(s) that produced the failing deployment check, so a transient deploy
   // failure (registry blip, infra flake) recovers without a human. Returns true if a rerun

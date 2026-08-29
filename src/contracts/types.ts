@@ -550,6 +550,12 @@ export interface InFlightStage {
   // by run-name (stage + ticketId), so consuming it here would mislabel its telemetry.
   // Absent on subtask markers (each subtask owns its own slot) and legacy persisted markers.
   origin?: 'conflict' | 'feedback' | 'qa';
+  // The check-run id VCSHost.publishCheck returned for this stage's `pending` progress
+  // publish, so the LATER publish that reports this stage's pass/fail can PATCH that same
+  // check-run instead of POSTing a second one that never transitions out of `in_progress`
+  // (the create-only publishCheck bug -- see subtask-pipeline.ts's publishStageProgress).
+  // Absent when the pending publish failed, wasn't attempted, or predates this field.
+  checkRunId?: number;
 }
 
 // What a replan preserves about an old subtask it discarded, until the NEW plan exists and

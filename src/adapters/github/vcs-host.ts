@@ -127,32 +127,31 @@ export class GitHubVCSHost implements VCSHost {
   }
 
   async listChecks(repoId: string, ref: string): Promise<CheckResult[]> {
-    const result = await this.client.request<GhCheckRunsResponse>(
-      'GET',
-      `/repos/${repoId}/commits/${ref}/check-runs?per_page=100`,
-    );
-
-    // A re-run leaves MULTIPLE check-runs of the same name on a commit (a failed run, then a
-    // green re-run). Keep only the LATEST per name -- otherwise a stale failure masks the newer
-    // pass and observeDeployment (deploy-watch) would block a deployment whose gate actually
-    // passed, reporting "qa: fail" when qa is green. The gate is still obeyed: a genuinely
-    // failing LATEST run blocks. Latest = newest started_at, id as tiebreak. Mirrors
-    // reviewDecision's latest-per-user rule.
-    const latest = new Map<string, GhCheckRun>();
-    for (const run of result?.check_runs ?? []) {
-      const prev = latest.get(run.name);
-      const newer =
-        !prev ||
-        (run.started_at ?? '') > (prev.started_at ?? '') ||
-        ((run.started_at ?? '') === (prev.started_at ?? '') && (run.id ?? 0) > (prev.id ?? 0));
-      if (newer) latest.set(run.name, run);
-    }
-
+    const latest = await this.latestCheckRunsByName(repoId, ref);
     return [...latest.values()].map((run) => ({
       name: run.name,
       status: mapCheckStatus(run.status, run.conclusion),
       ...(run.details_url ? { detailsUrl: run.details_url } : {}),
     }));
+  }
+
+  // A re-run leaves MULTIPLE check-runs of the same name on a commit (a failed run, then a
+  // green re-run). Keep only the LATEST per name -- otherwise a stale failure masks the newer
+  // pass and observeDeployment (deploy-watch) would block a deployment whose gate actually
+  // passed, reporting "qa: fail" when qa is green. The gate is still obeyed: a genuinely
+  // failing LATEST run blocks. Latest = newest started_at, id as tiebreak. Mirrors
+  // reviewDecision's latest-per-user rule. Shared by listChecks (the gating read) and
+  // publishCheck's completion fallback (finding the pending run a completion should update).
+  private async latestCheckRunsByName(repoId: string, ref: string): Promise<Map<string, GhCheckRun>> {
+    const result = await this.client.request<GhCheckRunsResponse>(
+      'GET',
+      `/repos/${repoId}/commits/${ref}/check-runs?per_page=100`,
+    );
+    const latest = new Map<string, GhCheckRun>();
+    for (const run of result?.check_runs ?? []) {
+      if (isNewerCheckRun(run, latest.get(run.name))) latest.set(run.name, run);
+    }
+    return latest;
   }
 
   async reviewDecision(repoId: string, prNumber: number): Promise<'approved' | 'changes_requested' | 'pending'> {
@@ -410,9 +409,20 @@ export class GitHubVCSHost implements VCSHost {
   // Publishes a check-run on the ref's head commit. Needs the App's `checks: write`
   // permission -- with only `checks: read` this call fails and the caller (which treats
   // publishing as best-effort) reports the failure rather than silently dropping it.
-  async publishCheck(repoId: string, ref: string, check: PublishedCheck): Promise<void> {
+  //
+  // Id-aware: create-only publishing (every call POSTing a fresh check-run) left a `pending`
+  // progress check permanently `in_progress` once its completion published a SEPARATE
+  // check-run of the same name -- the human-visible run never transitioned, hiding the
+  // completion's findings/summary (they only ever landed on the orphaned second run). A
+  // `checkRunId` from a caller that captured one PATCHes that exact run. Without one, a
+  // COMPLETING publish (pass/fail) falls back to the same latest-wins lookup listChecks uses
+  // to find the latest same-name run on this sha and PATCHes it -- so a stray pending left by
+  // an exception, a superseded round, or a fresh process still completes rather than orphaning.
+  // A fresh `pending` publish (a new stage generation) always POSTs: it must not resurrect an
+  // older run's identity.
+  async publishCheck(repoId: string, ref: string, check: PublishedCheck, checkRunId?: number): Promise<{ id: number }> {
     const sha = (await this.getBranchSha(repoId, ref)) ?? ref;
-    await this.client.request('POST', `/repos/${repoId}/check-runs`, {
+    const payload = {
       name: check.name,
       head_sha: sha,
       status: check.status === 'pending' ? 'in_progress' : 'completed',
@@ -422,7 +432,28 @@ export class GitHubVCSHost implements VCSHost {
         title: check.title ?? check.name,
         summary: check.summary ?? '',
       },
-    });
+    };
+
+    let targetId = checkRunId;
+    if (targetId === undefined && check.status !== 'pending') {
+      const latest = await this.latestCheckRunsByName(repoId, sha);
+      const candidate = latest.get(check.name);
+      // Only a STRAY PENDING run is fair game here -- a completed run past its own
+      // conclusion must never be silently re-PATCHed under this completion's (unrelated)
+      // verdict/timestamp. If the latest same-name run already completed, fall through to
+      // POST: gating is unaffected either way (listChecks reads the newest run), this only
+      // keeps the fallback from touching a run it wasn't meant to touch.
+      if (candidate && candidate.status !== 'completed') targetId = candidate.id;
+    }
+
+    if (targetId !== undefined) {
+      const updated = await this.client.request<{ id: number }>('PATCH', `/repos/${repoId}/check-runs/${targetId}`, payload);
+      return { id: updated?.id ?? targetId };
+    }
+
+    const created = await this.client.request<{ id: number }>('POST', `/repos/${repoId}/check-runs`, payload);
+    if (!created) throw new Error(`GitHub returned no body for created check-run "${check.name}" in ${repoId}`);
+    return { id: created.id };
   }
 
   async rerunDeployment(repoId: string, ref: string): Promise<boolean> {
@@ -695,13 +726,21 @@ function latestNamedRun(runs: GhCheckRun[], name: string): GhCheckRun | undefine
   let best: GhCheckRun | undefined;
   for (const run of runs) {
     if (run.name !== name) continue;
-    const newer =
-      !best ||
-      (run.started_at ?? '') > (best.started_at ?? '') ||
-      ((run.started_at ?? '') === (best.started_at ?? '') && (run.id ?? 0) > (best.id ?? 0));
-    if (newer) best = run;
+    if (isNewerCheckRun(run, best)) best = run;
   }
   return best;
+}
+
+// Shared "is `candidate` newer than `current`" rule for the latest-per-name dedup: newest
+// started_at wins, id as tiebreak. One definition, used by listChecks (via
+// latestCheckRunsByName), publishCheck's completion fallback, and getCheckLogTail's
+// latestNamedRun -- so the three never drift apart on what "latest" means.
+function isNewerCheckRun(candidate: GhCheckRun, current: GhCheckRun | undefined): boolean {
+  return (
+    !current ||
+    (candidate.started_at ?? '') > (current.started_at ?? '') ||
+    ((candidate.started_at ?? '') === (current.started_at ?? '') && (candidate.id ?? 0) > (current.id ?? 0))
+  );
 }
 
 const DEFAULT_CHECK_LOG_TAIL_LINES = 150;
