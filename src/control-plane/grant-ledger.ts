@@ -110,4 +110,19 @@ export class GrantLedger {
     for (const [id, rec] of entries) this.#consumed.set(id, rec);
     this.#replays = [...this.#consumed.values()].reduce((n, r) => n + r.replays, 0);
   }
+
+  /**
+   * Evict the OLDEST entries (by `firstSeenAt`, ties broken by current iteration order) until at
+   * most `cap` remain -- a no-op when already within it. `restore()` is additive and enforces no
+   * bound of its own (unlike `markConsumed`'s per-insert eviction), so a caller that merges two
+   * generations together (PersistedGrantLedger's multi-replica self-heal) can land above `cap`;
+   * this keeps the cap invariant airtight after such a merge, using the same "drop the oldest,
+   * keep the newest" policy `markConsumed` already applies one id at a time.
+   */
+  trimToCap(cap: number): void {
+    if (this.#consumed.size <= cap) return;
+    const sorted = [...this.#consumed.entries()].sort((a, b) => a[1].firstSeenAt.localeCompare(b[1].firstSeenAt));
+    for (const [id] of sorted.slice(0, sorted.length - cap)) this.#consumed.delete(id);
+    this.#replays = [...this.#consumed.values()].reduce((n, r) => n + r.replays, 0);
+  }
 }
