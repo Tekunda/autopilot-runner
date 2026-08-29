@@ -258,6 +258,25 @@ export async function runActionEntry(inputs: ActionInputs, deps: RunActionDeps =
   return { mode: 'finalize', telemetry };
 }
 
+// The crash-catch's own reported telemetry: a REAL CheckResult, never the empty `checks: []`
+// rejectedTelemetry() carries. Two things go wrong with an empty array: (1) ci-runner's
+// mapCompletedRun treats an empty-but-PRESENT `checks` array from the gate-report artifact as
+// authoritative (`Array.isArray` -> truthy) and REPLACES its own job-name fallback checks with
+// it, discarding even the job-name check's detailsUrl into raw job logs; (2)
+// maxFixRoundsFor([], cap) sees no FAILED check to classify, so it returns the FULL configured
+// budget -- the fix loop would dispatch every fix round with a contentless prompt against a crash
+// no code edit can diagnose, before ever escalating. A single `runner-crash` check with
+// `unjudged:true` fixes both: isNonRevertableFinding gives it 0 fix rounds (straight to human
+// escalation, same as any other unjudged gate) and the real crash message rides through to the
+// escalation text instead of vanishing.
+export function crashTelemetry(grant: ExecutionGrant, err: unknown): StatusTelemetry {
+  const message = err instanceof Error ? err.message : String(err);
+  return {
+    ...rejectedTelemetry(grant, message),
+    checks: [{ name: 'runner-crash', status: 'fail', unjudged: true, findings: [message] }],
+  };
+}
+
 export type OutputWriter = (name: string, value: string) => void;
 
 // GitHub Actions' file-based output protocol: append `name<<EOF\nvalue\nEOF\n` to the
@@ -360,7 +379,26 @@ async function main(): Promise<void> {
     };
   }
 
-  const result = await runActionEntry(inputs);
+  // Defense-in-depth (independent of serve-and-gate.ts's own per-site catch): ANY unexpected
+  // throw out of runActionEntry must still land as reported telemetry, not an unhandled
+  // rejection that silently vanishes with zero logs and no gate-report.json -- the exact crash
+  // this whole fix removes at the source. Mirrors the parseInputs catch above: log to stderr,
+  // fail the step, and (for gate modes) still write a degraded gate-report.json -- via
+  // crashTelemetry, NOT rejectedTelemetry, so the report carries a real check the fix loop can
+  // act on (see crashTelemetry) rather than an empty array that discards the fallback checks and
+  // burns the whole fix-round budget on a crash no edit can diagnose.
+  let result: ActionResult;
+  try {
+    result = await runActionEntry(inputs);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`autopilot thin runner: ${message}\n`);
+    if (inputs.mode === 'gate' || inputs.mode === 'heavy-gate') {
+      writeFileSync(`${workspaceRoot()}/gate-report.json`, JSON.stringify(crashTelemetry(inputs.grant, err)));
+    }
+    process.exitCode = 1;
+    return;
+  }
 
   // Gate mode's structured record of what the gates actually said (per-gate checks incl.
   // findings), written into the checked-out tree for upload as an artifact. GitHub exposes

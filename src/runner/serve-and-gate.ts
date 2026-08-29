@@ -85,16 +85,97 @@ function defaultSpawn(command: string, args: string[], cwd: string): ServeProces
   };
 }
 
+// Which step of serveSite produced a thrown error. The install step touches the shared npm/yarn
+// registry and local package cache -- the ONLY step where ENOENT/EINTEGRITY/corrupt-tarball/5xx
+// genuinely mean transient infra (a bad mirror, a truncated download). The build step compiles
+// the customer's OWN code against their OWN checked-out tree with no network involved -- a build
+// ENOENT means a referenced file (an asset, a config) is really missing, which is a reproducible
+// break no matter how infra-shaped its message looks (PR deletes `logo.svg`, import survives ->
+// the bundler throws "ENOENT ... logo.svg", not a registry hiccup). ready-poll is a different kind
+// of transient: the server never answered before the deadline, which is a network/startup timeout.
+export type BuildPhase = 'install' | 'build' | 'ready-poll';
+
+// Tags a thrown Error with which phase produced it, so failure classification keys on STRUCTURE
+// (which step failed) rather than sniffing prose across all three steps alike -- mirrors how
+// drive-faults.ts's isNetworkFault keys on err.code, not text. Every throw site inside serveSite
+// (runOrThrow below, and the ready-poll loop) tags its Error this way.
+function phaseError(phase: BuildPhase, message: string): Error {
+  const err = new Error(message) as Error & { buildPhase: BuildPhase };
+  err.buildPhase = phase;
+  return err;
+}
+
+// Recover the phase a caught serve/build error was tagged with. Falls back to the label prefix
+// runOrThrow/serveSite already put in the message (`install \`...`, `build \`...`, `server \`...`)
+// for an error that reaches here untagged (e.g. a test double, or a future throw site that forgets
+// the tag) -- fail CLOSED to "unknown" rather than guess, since an unknown phase must never be
+// classified transient (see isTransientBuildFault).
+function phaseOf(err: unknown): BuildPhase | undefined {
+  if (typeof err === 'object' && err !== null) {
+    const tagged = (err as { buildPhase?: unknown }).buildPhase;
+    if (tagged === 'install' || tagged === 'build' || tagged === 'ready-poll') return tagged;
+  }
+  const message = err instanceof Error ? err.message : String(err);
+  if (/^install `/.test(message)) return 'install';
+  if (/^build `/.test(message)) return 'build';
+  if (/^server `/.test(message)) return 'ready-poll';
+  return undefined;
+}
+
+// Infra-flake signatures seen in captured install-step failure text -- registry hiccups, truncated
+// downloads, and dropped connections that a bare re-run of the SAME command often clears. Mirrors
+// the SHAPE of drive-faults.ts's isNetworkFault (a tight, literal signature list, not a broad
+// substring match), but for shell/build output, not HTTP-fetch error objects -- the two never
+// apply to the same call site, so this stays local to serve-and-gate.ts. Scoped to the install
+// PHASE only (see BuildPhase) -- the same substrings in a BUILD failure mean something else
+// entirely (a missing asset/import), never infra.
+const TRANSIENT_INSTALL_PATTERNS: readonly RegExp[] = [
+  /ENOENT/, // a file went missing mid-install (concurrent cache write, extraction race)
+  /EINTEGRITY/, // downloaded tarball didn't match its checksum (npm cache corruption / bad mirror)
+  /corrupt/i, // "tarball data for X seems to be corrupted" and similar cache-corruption text
+  /tarball/i, // package tarball fetch/extract failures generally
+  /ECONNRESET/, // registry connection dropped mid-request
+  /ETIMEDOUT/, // registry connection timed out
+  /ENOTFOUND/, // DNS lookup for the registry host failed
+  /\bE5\d\d\b/, // npm's own "E500"/"E502"/"E503" codes for an unexpected registry 5xx response
+  /\b(request|fetch|registry)\b[^\n]{0,40}\b5\d\d\b/i, // yarn/npm registry 5xx prose ("request ... failed ... 503")
+];
+
+// The narrower transient set for the ready-poll phase: a dropped/timed-out connection while
+// polling, or the readiness deadline itself firing -- by definition the server never answered in
+// time, a network/startup timeout rather than a judged code defect. `exited before becoming ready`
+// (the process itself died) is deliberately NOT here -- that is the server's own code crashing on
+// start, which is reproducible and must block, not retry.
+const TRANSIENT_READY_POLL_PATTERNS: readonly RegExp[] = [
+  /ECONNRESET/,
+  /ETIMEDOUT/,
+  /ENOTFOUND/,
+  /not ready at .* within \d+ms/, // the readiness deadline fired -- the server never answered in time
+];
+
+// Whether a captured install/build/serve failure LOOKS like transient infra rather than a
+// reproducible break in the customer's own code, scoped by WHICH PHASE produced it (see
+// BuildPhase). Used to route a site's serve failure into either an `unjudged/infra` (worth one
+// gate-only retry, see fix-loop.ts's isInfraUnjudgedOnly) or a blocking `fail` (a real build break,
+// correctly attributed -- never masqueraded as an SEO finding). A build-phase failure is NEVER
+// transient (a build ENOENT is a missing asset, not registry infra); neither is a failure whose
+// phase could not be determined -- fail closed to blocking rather than risk masking a real break.
+export function isTransientBuildFault(phase: BuildPhase | undefined, message: string): boolean {
+  if (phase === 'install') return TRANSIENT_INSTALL_PATTERNS.some((pattern) => pattern.test(message));
+  if (phase === 'ready-poll') return TRANSIENT_READY_POLL_PATTERNS.some((pattern) => pattern.test(message));
+  return false;
+}
+
 async function runOrThrow(
   runCommand: typeof defaultRunCommand,
-  label: string,
+  phase: Extract<BuildPhase, 'install' | 'build'>,
   line: string,
   cwd: string,
 ): Promise<void> {
   const { exitCode, stderr, stdout } = await runCommand('sh', ['-c', line], cwd);
   if (exitCode !== 0) {
     const tail = (stderr.trim() || stdout.trim()).slice(-2000);
-    throw new Error(`${label} \`${line}\` exited ${exitCode}: ${tail}`);
+    throw phaseError(phase, `${phase} \`${line}\` exited ${exitCode}: ${tail}`);
   }
 }
 
@@ -127,7 +208,7 @@ export async function serveSite(config: ServeConfig, deps: ServeSiteDeps): Promi
 
   for (;;) {
     if (serverExited !== undefined) {
-      throw new Error(`server \`${config.startCommand}\` exited before becoming ready (code ${serverExited})`);
+      throw phaseError('ready-poll', `server \`${config.startCommand}\` exited before becoming ready (code ${serverExited})`);
     }
     try {
       const res = await fetchImpl(readyUrl);
@@ -140,7 +221,7 @@ export async function serveSite(config: ServeConfig, deps: ServeSiteDeps): Promi
     }
     if (Date.now() >= deadline) {
       await stop();
-      throw new Error(`server \`${config.startCommand}\` not ready at ${readyUrl} within ${timeoutMs}ms`);
+      throw phaseError('ready-poll', `server \`${config.startCommand}\` not ready at ${readyUrl} within ${timeoutMs}ms`);
     }
     await sleep(intervalMs);
   }
@@ -229,6 +310,28 @@ export async function runHeavyGateStage(grant: ExecutionGrant, deps: RunHeavyGat
   }
 }
 
+// A site's serveSiteImpl (install/build/start/ready-poll) threw. The URL-bound gates for THIS
+// site genuinely never ran -- publish them `skip/infra`, never a `fail` with invented findings
+// (the exact mislabel this fix removes: a build break masquerading as an SEO content-gate
+// FAILURE). A separate `heavy-serve (<site>)` check carries the real classification: a
+// transient-shaped fault (registry hiccup, truncated tarball) reports `unjudged/infra`, which
+// routes through fix-loop.ts's one gate-only retry before escalating -- a bare re-run may just
+// clear it. A reproducible break (a real syntax/type error) reports `fail` with the real message,
+// so it blocks the merge, correctly attributed to the build rather than to a phantom SEO finding.
+function siteServeFailureChecks(site: SiteConfig, urlBoundIds: ReadonlySet<string>, err: unknown): CheckResult[] {
+  const message = err instanceof Error ? err.message : String(err);
+  const skipChecks: CheckResult[] = [...urlBoundIds].map((id) => ({
+    name: `${id} (${site.name})`,
+    status: 'pending',
+    skipped: true,
+    skipReason: 'infra',
+  }));
+  const serveCheck: CheckResult = isTransientBuildFault(phaseOf(err), message)
+    ? { name: `heavy-serve (${site.name})`, status: 'fail', unjudged: true, unjudgedReason: 'infra', findings: [message] }
+    : { name: `heavy-serve (${site.name})`, status: 'fail', findings: [message] };
+  return [...skipChecks, serveCheck];
+}
+
 // The multi-site heavy run. The deterministic gates (and any command gates) run ONCE against the
 // PR checkout with no server; the URL-bound gates (seo-site-crawl, visual-qa) run ONCE PER SITE,
 // each against that site's freshly served instance, with its baseUrl + per-site gateConfig
@@ -272,7 +375,18 @@ async function runPerSiteHeavyGates(
     for (const site of sites) {
       let served: ServedSite | undefined;
       try {
-        served = await serveSiteImpl(site.serve, { cwd: workspaceRoot, ...(deps.serveDeps ?? {}) });
+        try {
+          served = await serveSiteImpl(site.serve, { cwd: workspaceRoot, ...(deps.serveDeps ?? {}) });
+        } catch (err) {
+          // A real try/catch (not just the finally below): classify and move on to the NEXT
+          // site rather than rethrow -- an uncaught throw here would propagate all the way out
+          // of runPerSiteHeavyGates and discard any OTHER site's already-collected findings (and,
+          // absent action-entry.ts's own catch, crash the runner before gate-report.json is
+          // written at all).
+          checks.push(...siteServeFailureChecks(site, urlBoundIds, err));
+          ok = false;
+          continue;
+        }
         const configOverlay: Record<string, Record<string, unknown>> = {};
         for (const id of urlBoundIds) {
           // Per-site gateConfig (routes/brands/budgets) first, the served baseUrl over it -- the
