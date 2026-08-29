@@ -193,6 +193,13 @@ export interface CheckResult {
   // not "judged and failed". `CheckStatus` stays a three-value union; this flag rides
   // alongside it.
   unjudged?: true;
+  // The gate NEVER RAN (returned `skip`) -- the complement of `unjudged`'s "ran, no verdict". It
+  // publishes with `status:'pending'` (a skip was never evaluated, not passed), but a skip is not
+  // the same as a not-yet-run pending: this flag makes the two distinguishable so a perpetual-skip
+  // gate can't be banked as coverage. `skipReason` explains WHY it skipped, driving benign-vs-
+  // suspicious escalation. `CheckStatus` stays a three-value union; these ride alongside it.
+  skipped?: true;
+  skipReason?: string;
 }
 
 // Exactly one of stepPrompt (an inline instruction) or ref (a pointer to a
@@ -609,6 +616,24 @@ export interface SubtaskState {
   // CHECKS it (non-blocking) instead of dispatching; cleared when the stage completes. This
   // is what makes driveSubtask a per-tick state machine (see InFlightStage).
   inFlight?: InFlightStage;
+  // The REAL per-gate checks this subtask's gate stage produced (each carrying its true
+  // pass/fail and, for a `skip`, the `skipped` flag + reason). Captured when the gate passed so
+  // the ticket-level promotion can bank coverage from what actually RAN rather than a config-
+  // derived stand-in -- a gate that skipped every subtask is then correctly excluded from
+  // coverage. Absent until a gate stage completed. Not persisted long-term meaning: overwritten
+  // each gate pass.
+  lastGateChecks?: RecordedGateCheck[];
+}
+
+// One gate's REAL executed result on a promotion, distilled from the gate stage's CheckResult:
+// its id, the published CheckStatus, and -- crucially -- whether it `skip`ped (never ran) and why.
+// Coverage is banked only from non-skipped results, so a gate that perpetually skips can no longer
+// be mistaken for a pass (the exact hole that let a never-run `layout-rules` be flipped to blocking).
+export interface RecordedGateCheck {
+  id: string;
+  status: CheckStatus;
+  skipped?: true;
+  skipReason?: string;
 }
 
 // One enabled lens's finalized telemetry within a review round: the run outcome plus the
@@ -763,6 +788,14 @@ export interface TicketState {
   // tenant's tickets) diffs against the most recently recorded set to catch silent coverage
   // loss. Keyed by branch because coverage is a per-protected-branch property, not per-ticket.
   promotionCoverage?: { branch: string; gateIds: string[]; recordedAt: string };
+  // The REAL per-gate execution recorded from THIS ticket's most recent promotion attempt --
+  // aggregated across the subtasks' gate stages (a gate that ran non-skip on ANY subtask counts as
+  // run; one that skipped every subtask stays a skip). recordPromotionCoverage feeds these true
+  // statuses into the coverage set instead of the config-derived `coverageGateResults()` stand-in,
+  // so a perpetual-skip gate is no longer banked as false coverage. Absent for promotions recorded
+  // before this existed (coverage then falls back to the stand-in). Keyed by branch like
+  // promotionCoverage, since coverage is a per-protected-branch property.
+  lastGateExecution?: { branch: string; results: RecordedGateCheck[]; recordedAt: string };
   // Present ONLY on an external-PR pseudo-ticket (id "external-pr-<n>"): a human/automation
   // PR into a protected branch that the ticket pipeline did NOT open, which the control
   // plane picks up as a first-class driven workflow (QA -> autofix-on-fail -> conflict

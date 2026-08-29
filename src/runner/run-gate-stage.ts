@@ -80,7 +80,10 @@ export interface RunGateStageDeps {
 }
 
 // GateStatus has a `skip` a CheckStatus has no room for; the closest honest
-// mapping is `pending` -- a skipped gate was never evaluated, not passed. A
+// mapping is `pending` -- a skipped gate was never evaluated, not passed. But a
+// not-yet-run `pending` and a skip must stay distinguishable downstream, so toChecks
+// also tags a skip `skipped:true` (+ skipReason) -- otherwise a gate that skips 100%
+// of the time is banked as coverage exactly like a pass. A
 // `warn` is a non-blocking gate's report-only failure: it must not fail the
 // grant, so it maps to `pass` (its findings still ride through toChecks). An
 // `unjudged` gate RAN but reached no verdict -- it must NOT read as a pass, so
@@ -98,6 +101,9 @@ function toChecks(results: GateResult[], nameSuffix = ''): CheckResult[] {
     name: `${result.id}${nameSuffix}`,
     status: toCheckStatus(result.status),
     ...(result.status === 'unjudged' ? { unjudged: true as const } : {}),
+    ...(result.status === 'skip'
+      ? { skipped: true as const, ...(result.skipReason ? { skipReason: result.skipReason } : {}) }
+      : {}),
     ...(result.findings?.length ? { findings: result.findings } : {}),
     ...(result.detailsUrl ? { detailsUrl: result.detailsUrl } : {}),
   }));

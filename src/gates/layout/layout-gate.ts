@@ -158,13 +158,13 @@ export function createLayoutRulesGate(deps: LayoutRulesDeps = {}): Gate {
       if (!config.baseUrl) {
         // No served URL -> nothing to measure. Skip cleanly (the serve stage that supplies baseUrl
         // is a prerequisite).
-        return { id: LAYOUT_RULES_GATE_ID, status: 'skip', findings: ['no served baseUrl (serve stage not wired)'] };
+        return { id: LAYOUT_RULES_GATE_ID, status: 'skip', skipReason: 'no-baseurl', findings: ['no served baseUrl (serve stage not wired)'] };
       }
 
       const rules: LayoutRule[] = normalizeRules(config.rules);
       if (rules.length === 0) {
         // No declared rule set -> the gate is a zero-cost no-op for this tenant/repo.
-        return { id: LAYOUT_RULES_GATE_ID, status: 'skip', findings: ['no layout rules configured'] };
+        return { id: LAYOUT_RULES_GATE_ID, status: 'skip', skipReason: 'no-config', findings: ['no layout rules configured'] };
       }
 
       const baseUrl = config.baseUrl.replace(/\/$/, '') + '/';
@@ -181,7 +181,7 @@ export function createLayoutRulesGate(deps: LayoutRulesDeps = {}): Gate {
         const targets = await deriveTargets(ctx, config);
         if (targets.length === 0) {
           // Nothing this PR touched maps to a route the rules apply to. Skip, don't fail.
-          return { id: LAYOUT_RULES_GATE_ID, status: 'skip', findings: ['no changed file maps to a checked route'] };
+          return { id: LAYOUT_RULES_GATE_ID, status: 'skip', skipReason: 'no-matching-route', findings: ['no changed file maps to a checked route'] };
         }
 
         browser = injectedBrowser ?? (await (deps.createBrowser ?? createPlaywrightLayoutBrowser)());
@@ -205,6 +205,7 @@ export function createLayoutRulesGate(deps: LayoutRulesDeps = {}): Gate {
               return {
                 id: LAYOUT_RULES_GATE_ID,
                 status: 'skip',
+                skipReason: 'infra',
                 findings: [`could not measure ${label}: ${errMsg(err)}`],
               };
             }
@@ -221,6 +222,7 @@ export function createLayoutRulesGate(deps: LayoutRulesDeps = {}): Gate {
         return {
           id: LAYOUT_RULES_GATE_ID,
           status: 'skip',
+          skipReason: 'infra',
           findings: [`layout gate skipped after a browser/serve error: ${errMsg(err)}`],
         };
       } finally {

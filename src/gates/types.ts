@@ -38,9 +38,22 @@ export interface GateContext {
   config: Record<string, unknown>;
 }
 
+// Why a gate returned `skip` -- a first-class "never ran" outcome, the complement of `unjudged`
+// ("ran, reached no verdict"). A skip must stay distinguishable from a pass all the way to the
+// promotion record: a gate that skips 100% of the time is banked as coverage only if its skip is
+// indistinguishable from a pass (the exact hole that let a perpetual-skip `layout-rules` be flipped
+// to blocking though it never produced a verdict). The reason drives escalation: `no-config`/
+// `disabled` are benign (the gate has nothing to do), while a gate WITH rules that skips every time
+// (`no-matching-route`/`no-baseurl`) is a diagnosable misconfiguration worth surfacing.
+export type SkipReason = 'no-baseurl' | 'no-matching-route' | 'no-config' | 'disabled' | 'infra';
+
 export interface GateResult {
   id: string;
   status: GateStatus;
+  // Set on `status:'skip'` to explain WHY the gate never ran. Round-trips through the gate report
+  // artifact (ci-runner parseGateReport) so the promotion record can tell a benign skip from a
+  // suspicious perpetual one.
+  skipReason?: SkipReason;
   findings?: string[];
   detailsUrl?: string;
 }
