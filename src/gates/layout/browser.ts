@@ -7,6 +7,7 @@
 // real Chromium in the loop. The default implementation is Playwright, launched runner-side in the
 // dedicated heavy stage -- the only stage with a browser.
 
+import { settledGoto } from '../browser-nav.ts';
 import type { Box, MatchGeometry, MeasureSpec, RawMeasurements } from './rules.ts';
 
 export interface Viewport {
@@ -31,6 +32,8 @@ export interface LayoutBrowser {
 interface PlaywrightPage {
   setViewportSize(size: { width: number; height: number }): Promise<void>;
   goto(url: string, opts?: { waitUntil?: string; timeout?: number }): Promise<unknown>;
+  waitForLoadState(state: string, opts?: { timeout?: number }): Promise<void>;
+  waitForTimeout(ms: number): Promise<void>;
   evaluate<T, A>(fn: (arg: A) => T, arg: A): Promise<T>;
   close(): Promise<void>;
 }
@@ -43,8 +46,9 @@ interface PlaywrightModule {
 }
 
 export interface PlaywrightLayoutBrowserOptions {
-  // Per-navigation timeout. A page that never settles inside this window is measured at the cap
-  // rather than hanging the whole gate.
+  // Per-navigation timeout for the `load` phase (DOM + resources). Only a page that never loads at
+  // all trips this; a page that loads but never goes network-idle is settled best-effort, not failed
+  // (see settledGoto). A page still not loaded at the cap is measured as-is.
   navigationTimeoutMs?: number;
 }
 
@@ -103,9 +107,11 @@ export async function createPlaywrightLayoutBrowser(
       const page = await browser.newPage();
       try {
         await page.setViewportSize({ width: viewport.width, height: viewport.height });
-        // `networkidle`: measure the SETTLED render -- CSS/fonts/images loaded, hydration done -- so
-        // the geometry reflects the finished page, never a mid-load frame.
-        await page.goto(url, { waitUntil: 'networkidle', timeout });
+        // Load the page, then settle it: wait for `load`, best-effort for networkidle, then a brief
+        // fixed pause so the geometry reflects the FINISHED render -- CSS/fonts/images loaded,
+        // hydration done -- never a mid-load frame. A page that renders fully but holds a lingering
+        // connection open (so networkidle never fires) is still measured, not skipped -- see settledGoto.
+        await settledGoto(page, url, { timeout });
         return await page.evaluate(measureInPage, spec);
       } finally {
         await page.close();

@@ -5,6 +5,8 @@
 // launched runner-side in the dedicated heavy stage -- the only stage with a browser (the fast
 // deterministic gate path has none). See createVisualQaGate for how the two are wired.
 
+import { settledGoto } from '../browser-nav.ts';
+
 export interface Viewport {
   width: number;
   height: number;
@@ -33,6 +35,8 @@ export interface ScreenshotBrowser {
 interface PlaywrightPage {
   setViewportSize(size: { width: number; height: number }): Promise<void>;
   goto(url: string, opts?: { waitUntil?: string; timeout?: number }): Promise<unknown>;
+  waitForLoadState(state: string, opts?: { timeout?: number }): Promise<void>;
+  waitForTimeout(ms: number): Promise<void>;
   screenshot(opts?: { fullPage?: boolean }): Promise<Uint8Array>;
   close(): Promise<void>;
 }
@@ -45,8 +49,9 @@ interface PlaywrightModule {
 }
 
 export interface PlaywrightBrowserOptions {
-  // Per-navigation timeout. A page that never settles inside this window renders whatever is
-  // on screen at the cap rather than hanging the whole gate.
+  // Per-navigation timeout for the `load` phase (DOM + resources). Only a page that never loads at
+  // all trips this; a page that loads but never goes network-idle is settled best-effort, not failed
+  // (see settledGoto). A page still not loaded at the cap renders whatever is on screen.
   navigationTimeoutMs?: number;
 }
 
@@ -63,11 +68,13 @@ export async function createPlaywrightBrowser(opts: PlaywrightBrowserOptions = {
       const page = await browser.newPage();
       try {
         await page.setViewportSize({ width: viewport.width, height: viewport.height });
-        // `networkidle`: wait for the SETTLED render -- CSS/fonts/images loaded, hydration
-        // done -- so the judge scores the finished page, never a mid-load frame. This is the
-        // §11 "settled build" constraint at the screenshot level: a heavy gate must judge a
-        // stable local server, not a page still assembling itself.
-        await page.goto(url, { waitUntil: 'networkidle', timeout });
+        // Load the page, then settle it: wait for `load`, best-effort for networkidle, then a brief
+        // fixed pause so the judge scores the FINISHED render -- CSS/fonts/images loaded, hydration
+        // done -- never a mid-load frame. This is the §11 "settled build" constraint at the
+        // screenshot level: a heavy gate must judge a stable page, not one still assembling itself.
+        // Crucially, a page that renders fully but holds a lingering connection open (so networkidle
+        // never fires) is still judged, not failed -- see settledGoto.
+        await settledGoto(page, url, { timeout });
         const bytes = await page.screenshot({ fullPage: true });
         return { base64: Buffer.from(bytes).toString('base64'), mediaType: 'image/png' };
       } finally {
