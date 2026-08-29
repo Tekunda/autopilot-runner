@@ -413,6 +413,13 @@ export interface StageResult {
   checks: CheckResult[];
   prUrl?: string;
   logDigest: string;
+  // When `outcome` is 'error', WHY -- so the control plane can tell a TERMINAL abandon
+  // ('timeout'/'workflow-drift'/'run-not-found': block the ticket and cancel the run) from a
+  // TRANSIENT poll blip on a still-healthy, in-deadline run ('transient': a dropped fetch / 5xx /
+  // secondary rate-limit -- keep inFlight, re-poll the SAME run next tick, escalate only after
+  // repeated blips, and NEVER cancel the run). Absent for non-error outcomes and for other error
+  // sites (a completed run that failed to yield its artifact), which are treated as terminal.
+  errorReason?: 'timeout' | 'workflow-drift' | 'run-not-found' | 'transient';
   // Set by dispatchStage/checkStage so the caller can persist the in-flight run marker and,
   // on later ticks, re-correlate the same run (cross-tick deadline is anchored on
   // runCreatedAt -- the run's immutable created_at -- so a hung run still escalates).
