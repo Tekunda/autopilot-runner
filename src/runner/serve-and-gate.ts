@@ -24,6 +24,7 @@ import type { ExecutorCredential } from '../gates/visual/judge.ts';
 import { verifyGrant } from '../control-plane/grant-verify.ts';
 import { runCommand as defaultRunCommand } from '../gates/exec.ts';
 import { registerHeavyGatesForSpecs } from './gate-registry.ts';
+import { URL_BOUND_HEAVY_GATE_IDS } from './heavy-gate-ids.ts';
 import { digestFor, grantId, rejectedTelemetry } from './prepare-stage.ts';
 import { runGateStage, type RunGateStageDeps } from './run-gate-stage.ts';
 
@@ -147,7 +148,9 @@ export async function serveSite(config: ServeConfig, deps: ServeSiteDeps): Promi
 
 // Gate ids whose runtime baseUrl is the served instance this stage just brought up. The overlay
 // wins over any baseUrl in the signed/target config (see run-gate-stage.ts configOverlay).
-export const URL_BOUND_HEAVY_GATE_IDS = ['seo-site-crawl', 'visual-qa', 'e2e', 'layout-rules'] as const;
+// Re-exported from the shared source of truth (heavy-gate-ids.ts) that the CIRunner adapter's
+// fast-vs-heavy dispatch also derives from, so the two can never drift.
+export { URL_BOUND_HEAVY_GATE_IDS };
 
 export interface RunHeavyGateStageDeps extends RunGateStageDeps {
   // The serve recipe. Defaults to the grant's SIGNED `serve` field (never the unsigned target
