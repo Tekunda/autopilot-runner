@@ -823,6 +823,17 @@ export interface TicketState {
   // the SECOND consecutive sighting: one sighting is indistinguishable from our own status
   // write not being indexed yet, and holding a live ticket over that would wedge delivery.
   readyDriftTicks?: number;
+  // Consecutive ticks the tracker has reported this known, BLOCKED ticket at the ready status
+  // (the re-queue-on-status-move signal -- the PO moving a held ticket back to the front door to
+  // resume it). Deliberately SEPARATE from readyDriftTicks: the structure-drift path never
+  // touches this field, so a live ticket that accrued a readyDriftTicks count and THEN blocked
+  // cannot carry that count into the blocked branch and resume on its first blocked sighting.
+  // Like the drift counter, the resume fires only on the SECOND consecutive sighting: the
+  // reconciler writes the blocked status onto the tracker at the end of the tick, and until that
+  // indexes a just-blocked ticket still reads ready here -- resuming on that echo would re-drive
+  // work the moment it legitimately blocked. Cleared by the resume (recoverBlockedOnReply /
+  // freshRestart) so each blocked episode starts its sighting history fresh.
+  blockedReadyTicks?: number;
   // The live independent-review round over the assembled branch (see ReviewRoundState).
   // Absent whenever no round is running -- between rounds (e.g. while a repair build is
   // in flight) and once the aggregate passes.
