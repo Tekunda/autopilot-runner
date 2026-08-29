@@ -14,7 +14,15 @@ import type { VCSHost } from '../contracts/adapters.ts';
 // is non-blocking (a `blocking:false` command gate), so it must NOT fail the
 // grant. Aggregation treats it like a pass for the verdict while still carrying
 // its findings -- see runGates and run-gate-stage's toCheckStatus.
-export type GateStatus = 'pass' | 'fail' | 'skip' | 'warn';
+//
+// `unjudged` is the gate that EXECUTED but reached no verdict (e.g. the vision
+// judge stayed rate-limited past its retry budget). It is distinct from `warn`,
+// which is a report-only *finding*: an unjudged *gate* never counts as a pass,
+// even when the gate is non-blocking -- a gate that reports success when it never
+// judged is worse than no gate. Aggregation maps it to a merge-blocking `fail`
+// and it escalates to a human (no code fix can resolve it) -- see toCheckStatus
+// and the fix loop's non-revertable classification.
+export type GateStatus = 'pass' | 'fail' | 'skip' | 'warn' | 'unjudged';
 
 export interface GateContext {
   repoId: string;

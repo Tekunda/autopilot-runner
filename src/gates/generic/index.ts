@@ -4,6 +4,7 @@
 
 import type { GateRegistry } from '../registry.ts';
 import type { Gate } from '../types.ts';
+import { createAssertionDeltaGate } from './assertion-delta.ts';
 import { createCveGate } from './cve.ts';
 import { createRiskGate } from './risk.ts';
 import { createRollupGuardGate } from './rollup-guard.ts';
@@ -17,7 +18,14 @@ import { createTestPolicyGate } from './test-policy.ts';
 // list -- a control plane whose PackRegistry has no generic gates issues an
 // empty `gateSpecs`, and the runner then correctly executes nothing.
 export function genericGates(): Gate[] {
-  return [createStructureGate(), createCveGate(), createRiskGate(), createTestPolicyGate(), createRollupGuardGate()];
+  return [
+    createStructureGate(),
+    createCveGate(),
+    createRiskGate(),
+    createTestPolicyGate(),
+    createRollupGuardGate(),
+    createAssertionDeltaGate(),
+  ];
 }
 
 export function registerGenericGates(registry: GateRegistry): void {
@@ -26,6 +34,8 @@ export function registerGenericGates(registry: GateRegistry): void {
   }
 }
 
+export * from './assertion-delta.ts';
+export * from './assertion-delta-detect.ts';
 export * from './cve.ts';
 export * from './risk.ts';
 export * from './rollup-guard.ts';

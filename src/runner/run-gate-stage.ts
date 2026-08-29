@@ -82,9 +82,13 @@ export interface RunGateStageDeps {
 // GateStatus has a `skip` a CheckStatus has no room for; the closest honest
 // mapping is `pending` -- a skipped gate was never evaluated, not passed. A
 // `warn` is a non-blocking gate's report-only failure: it must not fail the
-// grant, so it maps to `pass` (its findings still ride through toChecks).
+// grant, so it maps to `pass` (its findings still ride through toChecks). An
+// `unjudged` gate RAN but reached no verdict -- it must NOT read as a pass, so
+// it maps to `fail` (and toChecks tags the check `unjudged:true` so the fix loop
+// escalates it to a human instead of burning fix rounds no edit can resolve).
 function toCheckStatus(status: GateResult['status']): CheckStatus {
   if (status === 'fail') return 'fail';
+  if (status === 'unjudged') return 'fail';
   if (status === 'skip') return 'pending';
   return 'pass';
 }
@@ -93,6 +97,7 @@ function toChecks(results: GateResult[], nameSuffix = ''): CheckResult[] {
   return results.map((result) => ({
     name: `${result.id}${nameSuffix}`,
     status: toCheckStatus(result.status),
+    ...(result.status === 'unjudged' ? { unjudged: true as const } : {}),
     ...(result.findings?.length ? { findings: result.findings } : {}),
     ...(result.detailsUrl ? { detailsUrl: result.detailsUrl } : {}),
   }));
@@ -214,7 +219,13 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
   const nonBlockingIds = new Set(
     genericSpecs.filter((spec) => spec.blocking === false).map((spec) => spec.id),
   );
-  const ok = results.every((result) => result.status !== 'fail' || nonBlockingIds.has(result.id));
+  // An `unjudged` gate ALWAYS blocks -- report-only (`blocking:false`) can excuse a *finding*
+  // fail (the gate judged and reported a defect it's non-blocking about), but NEVER a gate that
+  // reached no verdict at all. A green stage on a gate that never ran is worse than no gate
+  // (post-mortem TEK-3691), so nonBlockingIds cannot rescue it.
+  const ok = results.every((result) =>
+    result.status === 'unjudged' ? false : result.status !== 'fail' || nonBlockingIds.has(result.id),
+  );
 
   // Make the run's log self-describing: a legitimate gate failure must be legible in
   // Actions logs, not byte-identical to a crash (the 75-file diff that failed `risk`

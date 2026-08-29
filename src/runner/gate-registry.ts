@@ -17,6 +17,7 @@
 
 import { e2eGate } from '../gates/e2e/e2e-gate.ts';
 import { registerGenericGates } from '../gates/generic/index.ts';
+import { layoutRulesGate } from '../gates/layout/layout-gate.ts';
 import { GateRegistry } from '../gates/registry.ts';
 import type { Gate } from '../gates/types.ts';
 import { visualQaGate } from '../gates/visual/visual-qa.ts';
@@ -75,7 +76,7 @@ export function registerPackGatesForSpecs(registry: GateRegistry, ids: Iterable<
 // registerHeavyGatesForSpecs runs there, never in the fast runGateStage path, so a Visual-QA spec
 // can only ever execute inside the browser/server-capable stage.
 const HEAVY_GATE_CATALOG: ReadonlyMap<string, Gate> = new Map(
-  [visualQaGate, e2eGate].map((gate) => [gate.id, gate] as const),
+  [visualQaGate, e2eGate, layoutRulesGate].map((gate) => [gate.id, gate] as const),
 );
 
 export function registerHeavyGatesForSpecs(registry: GateRegistry, ids: Iterable<string>): void {

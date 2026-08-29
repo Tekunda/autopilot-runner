@@ -147,7 +147,7 @@ export async function serveSite(config: ServeConfig, deps: ServeSiteDeps): Promi
 
 // Gate ids whose runtime baseUrl is the served instance this stage just brought up. The overlay
 // wins over any baseUrl in the signed/target config (see run-gate-stage.ts configOverlay).
-export const URL_BOUND_HEAVY_GATE_IDS = ['seo-site-crawl', 'visual-qa', 'e2e'] as const;
+export const URL_BOUND_HEAVY_GATE_IDS = ['seo-site-crawl', 'visual-qa', 'e2e', 'layout-rules'] as const;
 
 export interface RunHeavyGateStageDeps extends RunGateStageDeps {
   // The serve recipe. Defaults to the grant's SIGNED `serve` field (never the unsigned target

@@ -25,6 +25,7 @@ import { effortForTier, resolveModel } from '../config/model-tiers.ts';
 import type { ExecutionGrant, Stage, StatusTelemetry } from '../contracts/types.ts';
 import { slugify } from '../control-plane/branch-names.ts';
 import { verifyGrant, type KeyInput } from '../control-plane/grant-verify.ts';
+import { resolveBaseSha } from '../gates/git.ts';
 import { buildMcpConfig } from './mcp-config.ts';
 
 export interface PrepareStageDeps {
@@ -272,15 +273,8 @@ export async function computeChangedFiles(baseRef: string, cwd: string = process
       execFile('git', args, { cwd, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => (err ? reject(err) : resolve(stdout)));
     });
 
-  const remoteRef = `refs/remotes/origin/${baseRef}`;
-  try {
-    await git(['fetch', '--no-tags', 'origin', `+refs/heads/${baseRef}:${remoteRef}`]);
-  } catch {
-    // No origin (or offline): fall back to a locally-known branch of that name.
-  }
-  const base = (await git(['rev-parse', '--verify', '--quiet', remoteRef]).catch(() => '')).trim()
-    || (await git(['rev-parse', '--verify', '--quiet', `refs/heads/${baseRef}`]).catch(() => '')).trim();
-  if (!base) throw new Error(`computeChangedFiles: base ref "${baseRef}" not found locally or on origin`);
+  // Single source of truth for base resolution (shared with the assertion-delta gate).
+  const base = await resolveBaseSha(baseRef, cwd);
 
   // A shallow checkout (actions/checkout defaults to depth 1) severs HEAD's ancestry, so a
   // three-dot diff has no merge-base and fails. The action's own checkout step sets

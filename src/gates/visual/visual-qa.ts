@@ -25,6 +25,12 @@
 // the browser and the vision judge are injectable, so the derive->screenshot->judge->verdict
 // logic is unit-testable with fakes and never needs a real browser or API key in tests -- but the
 // DEFAULT judge does the real model call (judge.ts), never a stubbed pass.
+//
+// UNJUDGED (post-mortem TEK-3691): when every page the judge could not score was blocked by a
+// transient rate limit (no real defect found), the gate returns `unjudged`, NOT `warn`. A gate
+// that ran but reached no verdict must not read as a pass even though it's non-blocking -- it fails
+// closed and escalates to a human. `warn` would map to a pass; a green check on a gate that never
+// judged is worse than no gate.
 
 import { createContentReader, type ContentFormat } from '../../packs/seo/content.ts';
 import type { Gate, GateContext, GateResult } from '../types.ts';
@@ -207,8 +213,9 @@ export function createVisualQaGate(deps: VisualQaDeps = {}): Gate {
       const failures: string[] = [];
       // Pages the vision judge could not score because the model API stayed rate-limited/overloaded
       // even after the judge's own backoff+retries. This is a TRANSIENT INFRA failure, not a visual
-      // defect, so it must not read as one -- it's tracked separately and downgrades the gate to a
-      // report-only `warn` (see aggregation below) rather than failing the merge on a 429 burst.
+      // defect, so it must not read as one -- it's tracked separately and, when nothing else failed,
+      // makes the gate `unjudged` (see aggregation below): it ran but reached no verdict, so it fails
+      // closed to a human rather than passing the merge on a 429 burst.
       const inconclusive: string[] = [];
       try {
         for (const target of targets) {
@@ -246,16 +253,17 @@ export function createVisualQaGate(deps: VisualQaDeps = {}): Gate {
       // Aggregation:
       // - Any real defect (or non-transient error) -> `fail` (blocks the merge). Its findings carry
       //   the inconclusive ones too, so nothing is hidden when the run also hit rate limits.
-      // - No real defect but some page was rate-limited into inconclusive -> `warn`: report-only
-      //   per the gate framework (types.ts), so a transient 429 burst surfaces its findings loudly
-      //   WITHOUT blocking the merge as if it were a visual defect (the failure the retries could
-      //   not recover from is the API's, not the page's).
+      // - No real defect but some page was rate-limited into inconclusive -> `unjudged`: the gate
+      //   RAN but reached no verdict. It is NOT a pass -- a green check on a gate that never judged
+      //   is worse than no gate (post-mortem TEK-3691). It fails closed and escalates to a human,
+      //   even though the gate is non-blocking; a transient 429 that outlasts the retries is the
+      //   API's failure, but "could not verify" is not "verified fine".
       // - Everything scored and passed -> `pass`.
       if (failures.length > 0) {
         return { id: VISUAL_QA_GATE_ID, status: 'fail', findings: [...failures, ...inconclusive] };
       }
       if (inconclusive.length > 0) {
-        return { id: VISUAL_QA_GATE_ID, status: 'warn', findings: inconclusive };
+        return { id: VISUAL_QA_GATE_ID, status: 'unjudged', findings: inconclusive };
       }
       return { id: VISUAL_QA_GATE_ID, status: 'pass' };
     },

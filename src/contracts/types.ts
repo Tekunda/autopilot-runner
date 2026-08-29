@@ -45,6 +45,14 @@ export interface GatePolicy {
   // blocked is still valid. Per-tenant: resolved from the tenant's gates config like every
   // other gate field. Optional; defaults to false (the wake resumes the recorded plan).
   requireReplanConfirmation?: boolean;
+  // The rendering-surface-removal gate (plan-integrity gate #1): when true, a decomposed
+  // plan that declares any `removals` (a user-visible section/band/component/... it deletes
+  // or hides) HOLDS for human sign-off after the architect writes it, rather than building
+  // the deletion unattended. Per-tenant like every other gate field. Optional; defaults to
+  // TRUE (this is a safety pipeline -- removing what a user sees warrants a person's nod).
+  // Independent of the always-on self-contradiction detector, which STOPs a "remove X / keep
+  // X's essence" ticket regardless of this flag.
+  holdOnRenderingSurfaceRemoval?: boolean;
   // Which of the three independent assembled-branch reviewers (Track E) actually run.
   // A lens explicitly disabled here is SKIPPED cleanly -- no grant, no check, and the
   // aggregate `Autopilot / review` judges only the enabled lenses. Anything NOT disabled
@@ -55,11 +63,13 @@ export interface GatePolicy {
   // Finding severities that fail the review round (and trigger the bounded repair loop).
   // Case-insensitive match against each finding's severity text. Defaults to ['blocker'].
   reviewBlockingSeverities?: string[];
-  // Publish the review round's findings onto the ticket's promotion PR as a real PR review,
-  // inline on the file/line each finding names. Per-tenant like every other gate field.
-  // Optional; defaults to FALSE -- it writes into the customer's PR conversation, and a
-  // tenant that reviews in the tracker should not suddenly find the bot commenting on its
-  // pull requests.
+  // Publish each terminal review round's OUTCOME onto the ticket's promotion PR as a real PR
+  // review: a per-lens section (every enabled lens's pass/advisory/blocking result and its
+  // findings at all severities, or an explicit all-clear), an aggregate line, and inline
+  // comments on the file/line each finding names. Records a green round too, not just a
+  // blocking one, so the review is auditable on the PR and not only via the check summary.
+  // Per-tenant like every other gate field. Optional; defaults to TRUE (opt-out) -- a tenant
+  // that reviews solely in the tracker sets it false to keep the bot off its PR conversation.
   publishReviewFindingsToPr?: boolean;
   // When the bounded repair loop is spent, REPLAN instead of blocking for a human: discard
   // the recorded plan and re-architect with every finding forwarded into the ticket, so the
@@ -176,6 +186,13 @@ export interface CheckResult {
   // fallback checks don't). Carried so a fix prompt and human escalations can quote
   // the actual finding text instead of just a check name.
   findings?: string[];
+  // The gate RAN but reached no verdict (e.g. the vision judge stayed rate-limited
+  // past its retry budget). It publishes with `status:'fail'` so it blocks the merge,
+  // but no code fix can resolve it -- the fix loop treats it as non-revertable and
+  // escalates to a human. Distinct from an ordinary `fail`: this is "could not judge",
+  // not "judged and failed". `CheckStatus` stays a three-value union; this flag rides
+  // alongside it.
+  unjudged?: true;
 }
 
 // Exactly one of stepPrompt (an inline instruction) or ref (a pointer to a
@@ -391,6 +408,14 @@ export interface StageResult {
   // deterministically by the control plane (createSubtasks + linkBlockedBy). Absent for
   // every other stage.
   subtasks?: PlannedSubtask[];
+  // Only an `architect` stage populates these, from plan.json's top-level `removals` /
+  // `claims` arrays (parsed by parseArchitectPlanMeta). `removals` names the rendering
+  // surfaces this plan deletes/hides in user terms; `claims` are the positive,
+  // individually-verifiable assertions of what still renders and where. The control plane
+  // gates on them (surface-removal HOLD, paired-preservation) and the primary reviewer
+  // verifies each claim against the assembled branch. Absent for every other stage.
+  removals?: string[];
+  claims?: string[];
   // Only an `accept` stage populates this: the acceptance verdict on the assembled
   // integration branch, downloaded by the CIRunner from the run's artifact. Absent
   // for every other stage.
@@ -641,6 +666,18 @@ export interface TicketState {
   // set that lost or never persisted some of its planned children can't promote a
   // partial delivery. Undefined for non-decomposed tickets (no architect plan).
   plannedSubtaskCount?: number;
+  // The architect plan's positive preservation claims (plan.json `claims`): what still
+  // renders and where, each individually verifiable. Persisted when the plan is accepted
+  // (dispatchArchitect) and forwarded into the assembled-branch primary reviewer, which
+  // verifies each against the built code -- an unmet claim is a blocking `PLAN NOT KEPT`
+  // finding. Undefined for a plan that declared none.
+  planClaims?: string[];
+  // The rendering surfaces the architect plan deletes/hides (plan.json `removals`), in user
+  // terms. Persisted alongside planClaims for the record; each removal must carry a paired
+  // preservation claim (the deterministic preservation gate) and, under
+  // gates.holdOnRenderingSurfaceRemoval, a non-empty set HOLDs the plan for human sign-off.
+  // Undefined for a plan that removes nothing.
+  planRemovals?: string[];
   // How many times the assembled review (acceptance walk, now the three-lens review
   // round) found the branch UNMET and the control plane dispatched a repair build before
   // re-reviewing. Bounds the review -> repair -> re-review self-heal so a
