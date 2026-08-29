@@ -6,9 +6,12 @@
 // sibling-height void and the F5 640/1232 width-ratio the post-mortem is about.
 //
 // TARGET DERIVATION mirrors Visual-QA: a changed content/page file maps to the route it serves; a
-// changed shared asset fans out to a representative route sample. Those diff-derived routes are then
-// filtered by the config `routes` globs, and any GLOB-FREE (literal) `routes` entry is ALWAYS
-// checked regardless of the diff (a tenant pins its key pages that way). No resulting route -> skip.
+// changed app-router source file (page/layout/i18n) under the tenant's `appDir` maps to the route of
+// its own directory, so a page whose copy lives only in the app i18n dictionary (no content/site
+// record) still maps; a changed shared/global asset fans out to a representative route sample. Those
+// diff-derived routes are then filtered by the config `routes` globs, and any GLOB-FREE (literal)
+// `routes` entry is ALWAYS checked regardless of the diff (a tenant pins its key pages that way). No
+// resulting route -> skip.
 //
 // Runs ONLY in the dedicated heavy stage -- the only stage with a browser and a live served site
 // (src/runner/serve-and-gate.ts). It measures a SETTLED local build (§11), never a mid-rollout
@@ -57,6 +60,19 @@ export interface LayoutRulesConfig {
   globalPatterns?: string[];
   // The small representative route sample checked when a shared asset changed. Default `['/']`.
   representativeRoutes?: string[];
+  // The app-router source ROOT (relative to the checkout root) under which route directories live,
+  // e.g. tekunda's `apps/tekunda-web/app/[locale]`. Set -> a changed route source file (a Next.js
+  // route file or a colocated i18n dictionary) under it derives the route of its own directory
+  // (`.../products/delivery-autopilot/page.jsx` -> `/products/delivery-autopilot`), so pages whose
+  // copy lives in the app i18n dictionary rather than a content/site record still map to a route.
+  // Unset -> path derivation is off and only content records / global-asset fanout map files
+  // (backward compatible).
+  appDir?: string;
+  // Globs (checkout-root-relative, `*`/`?` wildcards) matching SHARED source files that back specific
+  // routes but sit OUTSIDE a route dir (a shared section component). A change to one fans out to the
+  // representative route sample, same as a global asset -- so a bounded, config-declared set of
+  // shared components triggers the configured routes without per-file route derivation.
+  sharedSourceGlobs?: string[];
   // Route globs. Diff-derived routes are kept only if they match one of these; a GLOB-FREE (literal)
   // entry is ALWAYS checked regardless of the diff. `*`/`?` are wildcards. Absent/empty -> no filter
   // (every diff-derived route is a target).
@@ -103,8 +119,49 @@ function globToRegExp(glob: string): RegExp {
   return new RegExp(`^${escaped}$`);
 }
 
-// The routes THIS diff touched, mirroring Visual-QA: each changed content file -> its own route; any
-// changed shared asset -> the representative route sample. Deduped, path-normalized.
+function matchesAnyGlob(file: string, globs: string[]): boolean {
+  return globs.some((glob) => globToRegExp(glob).test(file));
+}
+
+// Basenames that mark a file as an app-router PAGE source: the Next.js page/layout conventions and a
+// colocated i18n dictionary (`i18n.js` or `delivery-autopilot-i18n.js`). A change to one derives the
+// route of its own directory. `route.ts` is deliberately excluded -- it is an API route handler
+// returning data, never a navigable page. Everything else under the app root -- shared components,
+// hooks, utilities, colocated CSS -- is NOT path-derived here: it either fans out via the
+// shared/global mechanism or contributes no route (the over-trigger guard that keeps this bounded).
+const ROUTE_FILE_BASENAME_RE = /^(?:page|layout|template|default|loading|error|not-found)\.[jt]sx?$/;
+const I18N_FILE_BASENAME_RE = /(?:^|[-.])i18n\.[jt]sx?$/;
+
+function isRouteSourceFile(basename: string): boolean {
+  return ROUTE_FILE_BASENAME_RE.test(basename) || I18N_FILE_BASENAME_RE.test(basename);
+}
+
+// The route a changed app-source file serves, or null if it does not derive one. A file under
+// `appDir` whose basename is a route source file maps to its directory path relative to `appDir`
+// (`apps/.../app/[locale]/products/delivery-autopilot/page.jsx` with appDir
+// `apps/.../app/[locale]` -> `/products/delivery-autopilot`). Next.js route groups `(marketing)` are
+// stripped (they never appear in the URL); a file inside a private `_folder` derives nothing. A
+// DYNAMIC segment (`[slug]`/`[...rest]`) derives nothing either: a dynamic page is not navigable
+// without a concrete param, so `/products/[slug]` would load a 404 and measure garbage -- such a
+// page must instead be targeted by a concrete `representativeRoutes` URL via the shared/global
+// fanout. (The `appDir` prefix itself may contain a dynamic segment like `[locale]`; only the
+// segments AFTER it are checked, since the prefix is stripped before matching.)
+function appRouteFor(file: string, appDir: string): string | null {
+  const prefix = appDir.replace(/\/+$/, '') + '/';
+  if (!file.startsWith(prefix)) return null;
+  const segments = file.slice(prefix.length).split('/');
+  const basename = segments[segments.length - 1] ?? '';
+  if (!isRouteSourceFile(basename)) return null;
+  const dirSegments = segments.slice(0, -1);
+  if (dirSegments.some((segment) => segment.startsWith('_'))) return null;
+  if (dirSegments.some((segment) => segment.includes('[') || segment.includes(']'))) return null;
+  const routeSegments = dirSegments.filter((segment) => !(segment.startsWith('(') && segment.endsWith(')')));
+  return `/${routeSegments.join('/')}`;
+}
+
+// The routes THIS diff touched, mirroring Visual-QA: each changed content file -> its own route; a
+// changed app-source route file (when `appDir` is set) -> the route of its own directory; any
+// changed shared/global asset -> the representative route sample. Deduped, path-normalized.
 async function diffRoutes(ctx: GateContext, config: LayoutRulesConfig): Promise<Set<string>> {
   const contentDir = config.contentDir ?? DEFAULT_CONTENT_DIR;
   const reader = createContentReader(config.contentFormat ?? 'md', {
@@ -113,6 +170,7 @@ async function diffRoutes(ctx: GateContext, config: LayoutRulesConfig): Promise<
     ...(config.baseLocale ? { baseLocale: config.baseLocale } : {}),
   });
   const globalPatterns = config.globalPatterns ?? DEFAULT_GLOBAL_PATTERNS;
+  const sharedSourceGlobs = config.sharedSourceGlobs ?? [];
   const representativeRoutes =
     config.representativeRoutes && config.representativeRoutes.length > 0
       ? config.representativeRoutes
@@ -120,9 +178,19 @@ async function diffRoutes(ctx: GateContext, config: LayoutRulesConfig): Promise<
 
   const routes = new Set<string>();
   for (const file of ctx.changedFiles) {
-    if (reader.isContentFile(file)) routes.add(normalizeRoute(await reader.routeFor(file)));
+    if (reader.isContentFile(file)) {
+      routes.add(normalizeRoute(await reader.routeFor(file)));
+      continue;
+    }
+    if (config.appDir) {
+      const route = appRouteFor(file, config.appDir);
+      if (route) routes.add(route);
+    }
   }
-  if (ctx.changedFiles.some((file) => isGlobalAsset(file, globalPatterns))) {
+  const fansOut = ctx.changedFiles.some(
+    (file) => isGlobalAsset(file, globalPatterns) || matchesAnyGlob(file, sharedSourceGlobs),
+  );
+  if (fansOut) {
     for (const route of representativeRoutes) routes.add(normalizeRoute(route));
   }
   return routes;
