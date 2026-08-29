@@ -55,22 +55,28 @@ export interface PlaywrightLayoutBrowserOptions {
 // Just enough of the DOM to write the in-page routine WITHOUT pulling the `dom` lib into the
 // control-plane tsconfig (which targets Node): the routine runs in the browser, where the real DOM
 // provides these, but this file must still typecheck standalone.
-interface DomElement {
+export interface DomElement {
   getBoundingClientRect(): { top: number; left: number; width: number; height: number };
   children: ArrayLike<DomElement>;
   parentElement: DomElement | null;
   closest(selector: string): DomElement | null;
 }
-interface DomDocument {
+export interface DomDocument {
   querySelectorAll(selector: string): ArrayLike<DomElement>;
 }
 
 // The in-page routine, serialized and run inside the page by Playwright's evaluate(). It takes the
 // MeasureSpec and returns ONLY raw getBoundingClientRect numbers -- no thresholds, no rule logic.
 // Self-contained (it references nothing from this module's scope, since it executes in the browser
-// context) and reaches the document through globalThis so it needs no ambient DOM types.
-function measureInPage(spec: MeasureSpec): RawMeasurements {
-  const doc = (globalThis as unknown as { document: DomDocument }).document;
+// context) so Playwright can serialize it across the page boundary. The `doc` it reads is a
+// parameter defaulting to the live `globalThis.document`: in the browser it is left unset and binds
+// to the real DOM, while a unit test passes a plain-object projection implementing the same tiny
+// DomDocument interface -- so this exact routine, including the ancestor invariant below, is
+// testable without Chromium (see browser.test.ts). Exported for that reason only.
+export function measureInPage(
+  spec: MeasureSpec,
+  doc: DomDocument = (globalThis as unknown as { document: DomDocument }).document,
+): RawMeasurements {
   const rectOf = (el: DomElement): Box => {
     const r = el.getBoundingClientRect();
     return { top: r.top, left: r.left, width: r.width, height: r.height };
