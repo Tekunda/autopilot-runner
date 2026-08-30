@@ -299,6 +299,10 @@ export function reportResult(result: ActionResult, writeOutput: OutputWriter = d
     writeOutput('stage-kind', result.prepared.kind);
     writeOutput('prompt', result.prepared.prompt);
     writeOutput('base-ref', result.prepared.baseRef);
+    // The least-privilege, signed-grant-derived tool allow-list (with MCP tools already
+    // appended): action.yml passes it verbatim to the vendor step's --allowedTools instead
+    // of a template-side stage-kind ternary a later edit could silently widen.
+    writeOutput('allowed-tools', result.prepared.allowedTools);
     // The stage's resolved model/effort for the vendor Action step (action.yml) --
     // this is where the grant's signed modelTier stops being a label and actually
     // selects a model.

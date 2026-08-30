@@ -101,6 +101,14 @@ runs:
         fetch-depth: 0
         ref: ${{ steps.parse-grant.outputs.stage == 'gate' && fromJSON(inputs.gate-target).branch || steps.prepare.outputs.base-ref }}
         token: ${{ fromJSON(inputs.vcs-host-config).token }}
+        # Only the coding stage keeps the customer PAT persisted in .git/config -- it needs it
+        # to push the build/fix branch. Every OTHER stage (architect, accept, review, plan,
+        # enrich, gate) uses the token for the fetch above, then WIPES it from .git/config:
+        # those stages run a vendor agent over attacker-influenceable ticket text, and a
+        # persisted broad PAT is trivially readable (`cat .git/config`) and exfiltratable. A
+        # non-coding checkout resolves stage-kind != 'coding' (empty for the gate stage, which
+        # never pushes), so persist-credentials is false there.
+        persist-credentials: ${{ steps.prepare.outputs.stage-kind == 'coding' }}
 
     # HEAVY gate stage only (docs/ci-gate-refit-plan.md §5): provision the browser the fast gate
     # path never needs. Playwright is installed into the runner's own action dir so the gate's
@@ -188,7 +196,15 @@ runs:
       with:
         claude_code_oauth_token: ${{ fromJSON(inputs.coding-executor-config).oauthToken || '' }}
         anthropic_api_key: ${{ fromJSON(inputs.coding-executor-config).apiKey || '' }}
-        github_token: ${{ fromJSON(inputs.vcs-host-config).token }}
+        # Only the coding stage (which pushes) receives the customer PAT. Every read-only /
+        # judgment stage gets an EMPTY token: it touches no GitHub API, only the local checkout
+        # and plan.json, so it needs no repo credential -- and withholding it removes the token
+        # from a stage whose prompt carries attacker-influenceable ticket text. claude-code-action
+        # tolerates an empty github_token (its action.yml declares the input `required: false`
+        # and falls back to the ambient `github.token`), so the non-coding stages still function.
+        # NOTE (P4 follow-on): the ideal is a minted, read-only, repo-scoped token here rather
+        # than empty; tracked as the recommended next step.
+        github_token: ${{ steps.prepare.outputs.stage-kind == 'coding' && fromJSON(inputs.vcs-host-config).token || '' }}
         allowed_bots: 'delivery-autopilot'
         prompt: ${{ steps.prepare.outputs.prompt }}
         base_branch: ${{ steps.prepare.outputs.base-ref }}
@@ -206,18 +222,16 @@ runs:
         # `--model` carries the grant's signed modelTier (prepare resolves it via
         # src/config/model-tiers.ts): a "deep" stage runs on the deep model instead of
         # claude-code-action's own default. Empty only for an unmapped provider.
-        # Three tool profiles keyed on the resolved stage-kind: coding edits and commits;
-        # architect is read-only judgment plus a single Write for plan.json (uploaded as an
-        # artifact below, never committed); every other judgment stage is strictly read-only.
-        # Every profile also gets WebSearch + WebFetch so any stage can research and pull
-        # content a ticket references (e.g. a quote/page named in the spec) instead of holding
-        # on material it can't reach -- the split-plane boundary is unchanged (plan/judgment
-        # stages still can't edit or commit; only the coding profile has Edit/write-back).
-        # When the grant authorized MCP, prepare emits mcp-config-path + mcp-allowed-tools:
-        # every profile then appends the tenant's mcp tool names to its --allowedTools and the
-        # step gets --mcp-config <file> (the file carries only ${ENV} placeholders, no secret).
+        # The tool allow-list is no longer assembled here: prepare emits the least-privilege
+        # set (`allowed-tools`) derived from the SIGNED grant stage, with any authorized MCP
+        # tool names already appended (src/runner/prepare-stage.ts baseAllowedTools). Moving it
+        # server-side makes the allow-list deterministic and testable rather than a YAML
+        # ternary a later edit could silently widen -- architect/review/enrich get read-only
+        # (no shell, no network egress); accept keeps a shell to run gates; only coding keeps
+        # the shell + Edit. --max-turns stays here (coding only). The --mcp-config <file> the
+        # tenant's MCP servers need (only ${ENV} placeholders, no secret) is still passed below.
         claude_args: >-
-          ${{ steps.prepare.outputs.stage-kind == 'coding' && format('--allowedTools "Bash,Edit,Read,Write,Glob,Grep,WebSearch,WebFetch{0}" --max-turns 200', steps.prepare.outputs.mcp-allowed-tools && format(',{0}', steps.prepare.outputs.mcp-allowed-tools) || '') || (steps.prepare.outputs.stage-kind == 'architect' && format('--allowedTools "Read,Glob,Grep,Write,Bash,WebSearch,WebFetch{0}"', steps.prepare.outputs.mcp-allowed-tools && format(',{0}', steps.prepare.outputs.mcp-allowed-tools) || '') || format('--allowedTools "Read,Glob,Grep,WebSearch,WebFetch{0}"', steps.prepare.outputs.mcp-allowed-tools && format(',{0}', steps.prepare.outputs.mcp-allowed-tools) || '')) }}
+          ${{ format('--allowedTools "{0}"', steps.prepare.outputs.allowed-tools) }}${{ steps.prepare.outputs.stage-kind == 'coding' && ' --max-turns 200' || '' }}
           ${{ steps.prepare.outputs.model && format('--model {0}', steps.prepare.outputs.model) || '' }}
           ${{ steps.prepare.outputs.mcp-config-path && format('--mcp-config {0}', steps.prepare.outputs.mcp-config-path) || '' }}
         # The grant's signed debug.showFullOutput toggle (off by default -- see

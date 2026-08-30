@@ -59,6 +59,27 @@ export interface PrepareStageDeps {
 
 export const CODING_STAGES: ReadonlySet<Stage> = new Set(['build', 'fix']);
 
+// The least-privilege base tool allow-list keyed on the SIGNED grant stage (not the coarser
+// PreparedStage kind, which collapses architect/accept/lensed-review into one). This is the
+// deterministic choke point for what each stage's vendor agent may do:
+//   - build/fix (coding): edits, commits, and pushes -- keeps the shell + Write. WebSearch/
+//     WebFetch are dropped: the coding checkout is the one that keeps the push credential in
+//     .git/config, so denying network egress removes the exfiltration channel there too.
+//   - accept (external-PR QA): genuinely RUNS the repo's own gates, so it KEEPS Bash -- but
+//     drops WebFetch/WebSearch (a gate run needs no outbound network).
+//   - architect: reads the repo and Writes plan.json only. It concatenates attacker-
+//     influenceable ticket text, so denying the shell (`cat .git/config`) and network egress
+//     (WebFetch exfil) removes the credential-theft channel entirely -- the primary control.
+//   - lensed review: read-only inspection that Writes a findings verdict to plan.json.
+//   - review (lens-less) / enrich / plan: strictly read-only judgment.
+function baseAllowedTools(grant: ExecutionGrant): string[] {
+  if (CODING_STAGES.has(grant.stage)) return ['Bash', 'Edit', 'Read', 'Write', 'Glob', 'Grep'];
+  if (grant.stage === 'accept') return ['Read', 'Glob', 'Grep', 'Write', 'Bash'];
+  if (grant.stage === 'architect') return ['Read', 'Glob', 'Grep', 'Write'];
+  if (grant.stage === 'review' && grant.reviewLens !== undefined) return ['Read', 'Glob', 'Grep', 'Write'];
+  return ['Read', 'Glob', 'Grep'];
+}
+
 // v0 drives a single default branch; per-ticket base refs are future work.
 export const DEFAULT_BASE_REF = 'main';
 
@@ -72,11 +93,16 @@ export const DEFAULT_BASE_REF = 'main';
 // `debugFullOutput` mirrors the grant's signed `debugFullOutput` (DebugConfig.showFullOutput):
 // true -> action.yml passes claude-code-action's own `show_full_output` input, revealing the
 // raw SDK output for this run instead of the minimal result summary. Absent/false by default.
+// `allowedTools` is the least-privilege vendor-agent tool allow-list for this stage, derived
+// from the SIGNED grant stage (see baseAllowedTools) with any authorized MCP tool names
+// appended. action.yml consumes it verbatim instead of a template-side stage-kind ternary, so
+// the allow-list is deterministic and testable rather than a YAML expression a later edit
+// could silently widen.
 export type PreparedStage =
   | { kind: 'resolved'; telemetry: StatusTelemetry }
-  | { kind: 'judgment'; repoId: string; baseRef: string; prompt: string; model?: string; effort?: string; mcpConfigPath?: string; mcpAllowedTools?: string[]; pluginMarketplaces?: string[]; plugins?: string[]; debugFullOutput?: true }
-  | { kind: 'architect'; repoId: string; baseRef: string; prompt: string; model?: string; effort?: string; mcpConfigPath?: string; mcpAllowedTools?: string[]; pluginMarketplaces?: string[]; plugins?: string[]; debugFullOutput?: true }
-  | { kind: 'coding'; repoId: string; baseRef: string; branchName: string; prompt: string; model?: string; effort?: string; mcpConfigPath?: string; mcpAllowedTools?: string[]; pluginMarketplaces?: string[]; plugins?: string[]; debugFullOutput?: true; committerName?: string; committerEmail?: string };
+  | { kind: 'judgment'; repoId: string; baseRef: string; prompt: string; allowedTools: string; model?: string; effort?: string; mcpConfigPath?: string; mcpAllowedTools?: string[]; pluginMarketplaces?: string[]; plugins?: string[]; debugFullOutput?: true }
+  | { kind: 'architect'; repoId: string; baseRef: string; prompt: string; allowedTools: string; model?: string; effort?: string; mcpConfigPath?: string; mcpAllowedTools?: string[]; pluginMarketplaces?: string[]; plugins?: string[]; debugFullOutput?: true }
+  | { kind: 'coding'; repoId: string; baseRef: string; branchName: string; prompt: string; allowedTools: string; model?: string; effort?: string; mcpConfigPath?: string; mcpAllowedTools?: string[]; pluginMarketplaces?: string[]; plugins?: string[]; debugFullOutput?: true; committerName?: string; committerEmail?: string };
 
 // A grant carries no id of its own -- its signature already uniquely
 // fingerprints the issued grant, so hash it into a stable telemetry id.
@@ -212,6 +238,11 @@ export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps
     ? { pluginMarketplaces: grant.plugins.marketplaces, plugins: grant.plugins.plugins }
     : {};
 
+  // The signed-grant-derived least-privilege allow-list, with any authorized MCP tool names
+  // appended (same base-then-mcp order action.yml previously assembled inline). Emitted for
+  // every agent stage kind and consumed verbatim by the vendor step's --allowedTools.
+  const allowedTools = [...baseAllowedTools(grant), ...(mcpFields.mcpAllowedTools ?? [])].join(',');
+
   // The architect, accept, and lensed-review stages share one execution shape -- read-only
   // repo plus a single Write to the artifact file (plan.json), no branch and no PR. action.yml
   // gives the vendor step Write access (and uploads the artifact) on this kind, then finalize
@@ -230,6 +261,7 @@ export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps
       repoId: grant.repoId,
       baseRef,
       prompt,
+      allowedTools,
       ...(model ? { model } : {}),
       effort,
       ...mcpFields,
@@ -262,6 +294,7 @@ export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps
       baseRef,
       branchName,
       prompt: prepared.prompt,
+      allowedTools,
       ...(model ? { model } : {}),
       effort,
       ...mcpFields,
@@ -276,6 +309,7 @@ export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps
     repoId: grant.repoId,
     baseRef,
     prompt,
+    allowedTools,
     ...(model ? { model } : {}),
     effort,
     ...mcpFields,
