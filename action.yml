@@ -124,7 +124,14 @@ runs:
       shell: bash
       working-directory: ${{ github.action_path }}
       run: |
-        corepack enable || true
+        # Enable corepack ONLY when the tenant repo pins its package manager (packageManager field).
+        # An unpinned repo would otherwise get corepack's mismatched default Yarn vs its classic
+        # lockfile -> an opaque downstream build failure that reads as a code defect (prod incident).
+        # The guard prints enable/skip and emits a ::warning:: diagnostic for the unpinned case; a
+        # pinned repo behaves exactly as before (corepack enable, || true). See corepack-guard.ts.
+        if [ "$(node src/runner/corepack-guard.ts)" = "enable" ]; then
+          corepack enable || true
+        fi
         npm install playwright@1 --no-save
         npx playwright install --with-deps chromium
 
