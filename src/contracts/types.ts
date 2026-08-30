@@ -53,6 +53,13 @@ export interface GatePolicy {
   // Independent of the always-on self-contradiction detector, which STOPs a "remove X / keep
   // X's essence" ticket regardless of this flag.
   holdOnRenderingSurfaceRemoval?: boolean;
+  // The completeness gate (plan-integrity gate #3): when true, a plan that omits a deliverable the
+  // ticket NAMES (an imperative spec/title instruction, or a DELIVERABLES: item) with no covering
+  // subtask AND no justified removal is re-architected (bounded), then HELD for a human if a re-plan
+  // still leaves it uncovered. Per-tenant like every other gate field. Optional; defaults to TRUE
+  // (a silently dropped deliverable is the TEK-3727 failure). Re-architect-first, so a rare false
+  // positive self-corrects rather than halting work.
+  holdOnUncoveredDeliverables?: boolean;
   // Which of the three independent assembled-branch reviewers (Track E) actually run.
   // A lens explicitly disabled here is SKIPPED cleanly -- no grant, no check, and the
   // aggregate `Autopilot / review` judges only the enabled lenses. Anything NOT disabled
