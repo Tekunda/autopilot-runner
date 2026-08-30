@@ -637,6 +637,14 @@ export interface SubtaskState {
   // subtask's build PR head (Track F's bounded self-heal, distinct from conflictFixAttempts
   // so a conflicted-then-red PR gets its full budget of each).
   ciFixAttempts?: number;
+  // Consecutive ticks this subtask's gate stage returned an INFRA `error` (timeout /
+  // workflow-drift / run-not-found) instead of a real pass/fail verdict. Such a run yields
+  // no checks, so it must never enter the fix loop (an empty findings prompt that burns the
+  // fix budget and escalates as a false "fix loop exhausted"). The pipeline re-dispatches the
+  // gate while this is under `fix.maxBuildRetries` -- the same bounded transient-retry idiom
+  // the build stage uses -- and escalates as an infra block only once the fault persists past
+  // it. Cleared the moment a gate produces a genuine pass/fail verdict.
+  gateErrorAttempts?: number;
   // Consecutive ticks the customer-check READ itself threw (listChecks errored) while
   // gating this subtask's merge. Distinct from reviewAttempts, which a healthy-but-slow
   // customer check must never spend: a read that keeps throwing (the app lost access to
