@@ -40,17 +40,41 @@ export interface GrantLedgerRecord {
   replays: number;
 }
 
+// A single duplicate-consumption event, handed to the injected `onReplay` sink so a replay
+// becomes observable (alarm/metric) rather than a console.error line only. `attempt` is the
+// total number of times this id has now been consumed (>= 2 on a replay).
+export interface GrantReplay {
+  id: string;
+  context?: string;
+  firstSeenAt: string;
+  attempt: number;
+}
+
+export interface GrantLedgerOptions {
+  cap?: number;
+  /**
+   * Called on every duplicate consumption (never on a fresh one). This is the seam that routes
+   * a replay to the Notifier/a counted metric -- the ledger itself stays adapter-free (it runs
+   * in both the runner and the control-plane process), so the caller wires the actual
+   * notify('grant_replayed', ...) here. Must not throw: a sink error must never turn a
+   * detection-only replay signal into a thrown fault.
+   */
+  onReplay?: (replay: GrantReplay) => void;
+}
+
 export class GrantLedger {
   #consumed = new Map<string, GrantLedgerRecord>();
   #replays = 0;
   #cap: number;
   #now: () => Date;
+  #onReplay?: (replay: GrantReplay) => void;
 
   // Injectable clock so tests can pin firstSeenAt; defaults to wall time.
   // (Explicit field, not a ctor parameter property -- Node strip-only TS mode rejects those.)
-  constructor(now: () => Date = () => new Date(), options?: { cap?: number }) {
+  constructor(now: () => Date = () => new Date(), options?: GrantLedgerOptions) {
     this.#now = now;
     this.#cap = options?.cap ?? GRANT_LEDGER_CAP;
+    this.#onReplay = options?.onReplay;
   }
 
   /** Grants consumed so far. */
@@ -89,10 +113,18 @@ export class GrantLedger {
     }
     prior.replays += 1;
     this.#replays += 1;
+    const attempt = prior.replays + 1;
     console.error(
       `grant-ledger: REPLAYED GRANT ${id}${context ? ` (${context})` : ''} consumed again -- ` +
-        `first seen ${prior.firstSeenAt}, attempt #${prior.replays + 1}`,
+        `first seen ${prior.firstSeenAt}, attempt #${attempt}`,
     );
+    // Route the replay to the injected sink (Notifier/metric) so it is observable, not just a
+    // console.error line. Best-effort: a sink error must never escalate a detection-only signal.
+    try {
+      this.#onReplay?.({ id, context, firstSeenAt: prior.firstSeenAt, attempt });
+    } catch {
+      // swallow -- see onReplay doc
+    }
     return { fresh: false, id };
   }
 

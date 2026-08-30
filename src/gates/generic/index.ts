@@ -7,7 +7,6 @@ import type { Gate } from '../types.ts';
 import { createAssertionDeltaGate } from './assertion-delta.ts';
 import { createCveGate } from './cve.ts';
 import { createRiskGate } from './risk.ts';
-import { createRollupGuardGate } from './rollup-guard.ts';
 import { createStructureGate } from './structure.ts';
 import { createTestPolicyGate } from './test-policy.ts';
 
@@ -23,7 +22,6 @@ export function genericGates(): Gate[] {
     createCveGate(),
     createRiskGate(),
     createTestPolicyGate(),
-    createRollupGuardGate(),
     createAssertionDeltaGate(),
   ];
 }
@@ -38,6 +36,5 @@ export * from './assertion-delta.ts';
 export * from './assertion-delta-detect.ts';
 export * from './cve.ts';
 export * from './risk.ts';
-export * from './rollup-guard.ts';
 export * from './structure.ts';
 export * from './test-policy.ts';
