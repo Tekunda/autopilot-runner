@@ -218,6 +218,11 @@ export interface CheckResult {
   // suspicious escalation. `CheckStatus` stays a three-value union; these ride alongside it.
   skipped?: true;
   skipReason?: string;
+  // The gate's base id BEFORE any per-site display suffix is appended to `name`. A URL-bound gate
+  // that runs once per site publishes distinct display names (`seo-site-crawl (tekunda)`), but the
+  // never-run/no-baseline ledger and the enabled-gate set are keyed by the bare gate id -- so the
+  // base id must survive the suffixing to match them. Absent (== `name`) when no suffix was applied.
+  baseId?: string;
 }
 
 // Exactly one of stepPrompt (an inline instruction) or ref (a pointer to a
@@ -665,6 +670,11 @@ export interface RecordedGateCheck {
   status: CheckStatus;
   skipped?: true;
   skipReason?: string;
+  // The bare gate id when `id` carries a per-site display suffix (e.g. id `seo-site-crawl (tekunda)`,
+  // baseId `seo-site-crawl`). The never-run/no-baseline ledger keys off this so a multi-site tenant's
+  // URL-bound gates match the enabled-gate set instead of skipping the diagnostic entirely. Absent
+  // (== `id`) for a single-run gate.
+  baseId?: string;
 }
 
 // One enabled lens's finalized telemetry within a review round: the run outcome plus the

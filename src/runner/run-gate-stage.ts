@@ -99,6 +99,10 @@ function toCheckStatus(status: GateResult['status']): CheckStatus {
 function toChecks(results: GateResult[], nameSuffix = ''): CheckResult[] {
   return results.map((result) => ({
     name: `${result.id}${nameSuffix}`,
+    // A per-site suffix makes `name` differ from the gate's bare id; keep the base id so the
+    // never-run/no-baseline ledger can match it against the enabled-gate set (which is keyed by
+    // bare id). Omitted when unsuffixed -- `name` already IS the base id.
+    ...(nameSuffix ? { baseId: result.id } : {}),
     status: toCheckStatus(result.status),
     ...(result.status === 'unjudged'
       ? { unjudged: true as const, ...(result.unjudgedReason ? { unjudgedReason: result.unjudgedReason } : {}) }
