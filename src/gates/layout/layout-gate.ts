@@ -22,7 +22,12 @@
 //
 // FAIL-OPEN on infra: a browser/measure error is caught internally and the gate SKIPS with an
 // explanatory finding -- it never throws (a thrown gate reads as fail and wedges the fix loop) and
-// never blocks a merge on a Playwright/serve hiccup. Only a real geometry violation blocks.
+// never blocks a merge on a Playwright/serve hiccup. Only a real geometry violation blocks. But a
+// transient measure error on ONE target must not erase the real violations already found on the
+// others: like Visual-QA, each per-target measure error is isolated into a separate `inconclusive`
+// list (keyed by route+viewport) and the loop CONTINUES, so genuine violations from every measurable
+// target are preserved and reported. The gate only fail-open skips when NO real violation was found
+// (see the aggregation below).
 
 import { readGateConfig } from '../generic/config.ts';
 import { createContentReader, type ContentFormat } from '../../packs/seo/content.ts';
@@ -288,6 +293,10 @@ export function createLayoutRulesGate(deps: LayoutRulesDeps = {}): Gate {
       // silently never enforces and the never-fired ledger can't catch it (the gate DID fire). Seed the
       // notes with them so they ride along on whatever pass/fail verdict an operator sees.
       const notes: string[] = dropped.map((d) => `dropped malformed rule[${d.index}]: ${d.reason}`);
+      // Per-target measure errors (a browser/serve hiccup on ONE route x viewport). INFRA, not a
+      // layout defect -- collected here and kept apart from real geometry `failures` so a single flaky
+      // measurement never aborts the loop or erases violations already found on other targets.
+      const inconclusive: string[] = [];
       try {
         const targets = await deriveTargets(ctx, config);
         if (targets.length === 0) {
@@ -311,14 +320,12 @@ export function createLayoutRulesGate(deps: LayoutRulesDeps = {}): Gate {
             try {
               measurements = await browser.measure(url, viewport as Viewport, spec);
             } catch (err) {
-              // A browser/measure error is INFRA, not a layout defect. Skip the whole gate with an
-              // explanatory finding rather than blocking a merge on a Playwright/serve hiccup.
-              return {
-                id: LAYOUT_RULES_GATE_ID,
-                status: 'skip',
-                skipReason: 'infra',
-                findings: [`could not measure ${label}: ${errMsg(err)}`],
-              };
+              // A browser/measure error is INFRA, not a layout defect. Record it against THIS target
+              // and move on rather than aborting the loop -- discarding the real violations already
+              // collected from earlier targets would be worse than the hiccup. The gate stays
+              // fail-open on infra only when nothing real was found (see the aggregation below).
+              inconclusive.push(`could not measure ${label}: ${errMsg(err)}`);
+              continue;
             }
             for (const finding of evaluateRules(scopedRules, measurements)) {
               const line = `${label}: ${finding.message}`;
@@ -342,8 +349,18 @@ export function createLayoutRulesGate(deps: LayoutRulesDeps = {}): Gate {
         if (browser && !injectedBrowser) await browser.close().catch(() => {});
       }
 
+      // Aggregation:
+      // - Any real geometry violation -> `fail` (blocks the merge). Its findings carry the notes and
+      //   the per-target `inconclusive` entries too, so nothing is hidden when the run also hit an
+      //   infra hiccup on some other target -- a flaky measurement never erases a real violation.
+      // - No real violation but a target could not be measured -> fail-open `skip` (skipReason
+      //   'infra'), exactly as before: the gate never blocks a merge on a Playwright/serve hiccup.
+      // - Everything measurable and clean -> `pass`.
       if (failures.length > 0) {
-        return { id: LAYOUT_RULES_GATE_ID, status: 'fail', findings: [...failures, ...notes] };
+        return { id: LAYOUT_RULES_GATE_ID, status: 'fail', findings: [...failures, ...notes, ...inconclusive] };
+      }
+      if (inconclusive.length > 0) {
+        return { id: LAYOUT_RULES_GATE_ID, status: 'skip', skipReason: 'infra', findings: [...inconclusive, ...notes] };
       }
       return notes.length > 0
         ? { id: LAYOUT_RULES_GATE_ID, status: 'pass', findings: notes }
