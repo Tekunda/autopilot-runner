@@ -441,7 +441,11 @@ export interface StageResult {
   // secondary rate-limit -- keep inFlight, re-poll the SAME run next tick, escalate only after
   // repeated blips, and NEVER cancel the run). Absent for non-error outcomes and for other error
   // sites (a completed run that failed to yield its artifact), which are treated as terminal.
-  errorReason?: 'timeout' | 'workflow-drift' | 'run-not-found' | 'transient';
+  // 'no-verdict-clean-run' is a distinct sub-case of that last kind: the agent RAN cleanly
+  // (is_error:false, in budget, conclusion 'success') but wrote no verdict artifact -- an
+  // infra/agent-behavior flake, not a content verdict, so the caller can retry it separately
+  // and message it honestly rather than surfacing a content-less failure.
+  errorReason?: 'timeout' | 'workflow-drift' | 'run-not-found' | 'transient' | 'no-verdict-clean-run';
   // Set by dispatchStage/checkStage so the caller can persist the in-flight run marker and,
   // on later ticks, re-correlate the same run (cross-tick deadline is anchored on
   // runCreatedAt -- the run's immutable created_at -- so a hung run still escalates).
@@ -864,6 +868,11 @@ export interface TicketState {
   // Track F reuses the same counter (and its fix.maxFixRounds bound) for the customer-CI
   // autofix loop on PROMOTION PRs -- a ticket has one shared CI-repair budget either way.
   externalQaFixAttempts?: number;
+  // How many times QA was auto-retried after a CLEAN run wrote no verdict (plan.json missing)
+  // -- an infra/agent-behavior flake, not a content defect. Kept SEPARATE from
+  // externalQaFixAttempts so a flake never eats the content fix-loop budget; capped at 1, then
+  // the drive falls through to a terminal fail that names the real cause. Reset on a real verdict.
+  qaNoVerdictRetries?: number;
   // Set when the control plane holds a decomposed ticket for a replan/continue decision --
   // its recorded plan is possibly stale (the ticket re-entered the ready status, or every
   // ticket blocking it has shipped) and a human must choose: reply "replan" to discard the
