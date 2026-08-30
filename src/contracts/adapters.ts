@@ -37,6 +37,14 @@ export interface TaskBackend {
   get(ticketId: string): Promise<TicketState>;
   setStatus(ticketId: string, status: TicketStatus): Promise<void>;
   comment(ticketId: string, body: string): Promise<void>;
+  // Comment on a GENUINE escalation -- the ticket has run out of autonomous options and a human
+  // has to look now (an architect hold, a repair-loop or fix-loop exhaustion). Backends that can
+  // resolve a human owner for the ticket (e.g. the tracker page's reporter) should @-mention them
+  // so the notice actually reaches someone, not just the tracker's activity feed. Optional: a
+  // backend without a mentionable owner (or a bot reporter) falls back to a plain comment, and a
+  // caller without this implemented calls `comment` directly -- every OTHER comment (progress,
+  // routine gate/entitlement blocks, coverage notes) stays a plain `comment`, never this.
+  escalate?(ticketId: string, body: string): Promise<void>;
   // Stamp a ticket/subtask's pull-request URL onto the tracker as structured data (e.g. Notion's
   // "Pull Request" URL property), so the board surfaces the PR without reading comments. Called
   // idempotently by the reconciler each tick; implementations MUST no-op when the value already

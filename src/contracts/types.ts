@@ -77,6 +77,16 @@ export interface GatePolicy {
   // stage being asked to close all of them at once. Optional; defaults to FALSE -- replanning
   // is destructive (it discards a plan) and a tenant should choose it deliberately.
   autoReplanOnExhaustedRepairs?: boolean;
+  // Before a ticket escalates to a human -- an architect open-questions hold, or a fix-loop
+  // exhaustion at the ticket level (one or more subtasks stopped before completing) -- give
+  // freshRestart ONE shot at re-architecting with the hold text/blocked reasons forwarded in as
+  // notes, same idiom and same shared `autoReplans` budget as autoReplanOnExhaustedRepairs (at
+  // most one auto-replan per ticket, across every escalation reason that consults it). A second
+  // hold/exhaustion on the fresh plan is a genuine escalation -- the guard fails and the
+  // ordinary human-escalation path runs. Optional; defaults to TRUE -- unlike
+  // autoReplanOnExhaustedRepairs this never discards WORK (pre-plan, or a plan already stalled
+  // out), so it is a strictly-better bounded default rather than a destructive opt-in.
+  autoReplanBeforeEscalation?: boolean;
 }
 
 // A `gate` stage's entitled gates, delivered JIT inside the signed grant so the runner
@@ -871,10 +881,12 @@ export interface TicketState {
   // posted again each round and a three-repair ticket carries three copies of the same
   // comment. Plan-scoped like the other review state: cleared by a replan.
   postedFindingKeys?: string[];
-  // How many times the repair loop has been auto-replanned (see
-  // gates.autoReplanOnExhaustedRepairs). Deliberately NOT reset by freshRestart: it is the
-  // loop guard, and a counter the replan clears would let a ticket replan forever, each round
-  // costing a full architect run plus a rebuild of every subtask.
+  // How many times this ticket has been auto-replanned -- shared across every gate that
+  // consults it (gates.autoReplanOnExhaustedRepairs, gates.autoReplanBeforeEscalation), so a
+  // ticket gets at most ONE auto-replan total regardless of which escalation reason trips it.
+  // Deliberately NOT reset by freshRestart: it is the loop guard, and a counter the replan
+  // clears would let a ticket replan forever, each round costing a full architect run plus a
+  // rebuild of every subtask.
   autoReplans?: number;
   // Consecutive drive ticks whose only failure was a TRANSIENT infrastructure fault (a dropped
   // connection, timeout, 429, or 5xx -- see isTransientFault). Such a blip is not a ticket
