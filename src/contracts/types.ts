@@ -585,11 +585,12 @@ export interface InFlightStage {
 }
 
 // What a replan preserves about an old subtask it discarded, until the NEW plan exists and
-// can be compared against it. Only what reconciliation needs: the tracker id (does the new
-// plan still use this child page?) and the build branch (does the new plan reclaim it?).
+// can be compared against it. `id` is positional and can be reused by a later plan, so the
+// tracker-owned id identifies the exact old child page that may need retiring.
 export interface ReplanLeftover {
   id: string;
   branch?: string;
+  externalId?: string;
 }
 
 export interface SubtaskState {
