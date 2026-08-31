@@ -883,6 +883,29 @@ export interface TicketState {
   // the tracker's blocked-by relation has shipped). Wake-once: a ticket that blocks AGAIN
   // after waking is not auto-woken a second time -- the relation was consumed.
   dependencyWokenAt?: string;
+  // The user-visible removals gate #1b is CURRENTLY asking a human to sign off on -- exactly what
+  // the outstanding hold callout names. Short-lived and QUESTION-scoped: written when that hold is
+  // raised, and consumed the moment the human answers it (promoted into approvedRemovals below, or
+  // dropped). Every hold overwrites it -- including holds raised by other gates -- so an unanswered
+  // question can never leave a record behind for some later, unrelated answer to satisfy. Absent
+  // when no surface-removal hold is open.
+  heldRemovals?: string[];
+  // The user-visible surfaces a human has AUTHORIZED deleting. Durable, and deliberately NOT
+  // cleared by a replan.
+  //
+  // This is the correction to the mistake that made TEK-3745 loop four times in three hours. The
+  // sign-off had been treated as PLAN-scoped, living only in the ticket's transient description, so
+  // every re-read of the spec dropped it: when the fix loop exhausted and the ticket auto-replanned
+  // (freshRestart re-reads the tracker, which never carried the answer), the approval vanished and
+  // the byte-identical hold came back at a reviewer who had already answered it -- three times over.
+  //
+  // An approval is a fact about a SURFACE, not about a plan: "deleting the loading placeholder is
+  // fine" does not stop being true because the architect re-planned. So it survives the replan, and
+  // the safety property lives in the BINDING instead -- a removal is covered only when it names a
+  // surface already in this list (removalCoveredByHeld), so a plan proposing a DIFFERENT surface
+  // still holds for its own sign-off. Only a human answer ever adds to it (never a machine resume),
+  // and every entry records a decision a person made after being shown that exact surface.
+  approvedRemovals?: string[];
   // Consecutive ticks the tracker has reported this known, decomposed, non-terminal ticket
   // at the ready status (the structure-drift signal). The replan/continue hold fires only on
   // the SECOND consecutive sighting: one sighting is indistinguishable from our own status
