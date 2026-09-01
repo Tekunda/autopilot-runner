@@ -193,6 +193,20 @@ export interface SiteConfig {
   // gate id, merged ON TOP of the signed base gateConfig at run time -- the site's baseUrl is
   // added over it. Absent -> only the base config plus this site's baseUrl.
   gateConfig?: Record<string, Record<string, unknown>>;
+  // Where THIS site is deployed, per base branch: { test: 'https://test.example.com',
+  // main: 'https://example.com' }. Mirrors the per-environment site URLs a tenant repo
+  // already keeps for its own deploys, so nothing new has to be invented or kept in sync.
+  //
+  // issueGateGrant resolves the entry matching the grant's baseBranch and injects it as the
+  // crawl gate's `baselineUrl`, so whole-site findings are judged against the branch this
+  // work merges INTO rather than in absolute terms. Resolving it server-side is deliberate:
+  // baselineUrl decides what gets EXCUSED, so unlike gate-target/gate-mode (which only say
+  // what to check) an unsigned value would be a gate bypass -- point it at a host that fails
+  // everything and every finding demotes to a warning. Riding in the signed grant means a
+  // tampered value fails verifyGrant.
+  //
+  // Absent, or no entry for this base branch -> no baseline, every finding blocks as before.
+  deployedBaseUrls?: Record<string, string>;
 }
 
 export interface CheckResult {
