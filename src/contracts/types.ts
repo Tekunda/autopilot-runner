@@ -496,6 +496,11 @@ export interface StageResult {
   // the plan is intentionally empty and the control plane blocks the ticket with this text
   // for a human, rather than treating the empty plan as an architect failure.
   hold?: string;
+  // The architect's ALREADY-SATISFIED verdict (plan.json's `satisfied` string), present only when
+  // it emitted an empty plan because the ticket's deliverables ALREADY exist on the base tree.
+  // Carries the evidence (the files that implement it) so the completion is auditable, never a
+  // bare assertion. Distinct from `hold`: that one stops for a human, this one finishes the ticket.
+  satisfied?: string;
 }
 
 export interface StatusTelemetry {
