@@ -426,8 +426,13 @@ export class GitHubVCSHost implements VCSHost {
     const payload = {
       name: check.name,
       head_sha: sha,
-      status: check.status === 'pending' ? 'in_progress' : 'completed',
-      ...(check.status === 'pending' ? {} : { conclusion: check.status === 'pass' ? 'success' : 'failure' }),
+      // A skipped gate is FINISHED, it just never ran -- so it must be published `completed`
+      // with GitHub's `skipped` conclusion, not left `in_progress`. Only a genuinely running
+      // stage stays in_progress; anything else concludes, or it hangs on the PR forever.
+      status: check.status === 'pending' && !check.skipped ? 'in_progress' : 'completed',
+      ...(check.status === 'pending' && !check.skipped
+        ? {}
+        : { conclusion: check.skipped ? 'skipped' : check.status === 'pass' ? 'success' : 'failure' }),
       ...(check.detailsUrl ? { details_url: check.detailsUrl } : {}),
       output: {
         title: check.title ?? check.name,
@@ -436,7 +441,7 @@ export class GitHubVCSHost implements VCSHost {
     };
 
     let targetId = checkRunId;
-    if (targetId === undefined && check.status !== 'pending') {
+    if (targetId === undefined && (check.status !== 'pending' || check.skipped)) {
       const latest = await this.latestCheckRunsByName(repoId, sha);
       const candidate = latest.get(check.name);
       // Only a STRAY PENDING run is fair game here -- a completed run past its own

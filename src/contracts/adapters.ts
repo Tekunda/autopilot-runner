@@ -304,6 +304,13 @@ export interface PrFeedback {
 export interface PublishedCheck {
   name: string;
   status: CheckStatus;
+  // The gate was enabled but never evaluated. CheckStatus has no `skip`, so a skip arrives
+  // here as `pending` (run-gate-stage toCheckStatus: "a skipped gate was never evaluated, not
+  // passed") -- which is the RIGHT internal answer, because a skip must never bank as coverage.
+  // But `pending` publishes to a host as a check-run that is still RUNNING, so a skipped gate
+  // left one hanging in_progress forever on the PR. This flag lets the adapter CONCLUDE it as
+  // skipped without changing the internal status the coverage ledger reads.
+  skipped?: boolean;
   title?: string;
   summary?: string;
   detailsUrl?: string;
