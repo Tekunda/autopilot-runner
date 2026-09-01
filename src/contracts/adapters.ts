@@ -199,6 +199,17 @@ export interface VCSHost {
   // Used by the auto back-merge to open an upstream->downstream sync PR only when there is
   // actually something to merge. 0 when equal/behind or when the comparison can't be made.
   aheadBy(repoId: string, baseBranch: string, headBranch: string): Promise<number>;
+  // The full three-dot comparison of `base` against `head`: commits on head not on the merge
+  // base (`aheadBy`) AND commits on base not on it (`behindBy`). `aheadBy` above cannot be used
+  // to PROVE anything, because it folds three different answers into the same 0 -- "the refs are
+  // equal", "head is behind", and "the comparison could not be made at all" (a deleted branch, a
+  // transient API error). This one keeps them apart: `behindBy === 0` is positive proof that
+  // `base` is contained in `head`, and `undefined` says the comparison failed and nothing may be
+  // concluded from it. Used by the superseded-deploy recovery, where mistaking ignorance for
+  // containment would unblock a ticket whose work never shipped.
+  // Optional: a host that cannot compare refs simply doesn't implement it, and callers that need
+  // proof get none (the safe direction).
+  compareRefs?(repoId: string, base: string, head: string): Promise<{ aheadBy: number; behindBy: number } | undefined>;
   // Post a top-level comment on a PR. Used by the autofixer to ACKNOWLEDGE review feedback it
   // addressed -- resolving inline threads covers inline comments, but a top-level PR comment or
   // a review summary with no inline comments has no thread to resolve, so a reply is the only

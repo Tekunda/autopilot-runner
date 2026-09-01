@@ -51,9 +51,32 @@ function tail(text: string): string {
   return trimmed.length > TAIL_LIMIT ? `...${trimmed.slice(trimmed.length - TAIL_LIMIT)}` : trimmed;
 }
 
+// Yarn writes a content-free `error Command failed with exit code 1.` (plus its docs pointer) on
+// EVERY non-zero exit, so stderr is never empty when the suite fails. Preferring a non-empty
+// stderr therefore shipped nothing but that boilerplate and dropped the one informative stream --
+// Playwright writes its per-spec failure report to stdout. Strip the known-generic lines before
+// judging whether stderr says anything of its own.
+const RUNNER_NOISE = [
+  /^error Command failed with exit code \d+\.$/,
+  /^error Command failed with signal .*$/,
+  /^info Visit https:\/\/yarnpkg\.com\/.*$/,
+];
+
+function stripRunnerNoise(text: string): string {
+  return text
+    .split('\n')
+    .filter((line) => !RUNNER_NOISE.some((noise) => noise.test(line.trim())))
+    .join('\n')
+    .trim();
+}
+
 function failureFindings(run: string, exitCode: number, stdout: string, stderr: string): string[] {
   const findings = [`\`${run}\` exited ${exitCode}`];
-  const detail = tail(stderr) || tail(stdout);
+  // Both streams can carry real diagnostics (the spec report on stdout, a crash or a missing
+  // browser binary on stderr), so ship both -- stderr last, because tail() keeps the END: a short
+  // stderr diagnostic survives intact next to the tail of the stdout report, still within one
+  // TAIL_LIMIT.
+  const detail = tail([stdout.trim(), stripRunnerNoise(stderr)].filter(Boolean).join('\n'));
   if (detail) findings.push(detail);
   return findings;
 }

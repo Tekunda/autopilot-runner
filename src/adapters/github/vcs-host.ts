@@ -505,6 +505,19 @@ export class GitHubVCSHost implements VCSHost {
     return cmp?.ahead_by ?? 0;
   }
 
+  // Same endpoint as aheadBy, read honestly: a 404 (deleted/unknown ref) or a response missing
+  // either count resolves undefined -- "the comparison could not be made" -- instead of being
+  // flattened into a 0 that reads as "no divergence". Any other API error still throws, so a
+  // caller that treats absence as proof-of-nothing can also treat a throw that way.
+  async compareRefs(repoId: string, base: string, head: string): Promise<{ aheadBy: number; behindBy: number } | undefined> {
+    const cmp = await this.client.requestOptional<{ ahead_by?: number; behind_by?: number }>(
+      'GET',
+      `/repos/${repoId}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`,
+    );
+    if (typeof cmp?.ahead_by !== 'number' || typeof cmp.behind_by !== 'number') return undefined;
+    return { aheadBy: cmp.ahead_by, behindBy: cmp.behind_by };
+  }
+
   async replyToPr(repoId: string, prNumber: number, body: string): Promise<void> {
     await this.client.request('POST', `/repos/${repoId}/issues/${prNumber}/comments`, { body });
   }
