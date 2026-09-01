@@ -948,6 +948,55 @@ export interface TicketState {
   // work the moment it legitimately blocked. Cleared by the resume (recoverBlockedOnReply /
   // freshRestart) so each blocked episode starts its sighting history fresh.
   blockedReadyTicks?: number;
+  // ARMS the ready-status re-open: set when completeAsSatisfied finished this ticket WITHOUT a
+  // build (the architect judged every deliverable already present on the base and emitted an empty
+  // plan) AND all three arming conditions held, because each one is what makes re-opening on a
+  // status move safe rather than destructive:
+  //   1. the ticket has never shipped (see everShipped) -- otherwise a board tidy-up could re-drive
+  //      merged, possibly deployed work, which is the whole hazard this feature must not create;
+  //   2. its one automatic re-open is unspent (see satisfiedReopens) -- the bound on close ->
+  //      re-open -> close cycling, each round of which costs a paid architect run;
+  //   3. the close's own `done` write to the tracker LANDED -- if it did not, the page is still
+  //      sitting at the ready status because of OUR failed write, and every later "it reads ready"
+  //      observation would be our own echo rather than a person disagreeing.
+  // Cleared by the re-open (freshRestart / recoverDoneOnRedrive) and by the reconciler when it
+  // gives up waiting for the gesture (see satisfiedDriftSince), so it can never survive into a
+  // later normal completion.
+  satisfiedWithoutBuild?: boolean;
+  // Consecutive ticks the tracker has reported an ARMED ticket back at the ready status (the
+  // disagree-with-the-auto-close signal), counted from the ready query AND from the per-page
+  // bypass read that covers tickets the query hides. Deliberately SEPARATE from blockedReadyTicks
+  // and readyDriftTicks for the reason those two are separate from each other: a count accrued in
+  // one state must never let another state's branch act on its first own sighting. Two consecutive
+  // sightings are necessary but NOT sufficient here -- unlike the blocked resume, the re-open costs
+  // a whole fresh architect run on a ticket that already closed, so it is additionally confirmed
+  // against the page's own status property before it fires (see handleReadySighting).
+  satisfiedReadyTicks?: number;
+  // When the reconciler FIRST saw an armed ticket's page drifted back to the ready status (ISO
+  // 8601). The mirror sweep would otherwise repair that drift -- it reads `done` in the store, a
+  // ready page, and pushes `done` back as a dropped outbound event -- and since it reads the page
+  // directly while the ready QUERY that feeds the sighting counter lags writes by minutes, it
+  // usually reverts the human's move BEFORE anything can consume it. So the mirror leaves an armed
+  // ticket's drift alone and stamps this instead; the stamp bounds that tolerance, so a page whose
+  // gesture is never consumed (the sighting never surfaces) is repaired rather than left contradicting
+  // the store forever. Cleared as soon as the drift resolves or the ticket re-opens.
+  satisfiedDriftSince?: string;
+  // How many times this ticket has been automatically re-opened by the ready-status gesture. It is
+  // the loop guard, and like `autoReplans` it is deliberately NOT reset by a restart: a re-close
+  // re-arms nothing once this reaches its bound, so close -> re-open -> close terminates instead of
+  // spending a paid architect run every couple of ticks forever. The human still has "redrive",
+  // which is not automatic and therefore cannot cycle.
+  satisfiedReopens?: number;
+  // Whether this ticket has EVER merged work. Durable, and deliberately never cleared: it is a fact
+  // about the repository, not about the current plan.
+  //
+  // It exists because the restart paths destroy the evidence. freshRestart and recoverDoneOnRedrive
+  // both wipe `subtasks` and `prs` and then re-enter the architect, so a ticket whose subtask PRs
+  // merged and whose promotion deployed arrives at the next completeAsSatisfied looking exactly
+  // like one that never built anything -- and would arm the ready-status re-open on genuinely
+  // delivered work. Both paths therefore record the truth at the moment they wipe it (see
+  // hasShippedWork), and the arming check reads THIS rather than the emptied state.
+  everShipped?: boolean;
   // The live independent-review round over the assembled branch (see ReviewRoundState).
   // Absent whenever no round is running -- between rounds (e.g. while a repair build is
   // in flight) and once the aggregate passes.
