@@ -679,6 +679,12 @@ export interface SubtaskState {
   // coverage. Absent until a gate stage completed. Not persisted long-term meaning: overwritten
   // each gate pass.
   lastGateChecks?: RecordedGateCheck[];
+  // The PR head sha the last PASSING gate ran against. Set only alongside lastGateChecks, so
+  // its presence already implies "that gate passed". Used to tell a head that has genuinely
+  // moved (rebuild, fix push, update-branch merge commit -- all of which MUST be re-gated)
+  // from a merge that simply could not complete this tick on the identical revision, where a
+  // re-gate can only reproduce the verdict it already has. Absent -> unknown -> always gate.
+  lastGateHeadSha?: string;
 }
 
 // One gate's REAL executed result on a promotion, distilled from the gate stage's CheckResult:
@@ -984,6 +990,11 @@ export interface PRStatus {
   // merge -- e.g. re-verifying a promotion PR's required checks at merge time.
   // Optional: adapters that don't surface it simply omit it.
   headRef?: string;
+  // The head commit sha. Lets a caller tell "this is the exact revision we already gated"
+  // from "the head moved", which is the difference between a wasted re-gate and a needed one.
+  // Optional: an adapter that doesn't surface it omits it, and every consumer must treat
+  // absent as "unknown", never as "unchanged" (the compareRefs discipline from #311).
+  headSha?: string;
   // The PR's base branch name, used to discover the base branch's OWN required
   // status checks (branch protection + rulesets) so a merge can't push past a
   // gate the repo enforces. Optional; adapters that don't surface it omit it.
