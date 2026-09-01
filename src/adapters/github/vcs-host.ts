@@ -423,16 +423,26 @@ export class GitHubVCSHost implements VCSHost {
   // older run's identity.
   async publishCheck(repoId: string, ref: string, check: PublishedCheck, checkRunId?: number): Promise<{ id: number }> {
     const sha = (await this.getBranchSha(repoId, ref)) ?? ref;
+    // A skipped gate is FINISHED, it just never ran, and a superseded stage is finished too --
+    // its run was cancelled before it could report. Both must be published `completed`; only a
+    // genuinely running stage stays in_progress, or it hangs on the PR forever (Website PR
+    // #1453 sat on an `Autopilot / gate` in_progress whose run had been cancelled, BLOCKED).
+    const completes = check.status !== 'pending' || check.skipped === true || check.cancelled === true;
     const payload = {
       name: check.name,
       head_sha: sha,
-      // A skipped gate is FINISHED, it just never ran -- so it must be published `completed`
-      // with GitHub's `skipped` conclusion, not left `in_progress`. Only a genuinely running
-      // stage stays in_progress; anything else concludes, or it hangs on the PR forever.
-      status: check.status === 'pending' && !check.skipped ? 'in_progress' : 'completed',
-      ...(check.status === 'pending' && !check.skipped
-        ? {}
-        : { conclusion: check.skipped ? 'skipped' : check.status === 'pass' ? 'success' : 'failure' }),
+      status: completes ? 'completed' : 'in_progress',
+      ...(completes
+        ? {
+            conclusion: check.cancelled
+              ? 'cancelled'
+              : check.skipped
+                ? 'skipped'
+                : check.status === 'pass'
+                  ? 'success'
+                  : 'failure',
+          }
+        : {}),
       ...(check.detailsUrl ? { details_url: check.detailsUrl } : {}),
       output: {
         title: check.title ?? check.name,
@@ -441,6 +451,9 @@ export class GitHubVCSHost implements VCSHost {
     };
 
     let targetId = checkRunId;
+    // Deliberately excludes `cancelled`: a supersede only ever concludes the check-run id its
+    // own marker recorded. Hunting for a same-name pending run to cancel could conclude a
+    // check belonging to a stage that is genuinely still running.
     if (targetId === undefined && (check.status !== 'pending' || check.skipped)) {
       const latest = await this.latestCheckRunsByName(repoId, sha);
       const candidate = latest.get(check.name);

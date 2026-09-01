@@ -311,6 +311,14 @@ export interface PublishedCheck {
   // left one hanging in_progress forever on the PR. This flag lets the adapter CONCLUDE it as
   // skipped without changing the internal status the coverage ledger reads.
   skipped?: boolean;
+  // The stage this check reported was SUPERSEDED -- replaced by a newer run, or abandoned
+  // when its subtask went terminal -- so its run was cancelled before it could report a
+  // verdict. Same shape as `skipped` (it rides in on a `pending` status, because internally
+  // there was no verdict), and for the same reason: without it the dispatch-time `pending`
+  // check-run stays in_progress forever with nothing running behind it. Distinct from
+  // `skipped` because a superseded stage DID start; the host concludes it `cancelled`, never
+  // `failure` -- it did not fail on the merits.
+  cancelled?: boolean;
   title?: string;
   summary?: string;
   detailsUrl?: string;
