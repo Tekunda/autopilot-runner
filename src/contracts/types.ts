@@ -959,9 +959,12 @@ export interface TicketState {
   //   3. the close's own `done` write to the tracker LANDED -- if it did not, the page is still
   //      sitting at the ready status because of OUR failed write, and every later "it reads ready"
   //      observation would be our own echo rather than a person disagreeing.
-  // Cleared by the re-open (freshRestart / recoverDoneOnRedrive) and by the reconciler when it
-  // gives up waiting for the gesture (see satisfiedDriftSince), so it can never survive into a
-  // later normal completion.
+  // Cleared by the re-open (freshRestart / recoverDoneOnRedrive), so it can never survive into a
+  // later normal completion. It deliberately survives the mirror giving up on one unclaimed
+  // gesture (see humanStatusEdit): the episode is closed when the page is repaired, so a LATER
+  // move gets its own full grace window rather than inheriting an expired one, and there is no
+  // longer any reason to spend the whole escape hatch on the first move nobody happened to
+  // consume. MAX_SATISFIED_REOPENS still bounds what the gesture can cost.
   satisfiedWithoutBuild?: boolean;
   // Consecutive ticks the tracker has reported an ARMED ticket back at the ready status (the
   // disagree-with-the-auto-close signal), counted from the ready query AND from the per-page
@@ -972,15 +975,69 @@ export interface TicketState {
   // a whole fresh architect run on a ticket that already closed, so it is additionally confirmed
   // against the page's own status property before it fires (see handleReadySighting).
   satisfiedReadyTicks?: number;
-  // When the reconciler FIRST saw an armed ticket's page drifted back to the ready status (ISO
-  // 8601). The mirror sweep would otherwise repair that drift -- it reads `done` in the store, a
-  // ready page, and pushes `done` back as a dropped outbound event -- and since it reads the page
-  // directly while the ready QUERY that feeds the sighting counter lags writes by minutes, it
-  // usually reverts the human's move BEFORE anything can consume it. So the mirror leaves an armed
-  // ticket's drift alone and stamps this instead; the stamp bounds that tolerance, so a page whose
-  // gesture is never consumed (the sighting never surfaces) is repaired rather than left contradicting
-  // the store forever. Cleared as soon as the drift resolves or the ticket re-opens.
-  satisfiedDriftSince?: string;
+  // The OPEN human-status-edit episode: a person moved this ticket on the tracker board to a
+  // status the store disagrees with, and the reconciler's mirror has decided not to silently
+  // overwrite them (see human-status-edit.ts and the mirror sweep in reconciler.ts).
+  //
+  // This generalises what shipped as `satisfiedDriftSince` for exactly one slice of the problem (a
+  // ready-status move on a completed-without-a-build ticket). The bug was never specific to that
+  // slice: the mirror reads the page DIRECTLY, so it sees a human's edit within a tick, while every
+  // path that could honour the edit reads the ready QUERY, which lags page writes by minutes. The
+  // mirror therefore reverted the person before anything could consume them -- for ANY status, on
+  // ANY ticket, with no comment and no notification. Two mechanisms for one rule would have left
+  // the general case broken, so there is one.
+  //
+  // It is an EPISODE, not a flag, because both halves of its identity matter:
+  //   - `status`/`storeStatus` are the disagreement itself. A drift whose pair still matches this
+  //     record is the SAME episode, so the explanatory comment is posted once per episode rather
+  //     than once per 60s tick (the same anti-spam discipline as `lastNotice`). A different pair is
+  //     a NEW gesture by the person and deserves its own answer.
+  //   - `since` bounds the tolerance. "Don't overwrite them" must never become "the board and the
+  //     store disagree forever", so a move nothing consumed within HUMAN_EDIT_GRACE_MS is repaired
+  //     -- with the explanation, never silently.
+  // Matching the pair also settles authorship WITHOUT re-reading it: once an episode is open, our
+  // own later page writes (a PR-url stamp) would make this integration the page's last editor and
+  // launder the person's move back into "our own dropped write".
+  // CLOSED the moment the page and the store agree again -- by the sweep that repaired the page,
+  // not by a later one observing the result. Everything after that repair is a fresh disagreement
+  // and is answered like one, because the most natural reaction to a board that just snapped back
+  // is to drag it again: a re-drag matches the stale pair exactly, so an episode left open would
+  // hand it an already-expired `since` (no grace) and a spent `notified` (no comment) and revert it
+  // in silence.
+  humanStatusEdit?: {
+    /** The status a person put on the tracker. */
+    status: TicketStatus;
+    /** The store status it contradicted -- the other half of the episode's identity. */
+    storeStatus: TicketStatus;
+    /** ISO 8601: when the mirror FIRST saw this episode. */
+    since: string;
+    /** Whether this episode's one explanatory comment has been posted. */
+    notified?: boolean;
+    /** Set when a drive-loop path ACTED on the move (a resume, a re-open, a redrive): the store
+     *  status changed BECAUSE of it, and the tracker page is now merely behind. Without it the
+     *  mirror would find a ready page against a freshly-`building` store, re-derive "a human moved
+     *  this and it cannot take effect", and explain to the person that the gesture they just
+     *  successfully used had failed -- while the honouring path's own comment sat right above it.
+     *  With it, the repair is silent, because that repair IS our own write catching up. It grants
+     *  silence, so it lives exactly as long as the episode does and no longer -- retired with the
+     *  repair, never available to a move made afterwards. */
+    honoured?: boolean;
+  };
+  // The explanatory human-status-edit comment's RATE LIMIT for this ticket: how many have been
+  // posted inside the window that opened at `windowStartedAt` (MAX_HUMAN_EDIT_NOTICES per
+  // HUMAN_EDIT_NOTICE_WINDOW_MS).
+  //
+  // Episode dedupe alone cannot stop a tracker AUTOMATION that re-applies the same status every few
+  // minutes -- an episode closes as soon as the page and store agree again, so each flip -> repair
+  // -> flip round opens a genuinely new one -- and answering each would bury the ticket's real
+  // conversation under identical notices.
+  //
+  // A rolling window, and deliberately NOT the lifetime counter this was first written as. A
+  // lifetime cap silences the ticket for good: the fourth genuine human edit, months later, from a
+  // different person, would be reverted with no comment -- exactly the behaviour the mirror exists
+  // to forbid, made permanent. The window bounds a fight without ever buying the right to be
+  // silent again.
+  humanStatusEditNotices?: { count: number; windowStartedAt: string };
   // How many times this ticket has been automatically re-opened by the ready-status gesture. It is
   // the loop guard, and like `autoReplans` it is deliberately NOT reset by a restart: a re-close
   // re-arms nothing once this reaches its bound, so close -> re-open -> close terminates instead of

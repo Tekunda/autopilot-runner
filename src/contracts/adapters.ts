@@ -51,6 +51,22 @@ export interface TaskBackend {
   // matches (avoid edit-churn) and when there's no configured property/resolvable page. Optional:
   // backends without a PR field (or where the host IS the PR, e.g. GitHub issues) don't implement it.
   setPullRequestUrl?(ticketId: string, url: string): Promise<void>;
+  // WHO last edited this ticket on the tracker: 'self' when it was THIS integration (our own
+  // credential), 'human' when it was anybody else, 'unknown' when the backend could not tell.
+  //
+  // The reconciler's mirror sweep needs it to answer a question it previously did not ask. When
+  // the tracker's status differs from the store's, that shape has two causes with OPPOSITE right
+  // answers: our own outbound status write was dropped (network, rate limit, crash), in which case
+  // re-pushing the store's status is a silent, correct repair -- or a PERSON moved the ticket on
+  // the board, in which case re-pushing it destroys the primary way a human communicates intent to
+  // the pipeline, silently. Overwriting the second case is what made a customer drag a ticket to
+  // Done and find it back at Blocked minutes later with nothing to explain it.
+  //
+  // 'unknown' MUST be read as human by callers, never as self -- see the fail-safe note in
+  // reconciler.ts. Optional: a backend that cannot expose page authorship simply does not
+  // implement it, and the reconciler keeps its pre-existing store-always-wins repair for that
+  // backend (a capability gap, deliberately not a behaviour change).
+  lastEditedBy?(ticketId: string): Promise<'self' | 'human' | 'unknown'>;
   readReplies(ticketId: string): Promise<TaskReply[]>;
   // Returns the tracker's own id for each subtask page/issue it created or adopted, so the
   // caller can record it durably (SubtaskState.externalId) and re-bind after a restart --
