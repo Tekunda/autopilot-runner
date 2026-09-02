@@ -23,6 +23,7 @@ import type { CheckResult, ExecutionGrant, ServeConfig, SiteConfig, StatusTeleme
 import type { ExecutorCredential } from '../gates/visual/judge.ts';
 import { verifyGrant } from '../control-plane/grant-verify.ts';
 import { runCommand as defaultRunCommand } from '../gates/exec.ts';
+import { boundedCapture } from '../gates/output-capture.ts';
 import { registerHeavyGatesForSpecs } from './gate-registry.ts';
 import { URL_BOUND_HEAVY_GATE_IDS } from './heavy-gate-ids.ts';
 import { digestFor, grantId, rejectedTelemetry } from './prepare-stage.ts';
@@ -166,6 +167,10 @@ export function isTransientBuildFault(phase: BuildPhase | undefined, message: st
   return false;
 }
 
+// Tighter than the gate default: this capture is inlined into an Error MESSAGE that a caller then
+// wraps with its own phase/command prefix, so it shares its budget rather than owning one.
+const SERVE_CAPTURE_LIMIT = 2000;
+
 async function runOrThrow(
   runCommand: typeof defaultRunCommand,
   phase: Extract<BuildPhase, 'install' | 'build'>,
@@ -174,8 +179,13 @@ async function runOrThrow(
 ): Promise<void> {
   const { exitCode, stderr, stdout } = await runCommand('sh', ['-c', line], cwd);
   if (exitCode !== 0) {
-    const tail = (stderr.trim() || stdout.trim()).slice(-2000);
-    throw phaseError(phase, `${phase} \`${line}\` exited ${exitCode}: ${tail}`);
+    // Head-and-tail, not a tail (output-capture.ts): a failed build prints its FIRST compile error
+    // first and a cascade of consequences after it, so the head is where the cause is. This text
+    // is both the check finding a human reads and the brief the autofixer works from, and it is
+    // also what isTransientBuildFault pattern-matches -- a wider sample of the same failure, still
+    // scoped to the same phase, so an install flake stays as detectable as it was.
+    const detail = boundedCapture(stderr.trim() || stdout.trim(), SERVE_CAPTURE_LIMIT);
+    throw phaseError(phase, `${phase} \`${line}\` exited ${exitCode}: ${detail}`);
   }
 }
 

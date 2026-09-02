@@ -11,12 +11,14 @@
 //
 // Everything site-specific is config (ctx.config['e2e']): the command to run and the served
 // baseUrl (threaded in by the serve stage). The gate hardcodes neither. Exit 0 -> pass, non-zero
-// -> fail with a bounded tail of the command's output as findings, mirroring the H3 command gate.
+// -> fail with a bounded head-and-tail capture of the command's output as findings, mirroring
+// the H3 command gate.
 // Report-only is honored at the spec level (a `blocking:false` signed spec, from
 // PackConfig.gateConfig['e2e']): the gate reports its honest `fail`, and run-gate-stage excludes a
 // non-blocking gate's fail from the stage verdict -- exactly like the other pack gates.
 
 import { runCommand as defaultRunCommand } from '../exec.ts';
+import { boundedCapture } from '../output-capture.ts';
 import type { Gate, GateContext, GateResult } from '../types.ts';
 
 export const E2E_GATE_ID = 'e2e';
@@ -42,15 +44,6 @@ export interface E2eDeps {
   runCommand?: typeof defaultRunCommand;
 }
 
-// Cap on how much of a failed run's output rides back as findings -- only telemetry crosses the
-// split plane, and a multi-MB test log is neither useful nor safe to ship whole (command-gate.ts).
-const TAIL_LIMIT = 4000;
-
-function tail(text: string): string {
-  const trimmed = text.trim();
-  return trimmed.length > TAIL_LIMIT ? `...${trimmed.slice(trimmed.length - TAIL_LIMIT)}` : trimmed;
-}
-
 // Yarn writes a content-free `error Command failed with exit code 1.` (plus its docs pointer) on
 // EVERY non-zero exit, so stderr is never empty when the suite fails. Preferring a non-empty
 // stderr therefore shipped nothing but that boilerplate and dropped the one informative stream --
@@ -73,10 +66,12 @@ function stripRunnerNoise(text: string): string {
 function failureFindings(run: string, exitCode: number, stdout: string, stderr: string): string[] {
   const findings = [`\`${run}\` exited ${exitCode}`];
   // Both streams can carry real diagnostics (the spec report on stdout, a crash or a missing
-  // browser binary on stderr), so ship both -- stderr last, because tail() keeps the END: a short
-  // stderr diagnostic survives intact next to the tail of the stdout report, still within one
-  // TAIL_LIMIT.
-  const detail = tail([stdout.trim(), stripRunnerNoise(stderr)].filter(Boolean).join('\n'));
+  // browser binary on stderr), so ship both, as ONE budgeted capture -- stderr last, because a
+  // short stderr diagnostic appended at the end lands inside the tail the capture retains, next
+  // to the end of the stdout report. boundedCapture keeps the head too, so the first failed
+  // spec's assertion diff survives a run in which hundreds of specs failed -- that first block is
+  // the diagnosis a fixer needs, and it is the first thing a tail-only capture threw away.
+  const detail = boundedCapture([stdout.trim(), stripRunnerNoise(stderr)].filter(Boolean).join('\n'));
   if (detail) findings.push(detail);
   return findings;
 }

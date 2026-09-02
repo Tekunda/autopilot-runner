@@ -1,11 +1,12 @@
 // H3 command gate (docs/ci-gate-refit-plan.md): a tenant-declared shell command
 // (e.g. `yarn lint`, `yarn build`, `yarn seo:check`) run against the customer PR
 // checkout (ctx.workspaceRoot). Exit 0 -> pass, non-zero -> fail with a bounded
-// tail of the command's output as findings. This replaces the GitHub Actions the
-// customer will not re-enable. A `blocking:false` gate that fails reports `warn`
+// head-and-tail capture of the command's output as findings. This replaces the
+// GitHub Actions the customer will not re-enable. A `blocking:false` gate that fails reports `warn`
 // (report-only) instead of failing the grant -- see GateStatus in ../types.ts.
 
 import { runCommand } from '../exec.ts';
+import { boundedCapture } from '../output-capture.ts';
 import type { Gate, GateContext, GateResult } from '../types.ts';
 
 // One tenant-declared command gate. Rides in the signed grant (as a
@@ -22,20 +23,13 @@ export interface CommandGateSpec {
   onBase?: string[];
 }
 
-// Cap on how much of a failed command's output rides back as findings -- only
-// telemetry crosses the split plane, and a multi-MB build log is neither useful
-// nor safe to ship whole.
-const TAIL_LIMIT = 4000;
-
-function tail(text: string): string {
-  const trimmed = text.trim();
-  return trimmed.length > TAIL_LIMIT ? `...${trimmed.slice(trimmed.length - TAIL_LIMIT)}` : trimmed;
-}
-
 function failureFindings(run: string, exitCode: number, stdout: string, stderr: string): string[] {
   const findings = [`\`${run}\` exited ${exitCode}`];
-  // stderr is where the actionable failure usually is; fall back to stdout.
-  const detail = tail(stderr) || tail(stdout);
+  // stderr is where the actionable failure usually is; fall back to stdout. Bounded head-and-tail
+  // (output-capture.ts), not a tail: a compiler or linter reports its FIRST error first and its
+  // summary last, so a tail-only capture hands the fixer the count of what broke without the one
+  // error that explains it.
+  const detail = boundedCapture(stderr) || boundedCapture(stdout);
   if (detail) findings.push(detail);
   return findings;
 }
