@@ -1000,6 +1000,32 @@ export interface TicketState {
   // adopt and finalize the integration lane's run, charging an attempt and publishing its check
   // against a ref that run never touched.
   branchConflictTarget?: string;
+  // The open FRESHNESS-HOLD episode on one of this ticket's branches: how many consecutive drive
+  // cycles the freshness hold (control-plane.ts, holdOnStaleBranch) stopped the lane WITHOUT
+  // dispatching anything, tallied per reason.
+  //
+  // The hold has two such outcomes, and both are the right DIRECTION -- neither ever lets a build,
+  // a gate or a review judge a tree that could not be confirmed current -- but both were unbounded
+  // until this existed:
+  //   * `unknown`: the host could not say whether the branch is behind the base (an API fault, a
+  //     ref that vanished). Nothing is dispatched, so nothing can ever escalate on its own.
+  //   * `refused`: a real conflict was found but the AI-run budget refused the conflict fix, with
+  //     no side effects. No attempt is consumed, so `exhausted` -- the conflict path's own
+  //     escalation -- is unreachable by construction.
+  // Either way the drive holds, refreshes lastEventAt (so the wedge alarm sees a live ticket) and
+  // posts its pause notice once: a permanently unreadable host or a permanently refused budget
+  // parked the ticket silently forever. A quiet stall rather than a visible block.
+  //
+  // ONE record, not two counters: one field to clear in every recovery reset, which is the wiring
+  // an extra counter would have needed in each of them to avoid becoming the silently-stuck one.
+  // Tallied per KIND because they are different operational problems and the escalation has to say
+  // which -- and because a single count would never reach any cap under a host fault and a refused
+  // budget alternating tick by tick, each resetting the other's streak.
+  //
+  // Keyed by `branch` for exactly the reason branchConflictTarget is: the ticket lane refreshes
+  // first, so a record cleared on any clean refresh would be zeroed every tick while the
+  // integration lane was mid-episode. Only the named branch's own clean refresh clears it.
+  branchFreshnessHolds?: { branch: string; unknown?: number; refused?: number };
   // Consecutive ticks the rollup PR's merge has stayed `pending` (behind, not ready, or a
   // benign race that keeps recurring). Bounds the deferral so a merge error that never
   // clears escalates for a human instead of parking silently forever. Reset once the
@@ -1264,6 +1290,24 @@ export interface TicketState {
   // Absent whenever no round is running -- between rounds (e.g. while a repair build is
   // in flight) and once the aggregate passes.
   reviewRound?: ReviewRoundState;
+  // How many times the live review round has been DISCARDED because the assembled branch's head
+  // moved under it (control-plane.ts, the head-move guard in driveAssembledAccept).
+  //
+  // Restarting is the correct response to a moved head -- the revision the reviewers were judging
+  // is no longer the one that would land -- but nothing counted the restarts, so a branch whose
+  // head keeps moving restarted forever. It is invisible to BOTH alarms: the wedge alarm keys on
+  // lastEventAt, which the restart itself refreshes (the restarts ARE activity), and the drift
+  // alarm keys on how far behind the base a branch is, which a moving head does not affect. Each
+  // restart cancels three superseded reviewer runs and dispatches three more, so the ticket burns
+  // review runs while looking busy.
+  //
+  // Lives on the TICKET, not on ReviewRoundState, because the restart is exactly the event that
+  // discards the round: a count on the round would die with it. And it is not
+  // ReviewRoundState.missingAttempts under another name -- that streak is reset by any successful
+  // round START, which is precisely what a restart does next tick, so it can never accumulate
+  // here. Reset when a round actually reaches AGGREGATION (green or blocking): the episode this
+  // bounds is "rounds that never produce a verdict", and a round that produced one ends it.
+  reviewRestarts?: number;
   // Old subtasks a REPLAN discarded, held until the replacement plan exists. freshRestart
   // wipes `subtasks`, so without this the branches/PRs/child pages that plan left behind
   // have no record and orphan forever. Cleanup is DEFERRED rather than done at replan time
