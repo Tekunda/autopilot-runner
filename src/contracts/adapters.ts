@@ -161,9 +161,11 @@ export interface VCSHost {
   // subtask PR's base is the TICKET branch -- so nothing it does can bring the BASE branch's
   // new commits into `ticket/*`. A ticket branch sat 161 commits behind `test` for days
   // because of that gap, and the subtask builds and gates taken on it described a tree that no
-  // longer existed. Its one caller today refreshes the ticket branch only (pr-ops.ts,
-  // refreshTicketBranchFromBase); the integration branch has the same gap and is not yet
-  // covered.
+  // longer existed. One caller (pr-ops.ts, refreshBranchFromBase) now serves BOTH long-lived
+  // branches through it: the ticket branch before the subtask build/gate lane, and the
+  // integration branch before the assembled review and the promotion PR opened from it. The integration
+  // branch had the identical gap -- it merely read 0 behind for as long as it was still empty,
+  // which is exactly while the destructive reset could still refresh it.
   //
   // Append-only by construction: it creates a real merge commit and never rewrites history,
   // so it is safe on a SHARED branch that open PRs and live runs are based on -- unlike the

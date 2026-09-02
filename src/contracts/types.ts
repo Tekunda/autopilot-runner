@@ -968,13 +968,36 @@ export interface TicketState {
   // this ticket's PR. Bounds the conflict self-heal so a genuinely unresolvable conflict
   // blocks for a human instead of looping. Reset once the PR merges.
   conflictFixAttempts?: number;
-  // The same bound, on its OWN counter, for conflicts between the BASE branch and this ticket's
-  // own branch (the cycle-start refresh, pr-ops.ts refreshTicketBranchFromBase). Deliberately not
-  // shared with conflictFixAttempts above: that budget is spent by rollup/promotion/external-PR
+  // The same bound, on its OWN counter, for conflicts between the BASE branch and one of this
+  // ticket's own branches (the per-cycle refresh, pr-ops.ts refreshBranchFromBase). Deliberately
+  // not shared with conflictFixAttempts above: that budget is spent by rollup/promotion/external-PR
   // conflicts, and a ticket that had already spent it would block on its FIRST branch conflict
   // having dispatched no fix for it at all, while the blocked reason read as though it had tried.
   // Different branch, different conflict, different budget.
+  //
+  // Scoped to ONE conflict EPISODE on ONE branch, named by branchConflictTarget below -- not to
+  // the ticket's lifetime. That distinction is load-bearing now that two branches (ticket and
+  // integration) are refreshed and both route their conflicts here. A lifetime counter would be
+  // spent by SUCCESSES: resolveConflict increments once per terminated fix run, pass or fail
+  // (review-feedback.ts), so three conflicts that each resolved cleanly leave it at
+  // fix.maxFixRounds having never blocked the ticket -- and the next conflict, on either branch,
+  // returns 'exhausted' immediately and blocks with "could not be auto-resolved" having
+  // dispatched nothing. That is verbatim the failure this counter was split off to prevent, so
+  // the episode reset below is what makes the split actually hold.
   branchConflictFixAttempts?: number;
+  // Which branch the branchConflictFixAttempts episode above belongs to, so the budget is
+  // per-episode rather than per-ticket-lifetime. Set when a branch conflict is first acted on,
+  // cleared when THAT branch comes back clean (the episode ended). A conflict on a different
+  // branch starts a fresh episode with a fresh budget.
+  //
+  // It must be the branch, not merely "a branch conflict happened": the ticket lane refreshes
+  // first and is usually clean, so a reset keyed on any clean refresh would zero the count every
+  // tick while the integration lane was mid-episode, and that lane's conflict fix would loop
+  // unbounded. Also identifies WHICH branch an in-flight `origin: 'conflict'` marker belongs to,
+  // which is otherwise unrecorded -- with two branch lanes live, the ticket lane would otherwise
+  // adopt and finalize the integration lane's run, charging an attempt and publishing its check
+  // against a ref that run never touched.
+  branchConflictTarget?: string;
   // Consecutive ticks the rollup PR's merge has stayed `pending` (behind, not ready, or a
   // benign race that keeps recurring). Bounds the deferral so a merge error that never
   // clears escalates for a human instead of parking silently forever. Reset once the
