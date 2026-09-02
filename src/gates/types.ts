@@ -9,6 +9,7 @@
 // the coding-stage finalize phase.
 
 import type { VCSHost } from '../contracts/adapters.ts';
+import type { StackProfile } from './stack-profile.ts';
 
 // `warn` is a report-only failure: the gate's check did not pass, but the gate
 // is non-blocking (a `blocking:false` command gate), so it must NOT fail the
@@ -38,6 +39,18 @@ export interface GateContext {
   workspaceRoot: string;
   vcsHost: VCSHost;
   config: Record<string, unknown>;
+  // What toolchains the checkout at `workspaceRoot` actually contains -- Node (and which
+  // package manager), Python (and which dependency manager), Salesforce -- detected ONCE per
+  // gate stage by gates/stack-profile.ts's detectStack, so twenty gates stop each guessing
+  // privately. Like `changedFiles`, this is a FILESYSTEM-DERIVED FACT assembled runner-side,
+  // NOT a policy decision: it deliberately does not ride in the signed ExecutionGrant, because
+  // nothing server-side can see the checkout to sign a claim about it.
+  //
+  // Optional, and a gate must behave correctly when it is absent (an older caller, or a test
+  // that builds a context by hand) -- absent means "not detected", never "nothing here".
+  // Ordered by the fixed detector order, which is deterministic but is NOT a ranking; a
+  // polyglot repo (a Salesforce org with an LWC front end) legitimately carries more than one.
+  stackProfiles?: readonly StackProfile[];
 }
 
 // Why a gate returned `skip` -- a first-class "never ran" outcome, the complement of `unjudged`

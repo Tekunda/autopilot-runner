@@ -15,6 +15,7 @@ import type { CheckResult, CheckStatus, ExecutionGrant, GateSpec, StatusTelemetr
 import { verifyGrant, type KeyInput } from '../control-plane/grant-verify.ts';
 import { createCommandGate } from '../gates/command/command-gate.ts';
 import type { GateRegistry } from '../gates/registry.ts';
+import { describeStack, detectStackAt, type StackProfile } from '../gates/stack-profile.ts';
 import type { GateContext, GateResult } from '../gates/types.ts';
 import { registerPackGatesForSpecs } from './gate-registry.ts';
 import { digestFor, grantId, rejectedTelemetry } from './prepare-stage.ts';
@@ -73,6 +74,13 @@ export interface RunGateStageDeps {
    * the bare gate id is the check name.
    */
   checkNameSuffix?: string;
+  /**
+   * How to work out what toolchains the checkout holds (gates/stack-profile.ts). Injected only
+   * so a test can drive a synthetic repo without a temp dir; production always uses the real
+   * filesystem detector. It must never throw -- detection is diagnostic, and a crash here would
+   * take down a gate stage before it writes gate-report.json.
+   */
+  stackDetector?: (workspaceRoot: string) => readonly StackProfile[];
   /** Public key used to verify the grant's signature. */
   verifyKey: KeyInput;
   /** Clock override for tests; defaults to the current time. */
@@ -179,6 +187,20 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
 
   const workspaceRoot = deps.workspaceRoot ?? process.cwd();
 
+  // Detect the checkout's toolchains ONCE, here, where workspaceRoot is already in hand, and
+  // hand the answer to every gate on the context -- so no gate has to re-derive it, and two
+  // gates can no longer disagree about what repo they are looking at. Filesystem-derived like
+  // `changedFiles`, so it is assembled runner-side and is NOT part of the signed grant.
+  // Wrapped: detection is DIAGNOSTIC. It may not decide a verdict and it may not take down a
+  // stage, so a detector that somehow throws degrades to "not detected" (an absent field),
+  // which every gate must already handle.
+  let stackProfiles: readonly StackProfile[] = [];
+  try {
+    stackProfiles = (deps.stackDetector ?? detectStackAt)(workspaceRoot);
+  } catch {
+    stackProfiles = [];
+  }
+
   const ctx: GateContext = {
     repoId: grant.repoId,
     prNumber: deps.target.prNumber,
@@ -188,6 +210,7 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
     workspaceRoot,
     vcsHost: deps.vcsHost,
     config,
+    ...(stackProfiles.length > 0 ? { stackProfiles } : {}),
   };
 
   // Deterministic pack gates (SEO crawl/changed-file, docs, security regex) ride in the grant
@@ -242,6 +265,13 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
   // Make the run's log self-describing: a legitimate gate failure must be legible in
   // Actions logs, not byte-identical to a crash (the 75-file diff that failed `risk`
   // for an hour with nothing in the log saying why).
+  const stack = describeStack(stackProfiles);
+  // Logged BEFORE the verdicts: "which repo did these gates think they were looking at" is the
+  // first question asked of a surprising gate result, and it is unanswerable after the fact
+  // from a gate report that only carries statuses.
+  for (const line of stack) {
+    process.stdout.write(`[stack] ${line}\n`);
+  }
   for (const result of results) {
     process.stdout.write(`[gate] ${result.id}: ${result.status}\n`);
     for (const finding of result.findings ?? []) {
@@ -253,6 +283,11 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
     grantId: grantId(grant),
     result: ok ? 'pass' : 'fail',
     checks: toChecks(results, deps.checkNameSuffix),
+    // Rendered lines, not the raw profiles: the gate report is read by people (and pasted into
+    // tickets), and "node: yarn-classic (pinned yarn@1.22.22) — detected from package.json,
+    // yarn.lock" is legible where a nested JSON blob is not. Carries no verdict -- it is the
+    // context a verdict was reached in. Omitted entirely when nothing was detected.
+    ...(stack.length > 0 ? { stack } : {}),
     logDigest: digestFor(grant.repoId, grant.ticketId, grant.stage, String(specs.length)),
   };
 }

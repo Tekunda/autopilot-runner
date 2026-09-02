@@ -64,6 +64,10 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
 import { runCommand } from '../exec.ts';
+// The package-manager parsers this file used to keep privately (`detectYarnMajor`,
+// `readPackageManagerPin`) now live in the ONE stack detector, which corepack-guard.ts reads
+// too -- same functions, moved verbatim, so this gate's routing is unchanged.
+import { detectYarnMajor, readPackageManagerPin } from '../stack-profile.ts';
 import { readGateConfig } from './config.ts';
 import type { Gate, GateContext, GateResult, SkipReason } from '../types.ts';
 
@@ -365,30 +369,11 @@ function pnpmUnsupported(): AuditPlan {
   );
 }
 
-// Only reached when there is no `packageManager` pin (planDependencyAudit
-// consults that first). `.yarnrc.yml` is Berry-only and is the better marker of
-// the two, because a Berry repo with `nodeLinker: node-modules` still writes a
-// `yarn.lock` -- just not a v1 one. "# yarn lockfile v1" is Yarn 1's own banner;
-// Berry writes `__metadata: version: N` instead, so the absence of the banner is
-// not evidence of v1.
-function detectYarnMajor(hasYarnrcYml: boolean, yarnLockRaw: string): number | undefined {
-  if (hasYarnrcYml) return 2;
-  if (/^#\s*yarn lockfile v1\s*$/m.test(yarnLockRaw)) return 1;
-  return undefined;
-}
-
-function readPackageManagerPin(packageJsonRaw: string | undefined): string | undefined {
-  if (!packageJsonRaw) return undefined;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(packageJsonRaw);
-  } catch {
-    return undefined;
-  }
-  if (typeof parsed !== 'object' || parsed === null) return undefined;
-  const value = (parsed as { packageManager?: unknown }).packageManager;
-  return typeof value === 'string' && value.trim() !== '' ? value : undefined;
-}
+// `detectYarnMajor` (only reached when there is no `packageManager` pin, which
+// planDependencyAudit consults first) and `readPackageManagerPin` moved to
+// ../stack-profile.ts, imported above -- they were duplicated verbatim in
+// runner/corepack-guard.ts, and the same two facts are what a Python/Salesforce
+// tenant needs answered too. Their rules and their rationale travelled with them.
 
 // ---------------------------------------------------------------------------
 // Output parsing -- one parser per tool, both pure.

@@ -699,6 +699,13 @@ export interface StatusTelemetry {
   // dispatched run's structured result can travel back on (GitHub exposes no API for a
   // dispatched run's step outputs), the same one the gate stage's gate-report.json uses.
   fixVerdict?: FixVerdict;
+  // Set by the gate stages: one human-readable line per toolchain detected in the PR checkout
+  // (gates/stack-profile.ts describeStack) -- which ecosystems, which manifest files proved
+  // each, which package/dependency manager. It rides the telemetry so it lands in the
+  // gate-report.json artifact for EVERY tenant, which is what makes "the gates thought this
+  // was a Yarn-classic Node repo" checkable after the fact instead of re-derived by hand.
+  // Diagnostic only: it carries no verdict and nothing downstream branches on it.
+  stack?: string[];
 }
 
 // Input to CodingExecutor.prepare(): the stage's prompt and target, before the

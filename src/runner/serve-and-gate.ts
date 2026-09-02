@@ -381,9 +381,13 @@ async function runPerSiteHeavyGates(
 
   const checks: CheckResult[] = [];
   let ok = true;
+  // Every runGateStage call below scans the SAME checkout, so they all report the same stack.
+  // Keep the first non-empty one rather than concatenating N identical copies into the report.
+  let stack: string[] | undefined;
   const absorb = (telemetry: StatusTelemetry): void => {
     checks.push(...telemetry.checks);
     if (telemetry.result !== 'pass') ok = false;
+    if (stack === undefined && telemetry.stack?.length) stack = telemetry.stack;
   };
 
   if (restIds.size > 0) {
@@ -434,6 +438,10 @@ async function runPerSiteHeavyGates(
     grantId: grantId(grant),
     result: ok ? 'pass' : 'fail',
     checks,
+    // Forwarded, not re-derived: this aggregate telemetry replaces the per-call ones, so
+    // without this the heavy stage would be the one tenant shape whose gate report has no
+    // stack line.
+    ...(stack !== undefined ? { stack } : {}),
     logDigest: digestFor(grant.repoId, grant.ticketId, grant.stage, String((grant.gateSpecs ?? []).length)),
   };
 }

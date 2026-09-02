@@ -12,8 +12,7 @@
 // clear, actionable diagnostic annotation nudging the tenant to pin. A PINNED repo is entirely
 // unaffected -- corepack runs and honours the pin exactly as before.
 
-import { readFileSync } from 'node:fs';
-import path from 'node:path';
+import { detectStack, memoryReader, readerAt, type StackProfile } from '../gates/stack-profile.ts';
 
 export interface CorepackDecision {
   // Whether the caller should run `corepack enable`. True ONLY when the repo pins a manager.
@@ -27,8 +26,25 @@ export interface CorepackDecision {
 // string `packageManager` field is the pin corepack honours; anything else -- missing field,
 // unparseable file, absent file -- is treated as UNPINNED, so we fall back to the system manager
 // and warn. Kept side-effect-free so it is unit-testable without a filesystem or a runner.
+//
+// The pin is no longer parsed HERE: this file used to carry its own copy of that parser (and
+// gates/generic/cve.ts a third), which is how four call sites came to guess the tenant's
+// toolchain independently. It now runs the ONE detector (gates/stack-profile.ts) over an
+// in-memory tree holding just the package.json text it was handed, and reads the pin off the
+// resulting Node profile.
 export function evaluateCorepackProvisioning(packageJsonRaw: string | undefined, repo: string): CorepackDecision {
-  if (readPackageManagerPin(packageJsonRaw)) return { enableCorepack: true };
+  const files: Record<string, string> = packageJsonRaw === undefined ? {} : { 'package.json': packageJsonRaw };
+  return decideFromStack(detectStack(memoryReader(files)), repo);
+}
+
+// The single rule, expressed once against the shared detector's output: corepack is safe
+// exactly when the Node profile carries a `packageManager` pin. `managerPin` is set from the
+// same non-empty-string test the private parser used to apply, so this is a de-duplication and
+// not a behaviour change -- and a tree with no Node profile at all (no manifest, no lockfile)
+// carries no pin either, so it still routes to `skip`.
+function decideFromStack(profiles: readonly StackProfile[], repo: string): CorepackDecision {
+  const node = profiles.find((profile) => profile.ecosystem === 'node');
+  if (node?.managerPin !== undefined) return { enableCorepack: true };
   return {
     enableCorepack: false,
     diagnostic:
@@ -37,27 +53,6 @@ export function evaluateCorepackProvisioning(packageJsonRaw: string | undefined,
       'system-installed package manager. Pin it (e.g. "packageManager": "yarn@1.22.22") to match the ' +
       "lockfile's generator.",
   };
-}
-
-function readPackageManagerPin(packageJsonRaw: string | undefined): string | undefined {
-  if (!packageJsonRaw) return undefined;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(packageJsonRaw);
-  } catch {
-    return undefined;
-  }
-  if (typeof parsed !== 'object' || parsed === null) return undefined;
-  const value = (parsed as { packageManager?: unknown }).packageManager;
-  return typeof value === 'string' && value.trim() !== '' ? value : undefined;
-}
-
-function readWorkspacePackageJson(workspace: string): string | undefined {
-  try {
-    return readFileSync(path.join(workspace, 'package.json'), 'utf8');
-  } catch {
-    return undefined;
-  }
 }
 
 // CLI shim invoked by the "Provision heavy gate stage" step: reads the checked-out customer repo's
@@ -71,7 +66,9 @@ export function runCorepackGuard(
 ): void {
   const workspace = env.GITHUB_WORKSPACE ?? '.';
   const repo = env.GITHUB_REPOSITORY ?? 'unknown';
-  const decision = evaluateCorepackProvisioning(readWorkspacePackageJson(workspace), repo);
+  // Reads the real checkout through the shared detector, so the CLI path and the pure path
+  // above agree by construction rather than by two parsers happening to stay in step.
+  const decision = decideFromStack(detectStack(readerAt(workspace)), repo);
   if (decision.diagnostic) err.write(`::warning title=corepack unpinned::${decision.diagnostic}\n`);
   out.write(decision.enableCorepack ? 'enable\n' : 'skip\n');
 }
