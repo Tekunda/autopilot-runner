@@ -14,9 +14,10 @@
 
 import type { CodingExecutor } from '../contracts/adapters.ts';
 import type { VCSHost } from '../contracts/adapters.ts';
-import type { ExecutionGrant, StatusTelemetry } from '../contracts/types.ts';
+import type { CheckResult, ExecutionGrant, FixVerdict, StatusTelemetry } from '../contracts/types.ts';
 import { GrantLedger } from '../control-plane/grant-ledger.ts';
 import { verifyGrant, type KeyInput } from '../control-plane/grant-verify.ts';
+import { buildFixVerdict } from './fix-verdict.ts';
 import { codingBranchName, DEFAULT_BASE_REF, digestFor, grantId, rejectedTelemetry } from './prepare-stage.ts';
 
 export interface FinalizeStageDeps {
@@ -38,8 +39,77 @@ export interface FinalizeStageDeps {
    * one process -- not the attacker replay. See the grant-ledger.ts header.
    */
   grantLedger?: GrantLedger;
+  /**
+   * Where the customer checkout lives, for the `fix` stage's self-verdict (the dispute file and
+   * the round's own diff). Defaults to the process cwd; action-entry passes GITHUB_WORKSPACE,
+   * because the finalize step runs with working-directory ${{ github.action_path }} -- the
+   * downloaded action copy, which is not the customer tree and has no .git.
+   */
+  workspaceRoot?: string;
+  /**
+   * The checkout's HEAD as it was BEFORE the vendor agent ran, recorded by action.yml right after
+   * the checkout step. It is the only sound base for the fix round's diff: for a fix grant the
+   * grant's own baseBranch is the PR head branch the round has just pushed to, so re-resolving it
+   * here would return the fix's own commit and every scan would come back empty. Absent -> the
+   * scan reports that it could not run, rather than reporting clean.
+   */
+  preAgentSha?: string;
+  /**
+   * Seam for the `fix` stage's self-verdict, so tests can supply one without a git checkout.
+   * Defaults to buildFixVerdict() over `workspaceRoot`.
+   */
+  readFixVerdict?: (cwd: string, baseSha: string) => Promise<FixVerdict>;
   /** Clock override for tests; defaults to the current time. */
   now?: Date;
+}
+
+// Turn a fix round's self-verdict into the checks that carry it, and into the outcome the run
+// exits with. Three refusals, all of which used to be impossible to express:
+//
+//   DISPUTED -- the fixer says the finding is wrong and changed nothing. Deliberately NOT a pass:
+//   a disputed finding must reach a human, not merge quietly.
+//
+//   EVADED -- the round re-encoded the artifact instead of changing it. Another fix round is not
+//   the answer to a fixer that already tried to slip past the matcher once.
+//
+//   UNSCANNABLE -- the diff could not be read, so whether the round evaded is UNKNOWN. Reported,
+//   never assumed clean. This is the fail-safe direction and it costs a human escalation on a git
+//   fault; reading it as "no evasion" would cost a silent one.
+//
+// WHAT ROUTES THE ESCALATION, and what does not. The block is driven by the FixVerdict itself --
+// isFixRefused(result.fixVerdict), tested directly on the fix stage's result before any budget is
+// computed (subtask-pipeline.ts's fix-completion branch, and runFixLoop's loop body). These checks
+// do NOT route it. maxFixRoundsFor is only ever fed a GATE stage's checks (fix-loop.ts's
+// `current`, subtask-pipeline.ts's gate branch), so a fix stage's checks never reach the fix
+// budget at all. The checks exist to CARRY THE REASON into the report a human reads.
+//
+// `unjudged` is therefore corroborating metadata, not the mechanism: it states that no further fix
+// round can resolve this, so nothing that later reasons about these checks mistakes a refusal for
+// an ordinary failure. `unjudgedReason: 'content'` pins the half that matters -- explicitly NOT
+// 'infra', so a refusal can never be read as a transient fault worth re-running. That distinction
+// is the one under active revision elsewhere; this path does not depend on which way it settles,
+// and fix-dispute.test.ts pins that independence.
+export function fixVerdictChecks(verdict: FixVerdict): CheckResult[] {
+  const checks: CheckResult[] = [];
+  if (verdict.disputes.length > 0) {
+    checks.push({
+      name: 'fix-disputed-finding',
+      status: 'fail',
+      unjudged: true,
+      unjudgedReason: 'content',
+      findings: verdict.disputes.map((d) => `disputed: ${d.finding}\n  evidence: ${d.evidence}`),
+    });
+  }
+  // Both go on ONE check: a duplicate name in a checks array is read as two verdicts about the
+  // same thing downstream, and these are two findings about one scan.
+  const evasionFindings = verdict.evasions.map((e) => `${e.kind} in ${e.path}: ${e.detail}`);
+  if (verdict.scanError !== undefined) {
+    evasionFindings.push(`could not scan this fix for encoding evasion, so it is unverified: ${verdict.scanError}`);
+  }
+  if (evasionFindings.length > 0) {
+    checks.push({ name: 'fix-evasion', status: 'fail', unjudged: true, unjudgedReason: 'content', findings: evasionFindings });
+  }
+  return checks;
 }
 
 // The vendor Action step's own raw conclusion output, read back by the runner workflow
@@ -146,11 +216,26 @@ export async function finalizeCodingStage(
       conclusion: outcome.conclusion,
       branchName,
     });
+    // What the round says about ITSELF, before anyone re-gates it. Scanned here because this is
+    // the only point in the pipeline that can still see both sides of the fix: the checkout holds
+    // the fixer's dispute file, and the diff from `preAgentSha` to HEAD is what says whether the
+    // round changed the artifact or only its encoding. A re-gate cannot answer either question --
+    // a successful evasion is, by construction, a gate that goes quiet.
+    const verdict = await (deps.readFixVerdict ?? buildFixVerdict)(
+      deps.workspaceRoot ?? process.cwd(),
+      deps.preAgentSha ?? '',
+    );
+    const verdictChecks = fixVerdictChecks(verdict);
     return {
       grantId: grantId(grant),
-      result: result.outcome,
-      checks: result.checks,
+      // A refused round must not report `pass`. The control plane blocks on the verdict itself
+      // (subtask-pipeline), but the run's own conclusion has to agree with it: exitCodeFor turns
+      // a non-pass into a failing step, so a runner whose verdict artifact never arrives still
+      // shows red rather than a green fix that quietly re-gates.
+      result: verdictChecks.length > 0 ? 'fail' : result.outcome,
+      checks: [...result.checks, ...verdictChecks],
       logDigest: result.logDigest,
+      fixVerdict: verdict,
     };
   }
 

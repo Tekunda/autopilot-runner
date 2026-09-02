@@ -388,6 +388,41 @@ export interface ReviewVerdict {
   findings: ReviewFinding[];
 }
 
+// A fix stage's claim that a gate finding is itself wrong: the finding it will not act on, and
+// the evidence for why acting on it would be wrong. A dispute is a TERMINAL outcome that changes
+// nothing -- the fixer's only other exits were "produce a diff" and "fail", and being forced to
+// produce a diff for a finding it could not legitimately satisfy is exactly what drove it to
+// damage the artifact instead (TEK-3784). The control plane escalates a dispute to a human; it
+// never resolves it in the content and never lets it pass silently.
+export interface FixDispute {
+  /** The gate finding being disputed, quoted from the fix prompt. */
+  finding: string;
+  /** Why the finding is wrong -- file:line and what the matched text actually is. */
+  evidence: string;
+}
+
+// A change a fix round made to the ENCODING of the artifact rather than to the artifact. Both
+// kinds are deterministic (see src/runner/fix-verdict.ts): 'rendered-no-op' is a line replaced by
+// one that renders identically, and 'gratuitous-escape' is newly introduced entity escapes,
+// invisible characters, or homoglyphs whose only effect is on what a source-text matcher sees.
+export interface FixEvasion {
+  kind: 'rendered-no-op' | 'gratuitous-escape';
+  path: string;
+  detail: string;
+}
+
+// A fix stage's own verdict on the round it just ran, computed runner-side in finalize and
+// carried back on the fix-report artifact. Empty disputes + empty evasions + no scanError is the
+// ordinary case: the round is judged by re-gating it, exactly as before.
+export interface FixVerdict {
+  disputes: FixDispute[];
+  evasions: FixEvasion[];
+  // Why the evasion scan could not run. A diff that could not be COMPUTED and a diff that is
+  // genuinely EMPTY are different facts, and only one of them means "no evasion" -- so an
+  // undecidable scan is reported here and escalated as unjudged rather than read as clean.
+  scanError?: string;
+}
+
 // One planned subtask produced by the architect stage: the title that becomes its
 // tracker entry, the architect note written back to that entry, the file paths/globs
 // it owns (coverage, so nothing is silently dropped and work stays file-disjoint), and
@@ -513,6 +548,11 @@ export interface StageResult {
   // assembled revision, downloaded by the CIRunner from the run's plan.json artifact.
   // Absent for every other stage (and for a legacy lens-less review grant).
   reviewVerdict?: ReviewVerdict;
+  // Only a `fix` stage populates this: what the round itself reported about its own work --
+  // findings it disputes as false positives, and encoding-only changes it made that the runner
+  // rejected as evasions. Downloaded by the CIRunner from the run's fix-report artifact. Absent
+  // for every other stage, and for a fix run whose runner predates the artifact.
+  fixVerdict?: FixVerdict;
   // Only an `architect` stage populates this: the PO/engineer plan writeback (For-review
   // block, plan narrative, touched areas, related tickets) the control plane renders onto
   // the PARENT ticket after decomposing. Absent for every other stage and for a HOLD.
@@ -558,6 +598,11 @@ export interface StatusTelemetry {
   checks: CheckResult[];
   prUrl?: string;
   logDigest: string;
+  // Set only by a `fix` stage's finalize: what that round said about its own work. It rides on
+  // the telemetry so action-entry can write it to the fix-report artifact -- the only channel a
+  // dispatched run's structured result can travel back on (GitHub exposes no API for a
+  // dispatched run's step outputs), the same one the gate stage's gate-report.json uses.
+  fixVerdict?: FixVerdict;
 }
 
 // Input to CodingExecutor.prepare(): the stage's prompt and target, before the

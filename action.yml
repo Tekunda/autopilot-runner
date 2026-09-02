@@ -110,6 +110,18 @@ runs:
         # never pushes), so persist-credentials is false there.
         persist-credentials: ${{ steps.prepare.outputs.stage-kind == 'coding' }}
 
+    # The checkout's HEAD before the vendor agent touches anything. The `fix` stage's finalize
+    # diffs against this to tell a real fix from a re-encoding of the same content, and this is
+    # the only moment that revision is still knowable: a fix grant's own baseBranch IS the PR head
+    # branch the commit-and-push step below force-pushes to, so by finalize time re-resolving it
+    # yields the fix's own commit and the diff comes back empty. Recorded for every coding stage;
+    # only the fix path reads it. Runs in the workspace (composite `run` steps default there).
+    - name: Record pre-agent revision
+      id: pre-agent
+      if: steps.prepare.outputs.stage-kind == 'coding'
+      shell: bash
+      run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
     # HEAVY gate stage only (docs/ci-gate-refit-plan.md §5): provision the browser the fast gate
     # path never needs. Playwright is installed into the runner's own action dir so the gate's
     # dynamic `import('playwright')` resolves here; the customer's site build/serve (yarn
@@ -301,7 +313,11 @@ runs:
         git config user.name "$COMMITTER_NAME"
         git config user.email "$COMMITTER_EMAIL"
         git switch -C "$BRANCH_NAME"
-        git add -A
+        # Everything the agent touched EXCEPT its dispute file. A fix stage that judges a gate
+        # finding to be a false positive writes autopilot-fix-dispute.json and changes nothing
+        # else; the finalize step reads it out of the working tree and reports it as the round's
+        # verdict, so it must never become a commit -- "changed nothing" has to mean nothing.
+        git add -A -- . ':(exclude)autopilot-fix-dispute.json'
         if ! git diff --cached --quiet; then
           git commit -m "Delivery Autopilot: $STAGE"
         fi
@@ -351,4 +367,19 @@ runs:
         INPUT_VCS-HOST-CONFIG: ${{ inputs.vcs-host-config }}
         INPUT_ACTION-CONCLUSION: ${{ fromJSON(inputs.coding-executor-config).provider == 'claude-code' && steps.claude.conclusion || steps.codex.conclusion }}
         INPUT_BASE-REF: ${{ github.event.repository.default_branch }}
+        INPUT_PRE-AGENT-SHA: ${{ steps.pre-agent.outputs.sha }}
       run: node src/runner/action-entry.ts
+
+    # The fix stage's own verdict on the round it just ran (disputed findings, encoding
+    # evasions), written into the workspace by the finalize step above. GitHub exposes no API
+    # for a dispatched run's step outputs, so this artifact is the only channel that verdict
+    # can travel back on -- exactly like the gate stage's gate-report.json. always(), because
+    # a fix that FAILED its own verdict is precisely the one whose reason must reach the
+    # control plane.
+    - name: Upload fix report
+      if: always() && steps.parse-grant.outputs.stage == 'fix'
+      uses: actions/upload-artifact@v4
+      with:
+        name: fix-report
+        path: fix-report.json
+        if-no-files-found: ignore

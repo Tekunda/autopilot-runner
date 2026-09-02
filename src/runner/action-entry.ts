@@ -26,6 +26,7 @@ import type { GateRegistry } from '../gates/registry.ts';
 import { GrantLedger } from '../control-plane/grant-ledger.ts';
 import { verifyGrant } from '../control-plane/grant-verify.ts';
 import { finalizeCodingStage, finalizeJudgmentStage, type ActionOutcome } from './finalize-stage.ts';
+import { FIX_REPORT_FILE } from './fix-verdict.ts';
 import { createRunnerGateRegistry } from './gate-registry.ts';
 import { CODING_STAGES, computeChangedFiles, DEFAULT_BASE_REF, prepareStage, rejectedTelemetry, type PreparedStage } from './prepare-stage.ts';
 import { resolveClaimSha, tryClaimGrant, type ClaimEmitter } from './replay-claim.ts';
@@ -53,6 +54,12 @@ export type ActionInputs =
       codingExecutor: CodingExecutorConfig;
       vcsHost: VCSHostConfig;
       actionOutcome: ActionOutcome;
+      // The checkout's HEAD before the vendor agent ran, captured by action.yml right after the
+      // checkout step. The `fix` stage's evasion scan diffs against it; it cannot be recovered
+      // here, because by finalize time the branch it would be derived from already carries the
+      // fix's own commit. Optional so a direct/test invocation without it still runs (the scan
+      // then reports that it could not run, which is the fail-safe direction).
+      preAgentSha?: string;
     }
   // `gate` runs the fast deterministic gates against the PR checkout only. `heavy-gate` runs the
   // dedicated browser/server-capable stage (docs/ci-gate-refit-plan.md §5): it builds + serves the
@@ -125,6 +132,7 @@ export function parseInputs(env: NodeJS.ProcessEnv = process.env): ActionInputs 
       codingExecutor: requireJsonEnv<CodingExecutorConfig>(env, 'INPUT_CODING-EXECUTOR-CONFIG'),
       vcsHost: requireJsonEnv<VCSHostConfig>(env, 'INPUT_VCS-HOST-CONFIG'),
       actionOutcome: { conclusion: requireEnv(env, 'INPUT_ACTION-CONCLUSION') },
+      ...(env['INPUT_PRE-AGENT-SHA'] ? { preAgentSha: env['INPUT_PRE-AGENT-SHA'] } : {}),
     };
   }
 
@@ -248,6 +256,11 @@ export async function runActionEntry(inputs: ActionInputs, deps: RunActionDeps =
         baseRef: inputs.baseRef,
         verifyKey: inputs.verifyKey,
         grantLedger: deps.grantLedger ?? processGrantLedger,
+        // The customer tree, not the action copy: the finalize step runs with
+        // working-directory ${{ github.action_path }}, which has no .git and none of the
+        // fixer's edits. Same reason gate mode roots its git at GITHUB_WORKSPACE.
+        workspaceRoot: workspaceRoot(),
+        ...(inputs.preAgentSha ? { preAgentSha: inputs.preAgentSha } : {}),
         now: deps.now,
       })
     : finalizeJudgmentStage(inputs.grant, inputs.actionOutcome, {
@@ -410,6 +423,15 @@ async function main(): Promise<void> {
   // carries the real gate results back -- the same one the architect's plan.json uses.
   if ((inputs.mode === 'gate' || inputs.mode === 'heavy-gate') && result.mode === 'gate') {
     writeFileSync(`${workspaceRoot()}/gate-report.json`, JSON.stringify(result.telemetry));
+  }
+
+  // Same artifact channel, for the `fix` stage's own verdict on the round it just ran (disputed
+  // findings, encoding evasions). A dispatched run's step outputs are unreadable through the API,
+  // so this file is the only way that verdict reaches the control plane -- without it a disputed
+  // or evaded round is indistinguishable from an ordinary one and just gets re-gated. Written
+  // AFTER action.yml's commit-and-push step, so it is never committed to the customer's branch.
+  if (inputs.mode === 'finalize' && inputs.grant.stage === 'fix' && result.mode === 'finalize') {
+    writeFileSync(`${workspaceRoot()}/${FIX_REPORT_FILE}`, JSON.stringify(result.telemetry));
   }
 
   reportResult(result);
