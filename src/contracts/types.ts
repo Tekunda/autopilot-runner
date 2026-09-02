@@ -444,6 +444,33 @@ export interface ArchitectReview {
   relatedTickets?: string[];
 }
 
+// One line of the architect's ALREADY-SATISFIED checklist: a distinct deliverable CLASS of the
+// ticket, checked against the checked-out base tree on its own.
+//
+// A CLASS is a KIND of change, never an instance of one. That distinction is the whole point:
+// TEK-3782's ticket enumerated 1,476 individual findings (121 over-long titles, 50 images with no
+// alt text, 39 orphan pages, ...) across five classes, and the architect planned 13 subtasks to
+// redo work that was already merged -- it read the enumeration as the work list and never checked
+// the five CLASSES against the tree. One global "is this whole ticket satisfied?" judgment is
+// unanswerable at that scale; five per-class ones are each trivially answerable.
+//
+// `verdict` is deliberately three-valued and only the literal 'present' counts as done, so the
+// checklist can also express the honest middle -- a class the architect could not confirm. Both
+// 'absent' and 'unsure' mean "plan it": a needless build is cheap, a wrongly-closed ticket is not.
+export interface DeliverableClassVerdict {
+  // The class in the ticket's own vocabulary, e.g. "meta descriptions over the length cap".
+  class: string;
+  verdict: 'present' | 'absent' | 'unsure';
+  // Why -- for 'present', the concrete repository PATHS that implement the class (files with their
+  // extensions, lines and symbols where useful); otherwise what was looked for and not found.
+  // Carried verbatim onto the ticket, so a close nobody watched is auditable per class rather than
+  // as one unfalsifiable paragraph. A path is what the gates actually require of a 'present' row --
+  // see coverage.ts evidenceHasRepoAnchor -- so this says "paths", not "paths or symbols": a bare
+  // symbol name reads as evidence to a human but is not something the gate accepts, and a contract
+  // that promises more than the code honours is how a correct close gets escalated to a person.
+  evidence: string;
+}
+
 export interface StageResult {
   outcome: StageOutcome;
   checks: CheckResult[];
@@ -501,6 +528,28 @@ export interface StageResult {
   // Carries the evidence (the files that implement it) so the completion is auditable, never a
   // bare assertion. Distinct from `hold`: that one stops for a human, this one finishes the ticket.
   satisfied?: string;
+  // Only an `architect` stage populates this, from plan.json's top-level `deliverableClasses`: the
+  // per-class ALREADY-SATISFIED checklist behind the plan (or behind `satisfied`). Optional because
+  // the MODEL may simply not emit the field -- a permanent possibility, not a rollout window (the
+  // prompt asking for it rides in the grant, and the parse happens control-plane-side).
+  //
+  // An EMPTY checklist is not one behaviour, it is two, and the difference is the ticket's own
+  // shape. Without a `DELIVERABLES:` line there is nothing deterministic to check, so a `satisfied`
+  // close falls back to #328's whole-ticket judgment and the ticket goes `done`. WITH one, every
+  // enumerated deliverable is unaccounted for, so the close is refused, re-architected twice, and
+  // escalated. That asymmetry is deliberate -- an enumerated ticket must not close on zero per-class
+  // evidence -- but it means a model that stopped emitting this field would cost three architect
+  // runs and a human per genuinely-satisfied enumerated ticket, so the control plane counts every
+  // empty checklist on the notify channel BEFORE the gates run, where it can see both populations.
+  //
+  // When present it is load-bearing twice over:
+  //   - a `satisfied` close is REFUSED unless every verdict is 'present' (a close the architect
+  //     itself contradicts is not a close), and
+  //   - the 'present' classes are fed to the coverage gates as ACCOUNTED-FOR, like `removals`, so a
+  //     plan covering only the REMAINING classes of a partly-landed ticket is not rejected as a
+  //     scope-drop and re-planned into the full rebuild it just avoided -- capped at one deliverable
+  //     per row, so no single row can account for a whole ticket.
+  classVerdicts?: DeliverableClassVerdict[];
 }
 
 export interface StatusTelemetry {
