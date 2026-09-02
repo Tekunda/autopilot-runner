@@ -148,6 +148,32 @@ export interface VCSHost {
   // branch") -- used by the watchdog's keep-merges-live routine to un-stale
   // a PR without rewriting history.
   updateBranch(repoId: string, prNumber: number): Promise<void>;
+  // Merge one branch into another WITHOUT a PR, append-only (GitHub's repository merge
+  // endpoint). Mind the direction, which reads backwards from the English sentence: `base`
+  // is the branch that RECEIVES the merge and is the only one that moves; `head` is what
+  // gets merged in and is left exactly where it was. So "fold `test` into `ticket/x`" is
+  // mergeBranch(repo, 'ticket/x', 'test').
+  //
+  // This is the ONLY primitive that can refresh a long-lived branch the pipeline builds on.
+  // updateBranch above needs a PR and only ever fires for a PR reporting `behind`, and a
+  // subtask PR's base is the TICKET branch -- so nothing it does can bring the BASE branch's
+  // new commits into `ticket/*`. A ticket branch sat 161 commits behind `test` for days
+  // because of that gap, and the subtask builds and gates taken on it described a tree that no
+  // longer existed. Its one caller today refreshes the ticket branch only (pr-ops.ts,
+  // refreshTicketBranchFromBase); the integration branch has the same gap and is not yet
+  // covered.
+  //
+  // Append-only by construction: it creates a real merge commit and never rewrites history,
+  // so it is safe on a SHARED branch that open PRs and live runs are based on -- unlike the
+  // delete-and-recreate reset the rebase* helpers use, which can only ever touch a branch
+  // that carries nothing of its own.
+  //
+  // 'merged' = a merge commit was created; 'up-to-date' = base already contained head, so
+  // there was nothing to do; 'conflict' = the merge cannot be done automatically and a
+  // human or a conflict-fix agent has to resolve it. Anything else (a missing branch, an
+  // API fault) THROWS: "the merge could not be attempted" is not "there was nothing to
+  // merge", and collapsing the two would let a caller gate against a stale tree.
+  mergeBranch(repoId: string, base: string, head: string): Promise<'merged' | 'up-to-date' | 'conflict'>;
   // The branch's current commit sha on the remote, or undefined if no branch by that
   // name exists there. Used by the runner to confirm a coding stage's deterministic
   // target branch was actually pushed to -- with commits beyond its base -- before

@@ -354,6 +354,37 @@ export class GitHubVCSHost implements VCSHost {
     await this.client.request('PUT', `/repos/${repoId}/pulls/${prNumber}/update-branch`);
   }
 
+  // POST /repos/{owner}/{repo}/merges -- `base` RECEIVES the merge, `head` is merged in.
+  // That is the opposite order from how the operation is said in English ("merge test into
+  // ticket/x" is base=ticket/x, head=test), so the arguments are named for GitHub's field
+  // names rather than for the sentence, and a swap is covered by a test asserting which
+  // branch's sha actually moved.
+  //
+  // Status mapping, per GitHub: 201 = a merge commit was created, 204 = base already
+  // contained head, 409 = the merge conflicts, 404 = one of the two refs does not exist.
+  // The client hands back a parsed body rather than a status, and only a 201 HAS a body
+  // (204 is empty), so the merge commit's presence is what separates the first two.
+  async mergeBranch(repoId: string, base: string, head: string): Promise<'merged' | 'up-to-date' | 'conflict'> {
+    try {
+      const commit = await this.client.request<{ sha?: string }>('POST', `/repos/${repoId}/merges`, {
+        base,
+        head,
+        commit_message: `Merge ${head} into ${base} (autopilot: keep the branch current)`,
+      });
+      return commit?.sha ? 'merged' : 'up-to-date';
+    } catch (err) {
+      if (err instanceof GitHubApiError && err.status === 409) return 'conflict';
+      // A missing ref is deliberately NOT folded into 'up-to-date': the caller uses this
+      // result to decide whether the tree it is about to build and gate is current, and
+      // "I could not merge" answered as "nothing to merge" is exactly how a stale branch
+      // gets gated. Rethrow with both refs named, since GitHub's 404 body says neither.
+      if (err instanceof GitHubApiError && err.status === 404) {
+        throw new Error(`mergeBranch: no such branch in ${repoId} (base "${base}" or head "${head}")`);
+      }
+      throw err;
+    }
+  }
+
   async getBranchSha(repoId: string, branch: string): Promise<string | undefined> {
     const ref = await this.client.requestOptional<GhRef>('GET', `/repos/${repoId}/git/ref/heads/${branch}`);
     return ref?.object.sha;

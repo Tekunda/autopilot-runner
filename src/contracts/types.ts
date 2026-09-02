@@ -851,6 +851,13 @@ export interface TicketState {
   // this ticket's PR. Bounds the conflict self-heal so a genuinely unresolvable conflict
   // blocks for a human instead of looping. Reset once the PR merges.
   conflictFixAttempts?: number;
+  // The same bound, on its OWN counter, for conflicts between the BASE branch and this ticket's
+  // own branch (the cycle-start refresh, pr-ops.ts refreshTicketBranchFromBase). Deliberately not
+  // shared with conflictFixAttempts above: that budget is spent by rollup/promotion/external-PR
+  // conflicts, and a ticket that had already spent it would block on its FIRST branch conflict
+  // having dispatched no fix for it at all, while the blocked reason read as though it had tried.
+  // Different branch, different conflict, different budget.
+  branchConflictFixAttempts?: number;
   // Consecutive ticks the rollup PR's merge has stayed `pending` (behind, not ready, or a
   // benign race that keeps recurring). Bounds the deferral so a merge error that never
   // clears escalates for a human instead of parking silently forever. Reset once the
