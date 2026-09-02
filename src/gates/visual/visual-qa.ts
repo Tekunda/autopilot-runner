@@ -32,7 +32,7 @@
 // closed and escalates to a human. `warn` would map to a pass; a green check on a gate that never
 // judged is worse than no gate.
 
-import { createContentReader, type ContentFormat } from '../../packs/seo/content.ts';
+import { asGateNotes, createContentReader, selectPages, type ContentFormat } from '../../packs/seo/content.ts';
 import type { Gate, GateContext, GateResult } from '../types.ts';
 import { createPlaywrightBrowser, type ScreenshotBrowser } from './browser.ts';
 import {
@@ -132,7 +132,11 @@ function isGlobalAsset(file: string, patterns: string[]): boolean {
 // Turn the diff into the SET of routes to screenshot, deduped by path (first reason wins). A
 // changed content file -> its own route; any changed shared asset -> the representative sample;
 // `alwaysCheck` routes -> always, independent of the diff.
-async function deriveTargets(ctx: GateContext, config: VisualQaConfig): Promise<RenderTarget[]> {
+async function deriveTargets(
+  ctx: GateContext,
+  config: VisualQaConfig,
+  selectionNotes: string[],
+): Promise<RenderTarget[]> {
   const contentDir = config.contentDir ?? DEFAULT_CONTENT_DIR;
   const reader = createContentReader(config.contentFormat ?? 'md', {
     rootDir: ctx.workspaceRoot,
@@ -153,11 +157,11 @@ async function deriveTargets(ctx: GateContext, config: VisualQaConfig): Promise<
 
   for (const route of config.alwaysCheck ?? []) add(route, 'alwaysCheck override');
 
-  for (const file of ctx.changedFiles) {
-    if (reader.isContentFile(file)) {
-      add(await reader.routeFor(file), `changed page ${file}`);
-    }
+  const { pages, notes } = await selectPages(reader, ctx.changedFiles);
+  for (const file of pages) {
+    add(await reader.routeFor(file), `changed page ${file}`);
   }
+  selectionNotes.push(...notes);
 
   const globalHits = ctx.changedFiles.filter((file) => isGlobalAsset(file, globalPatterns));
   if (globalHits.length > 0) {
@@ -179,16 +183,21 @@ export function createVisualQaGate(deps: VisualQaDeps = {}): Gate {
         return { id: VISUAL_QA_GATE_ID, status: 'skip' };
       }
 
-      const targets = await deriveTargets(ctx, config);
+      const selectionNotes: string[] = [];
+      const targets = await deriveTargets(ctx, config, selectionNotes);
       if (targets.length === 0) {
         // The diff maps to no renderable route -> nothing THIS PR touched can be screenshotted.
         // Skip with a reason rather than fail (a diff that changes no page/asset is not a defect).
+        // `skipReason` is set so a perpetual skip stays diagnosable (see SkipReason), and the
+        // per-file notes say WHICH files were passed over and why.
         return {
           id: VISUAL_QA_GATE_ID,
           status: 'skip',
-          findings: ['no changed file maps to a renderable route'],
+          skipReason: 'no-matching-route',
+          findings: ['no changed file maps to a renderable route', ...asGateNotes(selectionNotes)],
         };
       }
+      for (const note of selectionNotes) process.stdout.write(`[visual-qa] ${note}\n`);
 
       for (const target of targets) {
         process.stdout.write(`[visual-qa] screenshotting ${target.path} -- ${target.reason}\n`);

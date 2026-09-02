@@ -30,7 +30,7 @@
 // (see the aggregation below).
 
 import { readGateConfig } from '../generic/config.ts';
-import { createContentReader, type ContentFormat } from '../../packs/seo/content.ts';
+import { asGateNotes, createContentReader, selectPages, type ContentFormat } from '../../packs/seo/content.ts';
 import type { Gate, GateContext, GateResult } from '../types.ts';
 import { createPlaywrightLayoutBrowser, type LayoutBrowser, type Viewport } from './browser.ts';
 import { evaluateRules, measureSpecFor, normalizeRulesDetailed, rulesForViewport } from './rules.ts';
@@ -187,7 +187,11 @@ function appRouteFor(file: string, appDir: string): string | null {
 // The routes THIS diff touched, mirroring Visual-QA: each changed content file -> its own route; a
 // changed app-source route file (when `appDir` is set) -> the route of its own directory; any
 // changed shared/global asset -> the representative route sample. Deduped, path-normalized.
-async function diffRoutes(ctx: GateContext, config: LayoutRulesConfig): Promise<Set<string>> {
+async function diffRoutes(
+  ctx: GateContext,
+  config: LayoutRulesConfig,
+  selectionNotes: string[],
+): Promise<Set<string>> {
   const contentDir = config.contentDir ?? DEFAULT_CONTENT_DIR;
   const reader = createContentReader(config.contentFormat ?? 'md', {
     rootDir: ctx.workspaceRoot,
@@ -202,11 +206,18 @@ async function diffRoutes(ctx: GateContext, config: LayoutRulesConfig): Promise<
       : DEFAULT_REPRESENTATIVE_ROUTES;
 
   const routes = new Set<string>();
+  const { pages, notes } = await selectPages(reader, ctx.changedFiles);
+  selectionNotes.push(...notes);
+  const contentPages = new Set(pages);
   for (const file of ctx.changedFiles) {
-    if (reader.isContentFile(file)) {
+    if (contentPages.has(file)) {
       routes.add(normalizeRoute(await reader.routeFor(file)));
       continue;
     }
+    // A file inside the content tree that is NOT a page (a README) has no route of
+    // its own, and must not fall through to the app-source branch below either --
+    // that would invent a route for it out of its directory path.
+    if (reader.isContentFile(file)) continue;
     if (config.appDir) {
       const route = appRouteFor(file, config.appDir);
       if (route) routes.add(route);
@@ -227,13 +238,17 @@ async function diffRoutes(ctx: GateContext, config: LayoutRulesConfig): Promise<
 // The final target set: every glob-free `routes` entry (always checked), plus the diff-derived
 // routes kept by the `routes` filter (a route survives if it matches a configured glob or equals a
 // configured literal; with no `routes` configured, every diff route survives).
-async function deriveTargets(ctx: GateContext, config: LayoutRulesConfig): Promise<string[]> {
+async function deriveTargets(
+  ctx: GateContext,
+  config: LayoutRulesConfig,
+  selectionNotes: string[],
+): Promise<string[]> {
   const configRoutes = (config.routes ?? []).map(normalizeRoute);
   const literals = configRoutes.filter((route) => !isGlob(route));
   const globs = configRoutes.filter(isGlob).map(globToRegExp);
 
   const targets = new Set<string>(literals);
-  for (const route of await diffRoutes(ctx, config)) {
+  for (const route of await diffRoutes(ctx, config, selectionNotes)) {
     if (configRoutes.length === 0 || literals.includes(route) || globs.some((re) => re.test(route))) {
       targets.add(route);
     }
@@ -297,11 +312,21 @@ export function createLayoutRulesGate(deps: LayoutRulesDeps = {}): Gate {
       // layout defect -- collected here and kept apart from real geometry `failures` so a single flaky
       // measurement never aborts the loop or erases violations already found on other targets.
       const inconclusive: string[] = [];
+      const selectionNotes: string[] = [];
       try {
-        const targets = await deriveTargets(ctx, config);
+        // Files the content reader passed over (a README in the tree) go into the SAME `notes`
+        // channel as dropped rules, so they ride onto whatever verdict an operator sees rather
+        // than living only in the run log.
+        const targets = await deriveTargets(ctx, config, selectionNotes);
+        notes.push(...asGateNotes(selectionNotes));
         if (targets.length === 0) {
           // Nothing this PR touched maps to a route the rules apply to. Skip, don't fail.
-          return { id: LAYOUT_RULES_GATE_ID, status: 'skip', skipReason: 'no-matching-route', findings: ['no changed file maps to a checked route'] };
+          return {
+            id: LAYOUT_RULES_GATE_ID,
+            status: 'skip',
+            skipReason: 'no-matching-route',
+            findings: ['no changed file maps to a checked route', ...notes],
+          };
         }
 
         browser = injectedBrowser ?? (await (deps.createBrowser ?? createPlaywrightLayoutBrowser)());
