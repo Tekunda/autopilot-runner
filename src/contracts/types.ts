@@ -1,6 +1,8 @@
 // v0 domain types for the Delivery Autopilot engine.
 // Pure data shapes — no behavior. See AGENTS.md for the source of truth.
 
+import type { BlockReason } from './block-reason.ts';
+
 export type Stage = 'enrich' | 'plan' | 'architect' | 'build' | 'review' | 'fix' | 'gate' | 'accept';
 
 export type ModelTier = 'fast' | 'standard' | 'deep';
@@ -909,7 +911,10 @@ export interface SubtaskState {
   // Why this subtask was blocked, when it was: an exhausted build/fix loop, a
   // real merge conflict on its PR, or an error that isolated to it (never the
   // whole ticket). Carried so a human sees a concrete reason.
-  blockedReason?: string;
+  //
+  // Typed as BlockReason, not string: only `blockReason()` can mint one, so a writer cannot
+  // record an empty or non-string explanation. See block-reason.ts.
+  blockedReason?: BlockReason;
   // A dispatched CI stage (build/gate/fix) awaiting completion. When set, the next drive
   // CHECKS it (non-blocking) instead of dispatching; cleared when the stage completes. This
   // is what makes driveSubtask a per-tick state machine (see InFlightStage).
@@ -1194,7 +1199,10 @@ export interface TicketState {
   judgmentAttempts?: number;
   // Set by the orchestrator when `advance()` blocks a ticket, so a human
   // has a concrete reason without re-deriving it from telemetry.
-  blockedReason?: string;
+  //
+  // Typed as BlockReason, not string: only `blockReason()` can mint one, so a writer cannot
+  // record an empty or non-string explanation. See block-reason.ts.
+  blockedReason?: BlockReason;
   // Consecutive times the watchdog has nudged a stalled QA/fixer stage back to
   // life without the stage making progress. Bounds the stall re-arm loop
   // (watchdog.ts MAX_STALL_RECOVERIES) so a genuinely dead runner is escalated
