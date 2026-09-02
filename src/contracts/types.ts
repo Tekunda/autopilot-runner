@@ -1490,6 +1490,36 @@ export interface TicketState {
   // same trade acceptRepairAttempts makes. Absent means no re-validation has ever been spent,
   // which is a KNOWN zero, not an unknown.
   blockRevalidation?: { baseSha: string; attempts: number };
+  // The tree the ticket's CURRENT findings block was actually judged on: the branch the assembled
+  // reviewers were pointed at, and the exact sha that was pinned into their grants. Written by both
+  // writers of a `review not met` block (control-plane.ts -- the async driveAssembledAccept path and
+  // the inline blocking-review fallback), each of which already HOLDS that sha (it is the one it
+  // signed the review grants against) and used to discard it.
+  //
+  // recoverBlockedOnBaseAdvance exists to ask whether those findings are still true of the code as
+  // it stands, and it used to answer by measuring the branch HEAD, on the premise that a blocked
+  // ticket drives nothing so the head is still the judged revision. That premise does not hold:
+  // refreshBlockedTicketBranches merges the base INTO `integration/<stem>` for blocked tickets with
+  // an open PR -- the same ref, on the same population. After that fold-in `aheadBy(head, base)`
+  // reads 0, which is the arm that asserts "the finding still describes the tree that would be
+  // judged now" -- exactly backwards, because the head now carries base commits the reviewers never
+  // saw. A sha pinned at block time is a FACT rather than a premise: it stays correct however many
+  // other lanes move the branch afterwards.
+  //
+  // `branch` rides with the sha because the branch name is derived from the ticket TITLE, so a
+  // retitled ticket resolves to a different stem. A pin naming some OTHER branch says nothing about
+  // the one being measured and is ignored rather than trusted -- the same rule blockedBranchRefresh
+  // already follows, and the reason a rename cannot make this field lie.
+  //
+  // Provenance about ONE block, never a budget. Cleared on every resume path exactly like
+  // `gateBlock`, and unlike `blockRevalidation` above it has no reason to survive the lane's own
+  // `auto` resume: a ticket that re-blocks is re-pinned by the writer that blocks it. Absent means
+  // the block recorded no pin -- it predates this field, or the writer's own head read failed -- and
+  // the lane then falls back to the branch head, from which it will conclude `advanced` but never
+  // `unmoved`. Never `unmoved` UNCONDITIONALLY, not merely while `blockedBranchRefresh` is set:
+  // that record is deleted whenever the branch comes back clean, so its absence is not evidence
+  // that nothing folded the base in.
+  blockJudgedTree?: { branch: string; sha: string };
 }
 
 // The ticketId prefix for an external-PR pseudo-ticket (see TicketState.externalPr). Such
