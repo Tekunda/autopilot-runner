@@ -145,6 +145,23 @@ export interface VCSHost {
   listChecks(repoId: string, ref: string): Promise<CheckResult[]>;
   reviewDecision(repoId: string, prNumber: number): Promise<'approved' | 'changes_requested' | 'pending'>;
   protectedRules(repoId: string, branch: string): Promise<{ requiredChecks: string[]; requiresReview: boolean }>;
+  // The SAME reading as protectedRules, but with "the read failed" as a VALUE instead of a throw.
+  //
+  // protectedRules throws on a fault (deliberately -- see the fail-closed test on the ruleset
+  // endpoint), and every caller of it in this repo writes `.catch(() => undefined)` and then
+  // degrades to some default. That is defensible where the default is itself conservative (require
+  // an approval; keep the tenant-configured check names), but it is fatal for a DRIFT detector: the
+  // whole question it asks is "is the required check still configured on this branch?", and a
+  // thrown read collapsed into `undefined` is indistinguishable from an answered read that found
+  // none. One says "I could not look", the other says "the gate is gone" -- and this plane merges
+  // with a ruleset BYPASS, so acting on the wrong one either freezes every merge on a transient 500
+  // or announces a breach that never happened.
+  //
+  // So this method never throws and never omits: it resolves EITHER a reading or an explicit
+  // `unreadable` carrying why. Optional because it is a capability, not a requirement -- a host
+  // that does not implement it makes the drift detector inert, and the detector SAYS it is inert
+  // rather than reporting the tenant clean (see control-plane/required-check-drift.ts).
+  readBranchRules?(repoId: string, branch: string): Promise<BranchRulesReading>;
   getPR(repoId: string, prNumber: number): Promise<PRStatus>;
   // Merges the PR's base into its head, append-only (GitHub's "Update
   // branch") -- used by the watchdog's keep-merges-live routine to un-stale
@@ -314,6 +331,17 @@ export interface VCSHost {
   // one already gone is a no-op, never an error. Optional, paired with createClaimRef.
   deleteClaimRef?(repoId: string, ref: string): Promise<void>;
 }
+
+// What VCSHost.readBranchRules answers. Two arms, never collapsible into one:
+//   - 'read'       -- the host answered. `requiredChecks` is then AUTHORITATIVE, and an empty
+//                     array genuinely means the branch requires no status checks at all.
+//   - 'unreadable' -- the host did not answer (transport fault, 5xx, rate limit, a credential
+//                     without the permission). It says nothing whatsoever about the branch's
+//                     rules, so `requiredChecks` is deliberately ABSENT from this arm: there is
+//                     no field a caller could accidentally read as an empty set.
+export type BranchRulesReading =
+  | { outcome: 'read'; requiredChecks: string[]; requiresReview: boolean }
+  | { outcome: 'unreadable'; reason: string };
 
 // The result of an atomic claim-ref creation: 'created' when this caller won the ref, 'exists'
 // when it was already present (the replay signal). Any hard failure throws instead.

@@ -1,6 +1,13 @@
 // GitHub implementation of the VCSHost contract (src/contracts/adapters.ts).
 
-import type { ClaimRefResult, OpenPR, PrFeedback, PublishedCheck, VCSHost } from '../../contracts/adapters.ts';
+import type {
+  BranchRulesReading,
+  ClaimRefResult,
+  OpenPR,
+  PrFeedback,
+  PublishedCheck,
+  VCSHost,
+} from '../../contracts/adapters.ts';
 import type { CheckResult, CheckRunSnapshot, PRStatus } from '../../contracts/types.ts';
 import { GitHubApiError, GitHubClient, type GitHubClientConfig } from './rest.ts';
 
@@ -332,6 +339,23 @@ export class GitHubVCSHost implements VCSHost {
     }
 
     return { requiredChecks: [...checks], requiresReview };
+  }
+
+  // Same two reads as protectedRules above -- deliberately BY calling it, so there is exactly one
+  // place that knows the endpoints, the union rule and the fail-closed 500 behaviour, and the two
+  // can never drift into disagreeing about what this branch requires. The only thing added here is
+  // the arm protectedRules cannot have: a fault becomes a VALUE (`unreadable`) instead of a throw,
+  // because the drift detector must be able to tell "the ruleset says nothing" from "I could not
+  // ask" -- see BranchRulesReading. Note what is NOT caught into `unreadable`: a 404 on the
+  // branch-protection endpoint, which GitHub returns for an unprotected branch and which
+  // requestOptional already absorbs as the real answer "no classic protection here".
+  async readBranchRules(repoId: string, branch: string): Promise<BranchRulesReading> {
+    try {
+      const rules = await this.protectedRules(repoId, branch);
+      return { outcome: 'read', requiredChecks: rules.requiredChecks, requiresReview: rules.requiresReview };
+    } catch (err) {
+      return { outcome: 'unreadable', reason: err instanceof Error ? err.message : String(err) };
+    }
   }
 
   async getPR(repoId: string, prNumber: number): Promise<PRStatus> {

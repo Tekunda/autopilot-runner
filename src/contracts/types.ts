@@ -94,6 +94,44 @@ export interface GatePolicy {
   // autoReplanOnExhaustedRepairs this never discards WORK (pre-plan, or a plan already stalled
   // out), so it is a strictly-better bounded default rather than a destructive opt-in.
   autoReplanBeforeEscalation?: boolean;
+  // Which status check each MANAGED BASE BRANCH must still list as required, on the host itself
+  // (branch protection or a repository ruleset). Keyed by branch name, e.g.
+  // `{ test: ['qa'], main: ['qa'] }`.
+  //
+  // This is NOT `requiredChecks` above, and the two are not interchangeable. `requiredChecks` is
+  // evaluated against a PR HEAD -- "did these checks pass on this commit". This one is evaluated
+  // against the BRANCH's configuration -- "is the host still configured to demand them at all".
+  // The plane merges through a GitHub App that is a ruleset BYPASS actor, so the host's own
+  // enforcement is not what stops an ungated merge here; nothing does. Somebody editing a ruleset
+  // and dropping the required check is therefore invisible by construction, which is exactly the
+  // hole the retired watchdog-merge-liveness guard used to cover by RED-ing its run when `qa` was
+  // missing from `repos/{owner}/{repo}/rules/branches/test`.
+  //
+  // Deliberately NOT defaulted to `{ test: ['qa'] }` or any other name: an unset entry makes the
+  // detector inert for that branch (and it says so out loud), whereas a guessed default would hold
+  // every merge for a brand-new tenant whose repo legitimately has no ruleset yet -- turning a
+  // safety feature into a day-one wedge. A tenant opts in by naming its own branches and checks.
+  // See control-plane/required-check-drift.ts.
+  baseBranchRequiredChecks?: Record<string, string[]>;
+  // Which of those branches the drift finding actually BLOCKS merging on. A branch named in
+  // baseBranchRequiredChecks but NOT listed here is report-only: drift still raises the alarm, and
+  // merges still go through.
+  //
+  // Same burn-in idiom, for the same reason, as `SECURITY_GATE_ENFORCED` and `E2E_REQUIRED_SITES`
+  // in the Website pipeline: never flip a never-validated check straight to blocking. It matters
+  // more here than usual, because a false positive does not fail one run -- it holds EVERY merge
+  // onto that branch, indefinitely, and the ways to get one are mundane (a check actually named
+  // `Autopilot / qa` written here as `qa`; a branch whose ruleset has not been created yet).
+  //
+  // It also contains the blast radius of an org policy. `resolveConfig` applies `orgPolicy` AFTER
+  // `repoConfig` and replaces the whole map, so a tenant cannot clear an org-level
+  // baseBranchRequiredChecks entry. With enforcement off by default, a mis-set org policy costs
+  // one alarm per tenant per day instead of wedging every promotion in the fleet. An org that
+  // deliberately mandates enforcement can still list branches here -- that is what an org policy
+  // is for -- but it is then an explicit, reviewable act rather than a side effect.
+  //
+  // Empty/unset (the default) => report-only everywhere. See control-plane/required-check-drift.ts.
+  baseBranchCheckEnforcedBranches?: string[];
 }
 
 // A `gate` stage's entitled gates, delivered JIT inside the signed grant so the runner
