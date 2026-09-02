@@ -1195,6 +1195,16 @@ export interface TicketState {
   // clears escalates for a human instead of parking silently forever. Reset once the
   // rollup merges.
   rollupPendingTicks?: number;
+  // Consecutive ticks the promotion PR has been WITHHELD because opening it would have
+  // stacked an open rollup PR under it (the stacked-PR invariant, promote.ts
+  // findStackedPrConflict). Transient by construction -- the rollup merges and the next tick
+  // opens the promotion PR -- so the drive defers rather than blocking; this bounds that
+  // deferral on the same MAX_REVIEW_ATTEMPTS budget the rollup-merge deferral uses, so a
+  // conflict that never clears escalates with the verbatim reason instead of looping
+  // silently. Deliberately NOT `rollupPendingTicks`: that one is reset every tick the rollup
+  // has landed, which is exactly when this deferral fires. Cleared once the promotion PR
+  // opens, and by the blocked-recovery re-drive like every other capped counter.
+  promotionStackedTicks?: number;
   // How many times the architect has been re-run because its plan dropped a required
   // deliverable (the deterministic coverage gate). Bounds the re-architect loop before
   // blocking for a human. Reset once a covering plan is accepted.
