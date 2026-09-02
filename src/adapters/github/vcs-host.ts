@@ -93,11 +93,64 @@ interface GhBranchRule {
   };
 }
 
+// How long ONE call to merge() will wait on a background merge before handing the wait back to
+// the caller. Deliberately WELL UNDER the control-plane tick (60s in production): the tick loop
+// is the real poller here, and a merge() that outlives its own tick would serialise every other
+// ticket behind one PR. Past this window merge() throws a TRANSIENT 504 -- the merge keeps
+// running on GitHub's side, the next tick rejoins it by uuid (see the 409 branch in mergeAsync),
+// and the caller's own retry budget bounds the total wait, not this constant.
+const ASYNC_MERGE_DEADLINE_MS = 30_000;
+// 5s between result reads: the same cadence the CI runner polls a workflow run with. The common
+// case (an ordinary or short stack) merges in a few seconds, so this notices it almost
+// immediately while costing ~6 reads for the ones that do not.
+const ASYNC_MERGE_POLL_INTERVAL_MS = 5_000;
+
+// The merge method every control-plane merge lands with. NOT a default worth leaving implicit:
+// rollups and promotions must produce a MERGE COMMIT, because the Website deploy workflow reads
+// the merge commit's second parent to decide what changed. The synchronous endpoint happens to
+// default to `merge` already; `merge-async` documents no default at all and could resolve to the
+// repository's configured one (Tekunda/Website allows squash and rebase too), so both paths state
+// it. Sub-PRs that must be SQUASHED are squash-merged by GitHub-native auto-merge, never through
+// this method -- see AGENTS.md, "Branch updates".
+const MERGE_METHOD = 'merge';
+
+// The result of PUT /repos/{repo}/pulls/{n}/merge-async and of GET .../merge-async/{uuid}.
+// `status` is the whole verdict: 'merged' is done, 'failed' is a permanent refusal carrying
+// GitHub's reason, 'pending'/'enqueued' mean keep polling.
+interface GhMergeAsyncResult {
+  status: 'pending' | 'merged' | 'enqueued' | 'failed';
+  details?: { message?: string; uuid?: string };
+}
+
+// The uuid GitHub hands back for an asynchronous merge, from a 202/200 body or from the body of
+// the documented 409 ("If another asynchronous merge request has already been made for this pull
+// request, the UUID of that request will be returned instead with a 409 response status").
+function asyncMergeUuidOf(body: unknown): string | undefined {
+  const details = (body as GhMergeAsyncResult | undefined)?.details;
+  return typeof details?.uuid === 'string' && details.uuid.length > 0 ? details.uuid : undefined;
+}
+
+export interface GitHubVCSHostConfig extends GitHubClientConfig {
+  /** Injectable sleep for the asynchronous-merge poll. Defaults to real timers; tests pass a
+   *  no-op so the bounded poll runs instantly and no test ever waits on a real clock. */
+  asyncMergeSleep?: (ms: number) => Promise<void>;
+  /** Poll cadence / ceiling overrides for the asynchronous-merge fallback. Test seams; the
+   *  defaults (ASYNC_MERGE_POLL_INTERVAL_MS / ASYNC_MERGE_DEADLINE_MS) are what production uses. */
+  asyncMergePollIntervalMs?: number;
+  asyncMergeDeadlineMs?: number;
+}
+
 export class GitHubVCSHost implements VCSHost {
   private readonly client: GitHubClient;
+  private readonly asyncMergeSleep: (ms: number) => Promise<void>;
+  private readonly asyncMergePollIntervalMs: number;
+  private readonly asyncMergeDeadlineMs: number;
 
-  constructor(config: GitHubClientConfig) {
+  constructor(config: GitHubVCSHostConfig) {
     this.client = new GitHubClient(config);
+    this.asyncMergeSleep = config.asyncMergeSleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.asyncMergePollIntervalMs = config.asyncMergePollIntervalMs ?? ASYNC_MERGE_POLL_INTERVAL_MS;
+    this.asyncMergeDeadlineMs = config.asyncMergeDeadlineMs ?? ASYNC_MERGE_DEADLINE_MS;
   }
 
   async createBranch(repoId: string, name: string, fromRef: string): Promise<void> {
@@ -125,8 +178,125 @@ export class GitHubVCSHost implements VCSHost {
     return { url: pr.html_url, number: pr.number };
   }
 
+  // Land the PR, resolving ONLY once it is actually merged (see VCSHost.merge's contract).
+  //
+  // The synchronous endpoint is still the normal path -- one request, done. But it cannot merge
+  // every PR: a STACKED pull request (one whose base is another open PR's head) is refused with
+  // a 403 -- "Merging stacked PRs via this endpoint is not supported. Use the asynchronous merge
+  // endpoint instead." -- and no amount of retrying changes that. TEK-3766 wedged for days on
+  // exactly this: rollup PR #1532 targeted the head branch of open promotion PR #1518, the
+  // adapter only knew the synchronous endpoint, and a permanent refusal was filed as a retryable
+  // "pending" that burned eight ticks and then blocked with an invented reason.
+  //
+  // So a 403 that is not a throttle falls through to GitHub's documented asynchronous merge
+  // (PUT .../merge-async + poll .../merge-async/{uuid}), which is the REQUIRED method for a stack
+  // and also works for an ordinary PR. Every other status rethrows unchanged -- a 405/409 is a
+  // benign race the caller already retries next tick.
   async merge(repoId: string, prNumber: number): Promise<void> {
-    await this.client.request('PUT', `/repos/${repoId}/pulls/${prNumber}/merge`);
+    try {
+      await this.client.request('PUT', `/repos/${repoId}/pulls/${prNumber}/merge`, { merge_method: MERGE_METHOD });
+      return;
+    } catch (err) {
+      if (!(err instanceof GitHubApiError) || err.status !== 403) throw err;
+      // GitHub throttles with a 403 far more often than a 429. That 403 says nothing about this
+      // PR, so falling through would swap one endpoint for another mid-throttle and add load to
+      // the thing rate-limiting us. Rethrow: the caller reads it as transient and retries.
+      if (err.rateLimited) throw err;
+      // The message match is for the LOG only -- so the reason the fallback fired is legible --
+      // never a condition on it. GitHub's wording is not part of any contract, and gating the
+      // fallback on exact text is how this bug comes back the day they reword it.
+      const stacked = /stack|asynchronous merge/i.test(err.message);
+      console.warn(
+        `github: PR #${prNumber} refused by the synchronous merge endpoint (403${stacked ? ', stacked PR' : ''}): ` +
+          `${err.message} -- retrying via the asynchronous merge endpoint`,
+      );
+      await this.mergeAsync(repoId, prNumber);
+    }
+  }
+
+  // GitHub's asynchronous merge: submit the request, then poll until the PR is genuinely merged.
+  // Rejects -- never resolves optimistically -- when the merge fails, and rejects TRANSIENTLY
+  // when the bounded window elapses with the merge still running.
+  private async mergeAsync(repoId: string, prNumber: number): Promise<void> {
+    const path = `/repos/${repoId}/pulls/${prNumber}/merge-async`;
+    let uuid: string | undefined;
+    try {
+      // Any throw here (403 without the permission, 400 "the pull request is closed or a draft",
+      // 422) propagates unchanged: the caller must see GitHub's own refusal, not a wrapped one.
+      const accepted = await this.client.request<GhMergeAsyncResult>('PUT', path, { merge_method: MERGE_METHOD });
+      if (accepted?.status === 'merged') return; // 200: already merged
+      if (accepted?.status === 'failed') throw this.asyncMergeRefusal(repoId, prNumber, accepted.details?.message);
+      uuid = asyncMergeUuidOf(accepted);
+    } catch (err) {
+      // 409 is not a failure: it is GitHub saying an asynchronous merge is ALREADY running for
+      // this PR and handing back ITS uuid. That is the normal resume, because merge() hands the
+      // wait back to the tick loop after ASYNC_MERGE_DEADLINE_MS -- so every tick after the first
+      // one lands here and must rejoin the running merge. Resubmitting instead (or treating the
+      // 409 as a fault) would rediscover the original bug: the merge would be invisible, every
+      // tick would look identical, and the retry budget would run out on a merge that was
+      // progressing fine. Without a uuid to rejoin there is nothing to poll, so it rethrows.
+      const resumable = err instanceof GitHubApiError && err.status === 409 ? asyncMergeUuidOf(err.body) : undefined;
+      if (!resumable) throw err;
+      uuid = resumable;
+    }
+
+    // Bounded by ATTEMPTS, not by wall clock, so an injected no-op sleep terminates the loop
+    // instantly instead of spinning against a Date.now() that never advances. The wall-clock
+    // check below is the other half of the belt-and-braces: it stops a poll whose own requests
+    // ran long enough to blow the deadline before the attempt budget ran out.
+    const started = Date.now();
+    const maxPolls = Math.max(1, Math.ceil(this.asyncMergeDeadlineMs / this.asyncMergePollIntervalMs));
+    for (let poll = 0; poll < maxPolls; poll++) {
+      await this.asyncMergeSleep(this.asyncMergePollIntervalMs);
+
+      // The merge request's own verdict, when we have its id. Authoritative and, crucially, the
+      // only place a FAILED background merge is visible -- without it a conflict would look
+      // identical to "still running" and burn the whole window every tick, forever.
+      if (uuid) {
+        const result = await this.client.requestOptional<GhMergeAsyncResult>('GET', `${path}/${uuid}`);
+        if (result?.status === 'merged') return;
+        if (result?.status === 'failed') throw this.asyncMergeRefusal(repoId, prNumber, result.details?.message);
+      }
+
+      // Ground truth regardless: the PR itself. `merged` is the only thing that lets this method
+      // resolve.
+      const pr = await this.client.requestOptional<GhPullDetail>('GET', `/repos/${repoId}/pulls/${prNumber}`);
+      if (pr?.merged) return;
+      // Closed without merging: stop polling, but do NOT call it a refusal. `completeOrArmMerge`
+      // has a distinct `closed` outcome for exactly this -- "a human rejected this work" -- which
+      // callers treat differently from `blocked`, and it reaches that outcome by re-reading the
+      // PR next tick. Reporting a permanent refusal here would block the ticket on the merge path
+      // instead, and lose that distinction. A transient throw costs one tick and lands on the
+      // right verdict.
+      if (pr && pr.state === 'closed' && !pr.merged) {
+        throw new GitHubApiError(504, 'PUT', path, `PR #${prNumber} was closed without merging while its asynchronous merge was running`);
+      }
+      if (Date.now() - started >= this.asyncMergeDeadlineMs) break;
+    }
+
+    // Still running, and this call is out of its window. NOT a refusal, and not a lost merge: it
+    // is still queued on GitHub, and the next tick rejoins it through the 409 branch above. The
+    // 504 makes the control plane's permanentHostRefusal read it as transient, so the caller's
+    // retry budget -- not this method -- bounds how long a merge may take overall.
+    throw new GitHubApiError(
+      504,
+      'PUT',
+      path,
+      `asynchronous merge of PR #${prNumber} has not completed within ${Math.round(this.asyncMergeDeadlineMs / 1000)}s ` +
+        `(${maxPolls} polls at ${this.asyncMergePollIntervalMs}ms): it is still running, and the next attempt will rejoin it`,
+    );
+  }
+
+  // A background merge that FAILED: permanent. Carries a 403 so the control plane's
+  // permanentHostRefusal blocks on the first tick with GitHub's own words, instead of filing it
+  // as retryable and inventing a tick-count reason later.
+  private asyncMergeRefusal(repoId: string, prNumber: number, message: string | undefined): GitHubApiError {
+    return new GitHubApiError(
+      403,
+      'PUT',
+      `/repos/${repoId}/pulls/${prNumber}/merge-async`,
+      `asynchronous merge of PR #${prNumber} did not complete: ${message ?? 'the host reported no reason'}`,
+    );
   }
 
   async setLabel(repoId: string, target: number, label: string): Promise<void> {

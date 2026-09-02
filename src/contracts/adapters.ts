@@ -140,6 +140,23 @@ export interface VCSHost {
     repoId: string,
     params: { branch: string; base: string; title: string; body: string },
   ): Promise<{ url: string; number: number }>;
+  /**
+   * Land the PR on its base branch.
+   *
+   * Two obligations, both learned the hard way (TEK-3766):
+   *
+   * 1. RESOLVE ONLY ONCE THE PR IS ACTUALLY MERGED. Not "the request was accepted", not "the
+   *    host queued it" -- merged. Every caller reads a resolved merge() as "the work landed"
+   *    and acts on it irreversibly (a subtask goes `done` and its build branch is deleted, a
+   *    promotion starts its deploy-wait). An implementation whose host merges in the
+   *    background MUST poll to completion before resolving, or throw.
+   * 2. THROW A PERMANENT, NON-RETRYABLE ERROR WHEN THE HOST REFUSES. A refusal the caller
+   *    cannot fix by waiting (the host will not merge this PR through this path, ever) must
+   *    be distinguishable from a transient fault, so the control plane can block on the first
+   *    tick with the host's own words instead of burning a retry budget and then inventing a
+   *    reason. Carry the host's message verbatim; `permanentHostRefusal` below is what the
+   *    control plane classifies it with.
+   */
   merge(repoId: string, prNumber: number): Promise<void>;
   setLabel(repoId: string, target: number, label: string): Promise<void>;
   listChecks(repoId: string, ref: string): Promise<CheckResult[]>;
@@ -330,6 +347,84 @@ export interface VCSHost {
   // Delete a claim ref by its full name (refs/autopilot-claims/*). Used by the GC sweep; deleting
   // one already gone is a no-op, never an error. Optional, paired with createClaimRef.
   deleteClaimRef?(repoId: string, ref: string): Promise<void>;
+}
+
+// A host refusal, read STRUCTURALLY off an unknown error. Deliberately not a class and
+// deliberately not imported from any adapter: this lives in the contracts layer so the control
+// plane can classify a merge failure without importing `GitHubApiError` (or any other vendor
+// type) -- which would invert the dependency direction the whole seam exists to enforce.
+// `GitHubApiError` satisfies this shape with no import in either direction.
+export interface HostRefusal {
+  /** The host's HTTP status, when it had one. */
+  status?: number;
+  /** The host's own error text, VERBATIM. Never paraphrase it into a caller-facing reason. */
+  message: string;
+}
+
+// Messages that mean "try again", whatever status they arrive on. GitHub reuses both 403 and 422
+// for its own throttling and for benign races, so on those statuses the TEXT is the only thing
+// separating a refusal from a retry -- a secondary-rate-limit 403 that arrives without a
+// Retry-After header and with rate budget still showing is indistinguishable, by status alone,
+// from a permission denial. Blocking a ticket on a throttle is the one failure worse than the bug
+// this classifier exists to fix, so these win over the status rules below.
+const RETRYABLE_MESSAGE_PATTERNS: readonly RegExp[] = [
+  // "Validation failed, or the endpoint has been spammed." -- a throttle wearing a 422.
+  /spamm/i,
+  // "Head branch was modified. Review and try the merge again." -- a race with a sibling push.
+  /\bwas modified\b/i,
+  // Anything where the host itself asks for another attempt, or names its own abuse throttle.
+  /\btry (?:the \w+ )?again\b/i,
+  /secondary rate limit|abuse detection/i,
+  // GitHub's primary-rate-limit wording, for the 403s that carry no Retry-After to flag them.
+  /\bAPI rate limit exceeded\b/i,
+];
+
+/**
+ * Classify an unknown error thrown by a VCSHost as a PERMANENT refusal (the host will not do
+ * this, and waiting cannot change that) or not. Returns the refusal -- status plus the host's
+ * verbatim message -- when permanent, and `undefined` for everything else.
+ *
+ * THE RULE, and why it is drawn exactly here (TEK-3766: a permanent 403 was filed as `pending`,
+ * burned an 8-tick retry budget, and then blocked a ticket with a fabricated reason -- "rollup
+ * merge stayed pending 8 ticks" -- that named the retry loop instead of the cause, so every
+ * human "resume" restarted the same loop):
+ *
+ *   PERMANENT = 403 or 422, MINUS anything that is really a throttle or a race.
+ *
+ *   - 403 is the host saying "not through this path". It is the status GitHub returns for a
+ *     permission denial AND for "this endpoint does not support this pull request" (the stacked-PR
+ *     refusal that caused the incident). Neither heals on a retry.
+ *   - 422 is genuinely mixed, so it is classified CONSERVATIVELY -- the same posture as
+ *     `createClaimRef`, which treats only a message-matched 422 as definitive and lets every
+ *     other one behave as an unknown. Here the conservatism points the other way (a false
+ *     "permanent" escalates a ticket to a human, a false "transient" only costs a tick), so the
+ *     retryable messages are the allowlist and an unmatched 422 is permanent.
+ *   - THROTTLES ARE NEVER PERMANENT, on either status. GitHub throttles with a 403 far more often
+ *     than a 429, so this excludes both the ones the adapter could flag from headers
+ *     (`rateLimited`) and the ones it could not, by message -- see RETRYABLE_MESSAGE_PATTERNS.
+ *     A throttle blocking a ticket for a human would be strictly worse than the bug above: it is
+ *     self-healing, and nothing a human can act on.
+ *   - EVERYTHING ELSE is transient: 5xx, 429, 408, network/abort errors with no status at all,
+ *     405 ("Pull Request is not mergeable" -- mergeability still computing), 409 ("Head branch
+ *     was modified" -- a benign race), 400 (a closed or draft PR, which the caller re-reads and
+ *     resolves as `closed` on its own next tick). Those are the cases a retry next tick fixes.
+ *
+ * This classifies a refusal to ACT. Callers must not apply it to a failed READ: a read that threw
+ * says the PR's state is UNKNOWN, and unknown is never terminal (see completeOrArmMerge's getPR).
+ */
+export function permanentHostRefusal(err: unknown): HostRefusal | undefined {
+  if (typeof err !== 'object' || err === null) return undefined;
+  const candidate = err as { status?: unknown; message?: unknown; rateLimited?: unknown };
+  if (typeof candidate.message !== 'string' || candidate.message.length === 0) return undefined;
+  if (typeof candidate.status !== 'number') return undefined;
+  // GitHub throttles with a 403 far more often than a 429; the adapter marks those. A throttle
+  // is the definition of transient, so it never reads as a refusal.
+  if (candidate.rateLimited === true) return undefined;
+
+  const { status, message } = { status: candidate.status, message: candidate.message };
+  if (RETRYABLE_MESSAGE_PATTERNS.some((p) => p.test(message))) return undefined;
+  if (status === 403 || status === 422) return { status, message };
+  return undefined;
 }
 
 // What VCSHost.readBranchRules answers. Two arms, never collapsible into one:

@@ -43,12 +43,18 @@ export class GitHubApiError extends Error {
    *  rate-limit 403 -- GitHub's usual throttle status, not 429 -- be retried while a plain
    *  auth/permission 403 is not. */
   readonly rateLimited?: boolean;
+  /** The parsed JSON error body, when the host sent one. Some GitHub errors carry the payload
+   *  you need to make progress rather than just a reason to stop: a 409 from `merge-async` is
+   *  the endpoint's documented way of handing back the uuid of the merge request that is ALREADY
+   *  running for this PR, and without it the caller can only resubmit into the same 409 forever. */
+  readonly body?: unknown;
 
-  constructor(status: number, method: string, path: string, message: string, retryAfterMs?: number, rateLimited?: boolean) {
+  constructor(status: number, method: string, path: string, message: string, retryAfterMs?: number, rateLimited?: boolean, body?: unknown) {
     super(`GitHub API ${method} ${path} failed: ${status} ${message}`);
     this.status = status;
     this.retryAfterMs = retryAfterMs;
     this.rateLimited = rateLimited;
+    this.body = body;
   }
 }
 
@@ -135,7 +141,7 @@ export class GitHubClient {
 
         if (!res.ok) {
           const message = isRecord(data) && typeof data.message === 'string' ? data.message : res.statusText;
-          throw new GitHubApiError(res.status, method, path, message, parseRetryAfterMs(res.headers.get('retry-after')), isRateLimited(res.headers));
+          throw new GitHubApiError(res.status, method, path, message, parseRetryAfterMs(res.headers.get('retry-after')), isRateLimited(res.headers), data);
         }
 
         return data as T | undefined;
