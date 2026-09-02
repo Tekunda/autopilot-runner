@@ -1067,6 +1067,21 @@ export interface TicketState {
   // gates.holdOnRenderingSurfaceRemoval, a non-empty set HOLDs the plan for human sign-off.
   // Undefined for a plan that removes nothing.
   planRemovals?: string[];
+  // The areas the TICKET ITSELF declares out of scope, parsed out of the spec text
+  // (control-plane/coverage.ts parseTicketExclusions) whenever the architect reads the
+  // description, and forwarded into the assembled-branch PRIMARY reviewer.
+  //
+  // NOT `reviewSummary.outOfScope`, and never to be conflated with it: that one is a review
+  // OUTPUT -- the architect's own plain-language note about what its plan deliberately does not
+  // do. This is ticket INPUT: the human's declared off-limits areas, which are the contract.
+  //
+  // It VOIDS plan claims. A claim that could only be kept, restored, or verified by changing an
+  // excluded area gets NO finding at all -- not a downgraded one -- because the ticket outranks
+  // the plan. TEK-3766 burned three repair rounds on a `PLAN NOT KEPT` blocker demanding blog
+  // changes the ticket itself had declared out of scope. Undefined for a ticket that declares
+  // no exclusions (then the reviewer prompt is byte-identical to what it was before this field
+  // existed).
+  ticketExclusions?: string[];
   // How many times the assembled review (acceptance walk, now the three-lens review
   // round) found the branch UNMET and the control plane dispatched a repair build before
   // re-reviewing. Bounds the review -> repair -> re-review self-heal so a
