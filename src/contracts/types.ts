@@ -955,8 +955,9 @@ export interface GateBlockProvenance {
   // block time (ControlPlaneConfig.gateVersion). ABSENT means the plane was never told its version,
   // which is "cannot determine", NOT "version zero": every consumer treats an absent version as
   // never-stale and never auto-resumes on it. The runner action and the control-plane image ship
-  // from the same repo and the same commit (runner-dist/ is generated from src/ and a staleness
-  // test fails the build otherwise), so a change to gate CODE always changes this string. The
+  // from the same repo and the same commit (runner-dist/ is not committed -- CI builds it from
+  // src/ and publishes it on every push to main), so a change to gate CODE always changes this
+  // string. The
   // converse does not hold -- a control-plane-only deploy changes it too -- which is why the
   // re-evaluation is bounded to once per version rather than run as a loop.
   gateVersion?: string;
