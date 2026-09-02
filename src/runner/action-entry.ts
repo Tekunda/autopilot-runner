@@ -279,9 +279,10 @@ export async function runActionEntry(inputs: ActionInputs, deps: RunActionDeps =
 // maxFixRoundsFor([], cap) sees no FAILED check to classify, so it returns the FULL configured
 // budget -- the fix loop would dispatch every fix round with a contentless prompt against a crash
 // no code edit can diagnose, before ever escalating. A single `runner-crash` check with
-// `unjudged:true` fixes both: isNonRevertableFinding gives it 0 fix rounds (straight to human
-// escalation, same as any other unjudged gate) and the real crash message rides through to the
-// escalation text instead of vanishing.
+// `unjudged:true` and NO `unjudgedReason` fixes both: reason-less means `content` (fix-loop.ts's
+// isContentUnjudged), so isNonRevertableFinding gives it 0 fix rounds and it goes straight to a
+// human, while the real crash message rides through to the escalation text instead of vanishing.
+// The absent reason is load-bearing: an `infra` one would buy this crash a retry budget instead.
 export function crashTelemetry(grant: ExecutionGrant, err: unknown): StatusTelemetry {
   const message = err instanceof Error ? err.message : String(err);
   return {

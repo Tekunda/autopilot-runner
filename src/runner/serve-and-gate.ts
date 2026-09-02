@@ -155,8 +155,8 @@ const TRANSIENT_READY_POLL_PATTERNS: readonly RegExp[] = [
 
 // Whether a captured install/build/serve failure LOOKS like transient infra rather than a
 // reproducible break in the customer's own code, scoped by WHICH PHASE produced it (see
-// BuildPhase). Used to route a site's serve failure into either an `unjudged/infra` (worth one
-// gate-only retry, see fix-loop.ts's isInfraUnjudgedOnly) or a blocking `fail` (a real build break,
+// BuildPhase). Used to route a site's serve failure into either an `unjudged/infra` (worth a
+// bounded gate retry, see fix-loop.ts's isInfraUnjudgedOnly) or a blocking `fail` (a real build break,
 // correctly attributed -- never masqueraded as an SEO finding). A build-phase failure is NEVER
 // transient (a build ENOENT is a missing asset, not registry infra); neither is a failure whose
 // phase could not be determined -- fail closed to blocking rather than risk masking a real break.
@@ -315,7 +315,8 @@ export async function runHeavyGateStage(grant: ExecutionGrant, deps: RunHeavyGat
 // (the exact mislabel this fix removes: a build break masquerading as an SEO content-gate
 // FAILURE). A separate `heavy-serve (<site>)` check carries the real classification: a
 // transient-shaped fault (registry hiccup, truncated tarball) reports `unjudged/infra`, which
-// routes through fix-loop.ts's one gate-only retry before escalating -- a bare re-run may just
+// the control plane retries as an infra fault before escalating (bounded by `fix.maxBuildRetries`
+// on the dispatch path, one gate-only retry on the blocking fix loop) -- a bare re-run may just
 // clear it. A reproducible break (a real syntax/type error) reports `fail` with the real message,
 // so it blocks the merge, correctly attributed to the build rather than to a phantom SEO finding.
 function siteServeFailureChecks(site: SiteConfig, urlBoundIds: ReadonlySet<string>, err: unknown): CheckResult[] {

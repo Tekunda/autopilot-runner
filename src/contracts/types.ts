@@ -219,18 +219,22 @@ export interface CheckResult {
   findings?: string[];
   // The gate RAN but reached no verdict (e.g. the vision judge stayed rate-limited
   // past its retry budget). It publishes with `status:'fail'` so it blocks the merge,
-  // but no code fix can resolve it -- the fix loop treats it as non-revertable and
-  // escalates to a human. Distinct from an ordinary `fail`: this is "could not judge",
+  // and no code fix can resolve it -- so the fix loop never spends a fix round on one,
+  // routing it by `unjudgedReason` (below) to either a bounded infra retry or a human.
+  // Distinct from an ordinary `fail`: this is "could not judge",
   // not "judged and failed". `CheckStatus` stays a three-value union; this flag rides
   // alongside it.
   unjudged?: true;
   // When `unjudged`, WHY the gate reached no verdict -- it NEVER lets an unjudged pass, it only
   // routes escalation. 'infra': the judge could not RUN (the vision model stayed rate-limited/429
   // past its own backoff -- a transient infra fault). No code edit clears a 429, so a `fix` stage
-  // is useless, but a re-run might reach a verdict: the fix loop grants exactly ONE gate-only retry
-  // before escalating. 'content': the judge RAN but reached no verdict about the page -- no re-run
-  // helps, so it escalates to a human immediately. Absent -> treated as 'content' (fail closed,
-  // escalate now).
+  // is useless, but a re-run might reach a verdict: the dispatch path re-runs the gate on the
+  // shared `fix.maxBuildRetries` infra budget and the blocking fix loop grants one gate-only retry,
+  // and only a fault outliving that reaches a human. 'content': the judge RAN but reached no
+  // verdict about the page -- no re-run helps, so it escalates to a human immediately. Absent ->
+  // treated as 'content' (fail closed, escalate now), which is LOAD-BEARING across the gate-report
+  // artifact round-trip: parseGateReport must carry the reason or every unjudged reads as one
+  // (TEK-3788).
   unjudgedReason?: 'infra' | 'content';
   // The gate NEVER RAN (returned `skip`) -- the complement of `unjudged`'s "ran, no verdict". It
   // publishes with `status:'pending'` (a skip was never evaluated, not passed), but a skip is not

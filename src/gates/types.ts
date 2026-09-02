@@ -19,9 +19,11 @@ import type { VCSHost } from '../contracts/adapters.ts';
 // judge stayed rate-limited past its retry budget). It is distinct from `warn`,
 // which is a report-only *finding*: an unjudged *gate* never counts as a pass,
 // even when the gate is non-blocking -- a gate that reports success when it never
-// judged is worse than no gate. Aggregation maps it to a merge-blocking `fail`
-// and it escalates to a human (no code fix can resolve it) -- see toCheckStatus
-// and the fix loop's non-revertable classification.
+// judged is worse than no gate. Aggregation maps it to a merge-blocking `fail`,
+// and `unjudgedReason` then decides what happens next: `infra` (the judge could
+// not RUN, e.g. a 429 past its backoff) is retried as an infra fault on a bounded
+// budget, anything else escalates to a human at once -- see toCheckStatus and the
+// fix loop's non-revertable classification.
 export type GateStatus = 'pass' | 'fail' | 'skip' | 'warn' | 'unjudged';
 
 export interface GateContext {
