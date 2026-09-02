@@ -394,6 +394,28 @@ export type ExecutionGrant = {
   // routes a lensed review grant through the read-only+plan.json profile while a lens-less
   // `review` grant behaves exactly as before (the linear ticket pipeline's generic review).
   reviewLens?: ReviewLens;
+  // Which GENERATION of a stage this dispatch belongs to: a short, deterministic token the
+  // issuer derives from the generation's own identity (for a review round, its pinned start
+  // plus the lens -- see reviewRunToken), so every driver that re-issues the SAME grant on a
+  // later tick derives the SAME token while a different round derives a different one. `jti`
+  // cannot serve here: it is freshly minted per issuance, so a re-issued grant would never
+  // match the run it dispatched.
+  //
+  // runner.yml puts it in the run-name, which is the ONLY channel by which a dispatched run can
+  // identify its generation back to us. That is what makes correlation exact between two
+  // overlapping control-plane revisions dispatching the same lens over the same sha: without
+  // it their run-names are byte-identical and the older driver adopts (or consumes the verdict
+  // of) the younger round's run.
+  //
+  // CORRELATION, NOT AUTHENTICATION. The grant is signed, but the run-name is not: it is
+  // rendered from `inputs.grant` by the customer's own workflow, so anyone with `actions:write`
+  // on the repo can dispatch a run naming any token they like, and an 8-hex token has a small
+  // enough space to guess besides. It disambiguates HONEST runs; it never proves one. Every
+  // path that acts on a token match still bounds the run in time and still checks the rest of
+  // the name. Absent on a legacy grant, and absent from the run-name of a tenant whose deployed
+  // runner.yml predates it -- correlation then falls back to the name plus the tokenless time
+  // bound (TOKENLESS_ADOPTION_WINDOW_MS).
+  runToken?: string;
   // The git identity every pipeline commit a CODING stage (build/fix) pushes is authored and
   // committed under -- Autopilot's OWN bot, resolved server-side from the control plane (never
   // the customer's runner.yml), so the identity of its own App bot isn't a leaky per-customer
@@ -571,6 +593,34 @@ export interface StageResult {
   // runCreatedAt -- the run's immutable created_at -- so a hung run still escalates).
   runId?: number;
   runCreatedAt?: string;
+  // Set only where the run above was RE-CORRELATED by name (the in-flight marker carried no run
+  // id) and the listing offered MORE THAN ONE run under this stage's name inside the correlation
+  // window: the run handed over is a pick between candidates, not the only run it could have
+  // been. The review round's ingest guard tightens its own bound to TOKENLESS_ADOPTION_WINDOW_MS
+  // only here -- a lone candidate is refused only on the two POSITIVE disproofs (it predates the
+  // pin, or runTokenMismatch below), because re-refusing the lens's own late run on a bound alone
+  // is what wedged the round. Absent everywhere else, including every marker-by-id poll (which
+  // can only ever describe the run the marker names).
+  competingRuns?: boolean;
+  // Set only where the run above was RE-CORRELATED by name and that correlation is DISPROVED by
+  // the listing it came from: the grant carried a runToken, the correlated run's name carries NO
+  // token, and some OTHER run for this ticket+stage in the same listing does name a round --
+  // which can only come from a runner.yml that renders the token. So the deployed workflow
+  // renders tokens, this control plane always sends one, and a run of this name carrying none was
+  // not dispatched by this round. The flagged run names no round at all; it is never a run naming
+  // a DIFFERENT round, because matchesRun rejects those before anything can correlate to one, so
+  // no message derived from this flag may claim otherwise. Unlike competingRuns this is positive
+  // evidence rather than ambiguity, so the ingest guard refuses on it outright and needs no time
+  // bound.
+  //
+  // Absent for every marker-by-id poll, and for a tenant whose runner.yml predates the token
+  // (nothing in that listing names a round, so nothing disproves anything -- such a tenant is
+  // still protected by the created-before-the-pin refusal, which is purely temporal, but not
+  // against a foreign run that is merely late). The evidence itself carries no time bound, so a
+  // runner.yml upgrade landing mid-round can set this on the round's OWN pre-upgrade run; see
+  // ci-runner.ts's contradictsRunToken for why the sound bound was rejected and why the failure
+  // is in the safe direction (an escalation, not a wrong verdict).
+  runTokenMismatch?: boolean;
   // Only an `architect` stage populates this: the ordered subtask plan it produced,
   // downloaded by the CIRunner from the run's `plan.json` artifact and persisted
   // deterministically by the control plane (createSubtasks + linkBlockedBy). Absent for
@@ -963,6 +1013,22 @@ export interface ReviewRoundState {
   // round awaiting aggregation looks the same); any successful start writes a fresh round
   // without this counter, resetting the streak.
   missingAttempts?: number;
+  // Consecutive ticks on which at least one lens's poll returned an EVIDENCED result this round
+  // could not attribute to its own dispatch -- a refused result whose correlation had a competing
+  // candidate (StageResult.competingRuns) or was disproved by its own listing
+  // (StageResult.runTokenMismatch) -- and no lens made progress (see
+  // reviewResultBelongsToRound). The refusal is correct -- with two same-named runs in the
+  // window, an unproven correlation may be judging a revision this round never pinned -- but
+  // repeating it is not progress: the marker is left untouched, so the next tick re-polls the
+  // same run and refuses it again, forever. Nothing else ends that loop: the drive stamps
+  // lastEventAt every tick before the review path runs (driveDecomposedTicket), so
+  // `ticket_wedged` never sees a round that only refuses -- only this counter can END it. At
+  // MAX_FOREIGN_RESULT_TICKS the ticket blocks with the last refused run id as evidence.
+  // Reset by any tick on which a lens settles OR reports `running` past the ingest guard: a
+  // round still watching its own reviewers is advancing, whatever else its siblings polled.
+  // A refusal the adapter could not evidence never counts here at all -- checkStage's own
+  // run-not-found/timeout escalation is what ends that one.
+  foreignResultTicks?: number;
 }
 
 export interface TicketState {
@@ -1435,6 +1501,35 @@ export const EXTERNAL_PR_PREFIX = 'external-pr-';
 export function isExternalPrTicket(ticketId: string): boolean {
   return ticketId.startsWith(EXTERNAL_PR_PREFIX);
 }
+
+// Clock slack between the control plane and the CI host: a dispatched run's `created_at` is
+// GitHub's clock, not ours, and the listing itself lags the dispatch by a beat. Every lower
+// bound on "was this run created for THIS generation" reaches back this far.
+export const RUN_CORRELATION_SLACK_MS = 5_000;
+
+// UPPER bound on the same question, and ONLY for a run-name that carries no run token: how
+// long after a GENERATION started one of its own tokenless dispatches may still land.
+//
+// Sized on the drive loop, not on a guess: a round dispatches its lenses within one tick, and
+// a partial fan-out is completed on the NEXT tick of the same round, so two tick intervals
+// (DEFAULT_TICK_INTERVAL_MS, 60s in src/main.ts and src/service/main.ts) covers every dispatch
+// a round legitimately makes for itself, plus a tick of slack. Everything past it is a LATER
+// generation -- and it has to be tighter than the overlap it defends against: the 2026-09-02
+// incident's two control-plane revisions pinned their rounds 274s apart, so the 5 minutes this
+// bound used to be still let the orphaned revision's driver adopt the live round's runs, which
+// is the whole failure. A tenant whose runner.yml predates the run token gets ONLY this bound,
+// so it is the one that has to hold.
+//
+// Only the GENERATION-anchored paths use it (adoption against a round's pinned start, and the
+// review ingest guard where the correlation was CONTESTED -- StageResult.competingRuns). A path
+// anchored on this driver's OWN dispatch has no such hazard above it -- its own run can be
+// minutes late through a retried dispatch and CI-host lag -- and bounds itself by the stage
+// timeout instead; so does the ingest guard when the adapter had only one candidate to hand it.
+// A lone candidate is NOT proof of the round's own run -- the round's run can be missing from
+// the listing entirely (a dispatch that degraded to a bare handle, or a run aged off the 20-run
+// page) leaving somebody else's as the only one there -- so that path is bounded by the positive
+// disproofs instead (StageResult.runTokenMismatch, and a created_at that predates the pin).
+export const TOKENLESS_ADOPTION_WINDOW_MS = 2 * 60_000;
 
 // `mergeable` abstracts the host's merge-readiness signal for the watchdog's
 // keep-merges-live routine: 'clean' can be merged now, 'dirty' has a

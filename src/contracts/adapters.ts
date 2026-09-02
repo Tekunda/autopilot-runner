@@ -426,6 +426,12 @@ export interface DispatchStageOptions {
   // ticks, so two overlapping drivers share one run instead of dispatching duplicates, while a
   // run left over from a DISCARDED earlier generation is still refused. Omit when the
   // generation starts with this call.
+  //
+  // It bounds adoption from ABOVE too, and ONLY here -- naming a generation is what makes an
+  // upper bound meaningful. A run whose name carries no token and was created more than
+  // TOKENLESS_ADOPTION_WINDOW_MS after this generation started belongs to a LATER one (the
+  // overlapping-revision hazard) and is refused however exactly its run-name matches; a run
+  // that names this generation's token gets the generous stage-timeout bound instead.
   adoptSince?: string;
 }
 
