@@ -827,6 +827,20 @@ export interface InFlightStage {
   // by run-name (stage + ticketId), so consuming it here would mislabel its telemetry.
   // Absent on subtask markers (each subtask owns its own slot) and legacy persisted markers.
   origin?: 'conflict' | 'feedback' | 'qa';
+  // For an `origin: 'feedback'` marker: the review threads this fix was dispatched to address.
+  // Review-thread items are no longer identified by the feedback CURSOR (an unresolved thread
+  // re-drives a fix until it is resolved or the round budget runs out -- see
+  // handleReviewFeedback), so the completion path cannot rebuild its acknowledgment set from a
+  // cursor bound the way it still can for review summaries and top-level comments. This is that
+  // set, recorded at dispatch. Absent on legacy markers, where the cursor bound is still used.
+  feedbackThreadIds?: string[];
+  // ...and the PR head sha when it was dispatched. Resolving a review thread is a claim about the
+  // FINDING ("this no longer applies"), and a fix stage exiting clean only proves the STAGE
+  // passed -- a fixer that misread the comment and changed nothing exits clean too, and the
+  // reviewer is a bot that will not re-open what we resolved. This is the cheapest piece of real
+  // evidence available at the boundary: the head moved, so something was actually pushed. Absent
+  // on legacy markers and when the host could not answer, both of which read as "no evidence".
+  feedbackHeadSha?: string;
   // The check-run id VCSHost.publishCheck returned for this stage's `pending` progress
   // publish, so the LATER publish that reports this stage's pass/fail can PATCH that same
   // check-run instead of POSTing a second one that never transitions out of `in_progress`
@@ -1098,6 +1112,15 @@ export interface TicketState {
   // corrective feedback (a Codex or human `changes_requested`/comment) drives a fix exactly
   // once. Persisted so a control-plane restart doesn't re-fix already-handled feedback.
   feedbackCursor?: { reviewId: number; commentId: number; threadCommentId?: number };
+  // How many `fix` stages the review-feedback lane has run for this ticket. The cursor above
+  // bounds each ITEM to one fix, but nothing bounded the item COUNT: a reviewer (or a bot) that
+  // keeps commenting drove unbounded fix rounds forever, with no cap and no escalation -- alone
+  // among the fix lanes, every one of which spends fix.maxFixRounds and then blocks
+  // (resolveConflict, the external-PR lane, the promotion CI lane, fix-loop.ts). Counted when a
+  // dispatched feedback fix TERMINATES, pass or fail -- never while one is in flight, so a
+  // multi-minute run can't burn the budget one tick at a time. Reset when the ticket's promotion
+  // merges, alongside conflictFixAttempts.
+  feedbackFixAttempts?: number;
   // How many times a `fix` stage has been dispatched to auto-resolve a merge conflict on
   // this ticket's PR. Bounds the conflict self-heal so a genuinely unresolvable conflict
   // blocks for a human instead of looping. Reset once the PR merges.
