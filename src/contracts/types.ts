@@ -1405,6 +1405,25 @@ export interface TicketState {
   // undefined on any successful drive tick, so intermittent blips never accumulate into a
   // false escalation.
   transientFailureCount?: number;
+  // The base-advance re-validation this ticket's CURRENT findings block has already spent (see
+  // recoverBlockedOnBaseAdvance). A findings block is a verdict about a TREE, and the only party
+  // that can re-judge it is the gate -- so the re-validation IS a re-gate, and it has to be paid
+  // for exactly once per base state or it becomes an unbounded blocked -> re-gate -> blocked loop.
+  //
+  //   `baseSha` -- the base branch head the last re-validation was spent against. The lane refuses
+  //     to spend a second one while the base is still at that sha: the tree would be the same tree
+  //     and the gate would reach the same verdict, so the second run is pure burn. A ticket that
+  //     fails re-validation therefore costs ONE re-gate per genuine base advance, never one per
+  //     tick and never one per sweep.
+  //   `attempts` -- how many have been spent in total, ever, on this block. Capped
+  //     (MAX_BASE_ADVANCE_REVALIDATIONS) so a busy base branch, which advances constantly, cannot
+  //     buy an unbounded number of re-gates for a ticket whose finding is simply real.
+  //
+  // Deliberately survives the lane's own `auto` resume (that is what makes the cap a cap), and is
+  // cleared only by a HUMAN resume -- a person answering a blocked ticket renews its budgets, the
+  // same trade acceptRepairAttempts makes. Absent means no re-validation has ever been spent,
+  // which is a KNOWN zero, not an unknown.
+  blockRevalidation?: { baseSha: string; attempts: number };
 }
 
 // The ticketId prefix for an external-PR pseudo-ticket (see TicketState.externalPr). Such
