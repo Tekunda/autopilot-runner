@@ -1064,6 +1064,38 @@ export interface TicketState {
   // first, so a record cleared on any clean refresh would be zeroed every tick while the
   // integration lane was mid-episode. Only the named branch's own clean refresh clears it.
   branchFreshnessHolds?: { branch: string; unknown?: number; refused?: number };
+  // The blocked-branch freshness sweep's OWN copy of the two budgets above, for the branch it
+  // names (control-plane.ts, refreshBlockedTicketBranches).
+  //
+  // Why a separate record instead of just spending branchConflictFixAttempts /
+  // branchFreshnessHolds directly: those two fields are read by checkDependencyWake's `spent`
+  // predicate, which FAILS CLOSED -- a ticket with any budget at its cap is never auto-woken when
+  // the sibling it is `blocked by` finally ships. The sweep runs on tickets that are already
+  // blocked, including ones blocked purely on a dependency, so spending the shared counters there
+  // would drive them to the cap on a ticket whose block a wake was going to answer, and that
+  // ticket would then never wake -- a permanent strand caused by a lane that is only supposed to
+  // keep a branch mergeable. The sweep therefore SEEDS the shared fields from this record before
+  // it calls the shared machinery and RESTORES them afterwards, so the machinery is reused
+  // unchanged while the spend lands here, where no recovery predicate reads it.
+  //
+  // `fixInFlight` marks a conflict-fix run THIS lane dispatched: it is what makes the seeding
+  // safe, because a ticket-level marker the sweep does not own must never be adopted (polling
+  // another lane's run charges the wrong budget and publishes a check against a ref that run never
+  // touched). `retiredAt`/`retiredCause` stop the sweep on a branch it cannot fix; a `conflict`
+  // retirement is evidence about the BRANCH and stands until a human recovery clears it, while
+  // `unknown` (host unreadable) and `refused` (tenant at its run cap) are evidence about the host
+  // or the tenant and EXPIRE -- an expiry that also zeroes that cause's count, or the branch comes
+  // back already at the cap and fires a false escalation on every check forever. Cleared by every
+  // recovery reset, exactly like the two fields above.
+  blockedBranchRefresh?: {
+    branch: string;
+    conflictAttempts?: number;
+    unknownHolds?: number;
+    refusedHolds?: number;
+    fixInFlight?: boolean;
+    retiredAt?: string;
+    retiredCause?: 'conflict' | 'unknown' | 'refused';
+  };
   // Consecutive ticks the rollup PR's merge has stayed `pending` (behind, not ready, or a
   // benign race that keeps recurring). Bounds the deferral so a merge error that never
   // clears escalates for a human instead of parking silently forever. Reset once the
