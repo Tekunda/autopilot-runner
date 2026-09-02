@@ -36,5 +36,6 @@ export * from './assertion-delta.ts';
 export * from './assertion-delta-detect.ts';
 export * from './cve.ts';
 export * from './risk.ts';
+export * from './test-integrity-detect.ts';
 export * from './structure.ts';
 export * from './test-policy.ts';

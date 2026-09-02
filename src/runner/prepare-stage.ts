@@ -338,14 +338,23 @@ export async function computeChangedFiles(baseRef: string, cwd: string = process
   // fetch-depth: 0; this unshallow-and-retry covers nonstandard workspaces. Best-effort:
   // if the deepen fails (or the retry still can't find a merge-base), the original error
   // surfaces rather than an empty file list silently gating over nothing.
+  //
+  // `-z` is not cosmetic. Without it git QUOTES any path that is not plain ASCII and
+  // octal-escapes its bytes, so `tests/e2e/caf\u00e9.spec.ts` arrives as the literal
+  // `"tests/e2e/caf\\303\\251.spec.ts"` -- surrounding quotes included. Every downstream
+  // consumer then fails to recognize it: an `endsWith('.ts')` test-file selector says no, a
+  // path-prefix scope test says no, and the file is dropped from the diff entirely. That is a
+  // silent false green (a spec containing `it.only(...)` sails through the structure gate),
+  // and it is invisible precisely because nothing errors. The NUL stream also preserves names
+  // with trailing whitespace, which the old `.trim()` mangled.
   let out: string;
   try {
-    out = await git(['diff', '--name-only', `${base}...HEAD`]);
+    out = await git(['diff', '--name-only', '-z', `${base}...HEAD`]);
   } catch (err) {
     await git(['fetch', '--unshallow', 'origin']).catch(() => undefined);
-    out = await git(['diff', '--name-only', `${base}...HEAD`]).catch(() => {
+    out = await git(['diff', '--name-only', '-z', `${base}...HEAD`]).catch(() => {
       throw err;
     });
   }
-  return out.split('\n').map((line) => line.trim()).filter((line) => line.length > 0);
+  return out.split('\0').filter((line) => line.length > 0);
 }

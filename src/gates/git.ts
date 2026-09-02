@@ -52,3 +52,50 @@ export async function unifiedDiffForFiles(base: string, files: string[], cwd: st
     });
   }
 }
+
+// The paths this change DELETED, between `base` and HEAD. Callers use it to tell a changed
+// file that is absent from the checkout because the diff removed it (expected) from one that
+// is absent because the checkout is wrong or the path never resolved (a real fault they must
+// not report as a clean scan).
+//
+// `-z` is not optional here: without it git octal-escapes any non-ASCII path
+// ("apps/caf\303\251.spec.ts") and quotes names with spaces, so a comparison against the
+// host-supplied changed-file list silently misses exactly the paths most likely to be
+// mishandled elsewhere. The NUL stream is status and path alternating; rename/copy entries
+// (R/C) carry TWO paths, so the source path is consumed and only the destination advances.
+export async function deletedFilesSince(base: string, cwd: string = process.cwd()): Promise<Set<string>> {
+  const nameStatus = async (): Promise<string> => {
+    const { exitCode, stdout, stderr } = await runCommand(
+      'git',
+      ['diff', '--name-status', '-z', `${base}...HEAD`],
+      cwd,
+    );
+    if (exitCode !== 0) throw new Error(`git diff --name-status failed (exit ${exitCode}): ${stderr.trim()}`);
+    return stdout;
+  };
+
+  let raw: string;
+  try {
+    raw = await nameStatus();
+  } catch (err) {
+    await runCommand('git', ['fetch', '--unshallow', 'origin'], cwd).catch(() => undefined);
+    raw = await nameStatus().catch(() => {
+      throw err;
+    });
+  }
+
+  const fields = raw.split('\0');
+  const deleted = new Set<string>();
+  for (let i = 0; i < fields.length; i += 1) {
+    const status = fields[i];
+    if (!status) continue;
+    if (status.startsWith('R') || status.startsWith('C')) {
+      i += 2; // source + destination
+      continue;
+    }
+    const file = fields[i + 1];
+    i += 1;
+    if (status.startsWith('D') && file) deleted.add(file);
+  }
+  return deleted;
+}
