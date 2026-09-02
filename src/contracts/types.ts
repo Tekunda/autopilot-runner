@@ -788,6 +788,39 @@ export interface SubtaskState {
   // from a merge that simply could not complete this tick on the identical revision, where a
   // re-gate can only reproduce the verdict it already has. Absent -> unknown -> always gate.
   lastGateHeadSha?: string;
+  // Set when THIS subtask was blocked by a gate VERDICT (findings), naming the gate
+  // implementation that produced those findings. See GateBlockProvenance.
+  gateBlock?: GateBlockProvenance;
+}
+
+// WHICH gate implementation produced the findings that blocked a subtask (and, rolled up, its
+// ticket). Recorded at the moment a findings-based block is persisted.
+//
+// Nothing else in the state says this. A findings block reads identically whether the findings
+// describe a real defect in the customer's code or a defect in the GATE, so fixing the gate could
+// not release the tickets that gate had wrongly blocked -- they stayed blocked until a human
+// noticed and nudged them by hand. TEK-3694 is the worked example: a subtask that added
+// `content/site/README.md` tripped two gate defects (an SEO-pack rootDir that defaulted to
+// process.cwd() and so read the action's own directory, and a markdown-to-route mapper that turned
+// the README into the route `/site/README`), escalated as "no code fix can resolve", and stayed
+// blocked after PR #336 removed both defects.
+//
+// This is the record recoverBlockedOnGateChange reasons over -- see blocked-recovery.ts.
+export interface GateBlockProvenance {
+  // The deployed gate/runner implementation version, as the control plane knew its OWN version at
+  // block time (ControlPlaneConfig.gateVersion). ABSENT means the plane was never told its version,
+  // which is "cannot determine", NOT "version zero": every consumer treats an absent version as
+  // never-stale and never auto-resumes on it. The runner action and the control-plane image ship
+  // from the same repo and the same commit (runner-dist/ is generated from src/ and a staleness
+  // test fails the build otherwise), so a change to gate CODE always changes this string. The
+  // converse does not hold -- a control-plane-only deploy changes it too -- which is why the
+  // re-evaluation is bounded to once per version rather than run as a loop.
+  gateVersion?: string;
+  // Which check produced which findings. The block REASON flattens all of them into one prose blob
+  // for the human; this is the only structured record of the attribution, so a later reader can ask
+  // "which gate blocked this" without parsing English.
+  checks: { name: string; findings: string[] }[];
+  recordedAt: string; // ISO 8601
 }
 
 // One gate's REAL executed result on a promotion, distilled from the gate stage's CheckResult:
@@ -973,6 +1006,14 @@ export interface TicketState {
   // before this existed (coverage then falls back to the stand-in). Keyed by branch like
   // promotionCoverage, since coverage is a per-protected-branch property.
   lastGateExecution?: { branch: string; results: RecordedGateCheck[]; recordedAt: string };
+  // Set when this ticket blocked BECAUSE one or more of its subtasks was blocked by a gate
+  // VERDICT: the provenance rolled up from those subtasks' own `gateBlock` records. Present only
+  // while the ticket is blocked for that reason -- every resume clears it, so a re-block always
+  // stamps a fresh record rather than inheriting a stale one. `gateVersion` is carried only when
+  // every contributing subtask agrees on it; disagreement (subtasks blocked either side of a gate
+  // deploy) is "cannot determine" and leaves it absent, which never auto-resumes.
+  // See GateBlockProvenance and recoverBlockedOnGateChange.
+  gateBlock?: GateBlockProvenance;
   // Present ONLY on an external-PR pseudo-ticket (id "external-pr-<n>"): a human/automation
   // PR into a protected branch that the ticket pipeline did NOT open, which the control
   // plane picks up as a first-class driven workflow (QA -> autofix-on-fail -> conflict
