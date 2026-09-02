@@ -4,6 +4,7 @@
 
 import type {
   CheckResult,
+  CheckRunSnapshot,
   CheckStatus,
   CodingActionInputs,
   CodingActionOutput,
@@ -11,6 +12,7 @@ import type {
   ExecutionGrant,
   ExecutorResult,
   PRStatus,
+  RunLiveness,
   Snippet,
   Stage,
   InFlightStage,
@@ -225,6 +227,17 @@ export interface VCSHost {
   // the check-run that was created or updated, so the caller can capture it for the next
   // publish in this same stage's lifecycle.
   publishCheck(repoId: string, ref: string, check: PublishedCheck, checkRunId?: number): Promise<{ id: number }>;
+  // The read half of publishCheck: is check-run `checkRunId` still open, or has it already
+  // been completed, and under what name? The ghost-check-run sweep (watchdog.ts) needs to tell
+  // a check-run that is GENUINELY in flight from one whose backing run finished without ever
+  // concluding it, and it must be able to say which before it claims either in an alarm. The
+  // name comes back with it so the completing publish reuses it rather than renaming the run.
+  // Optional -- a host without it simply has no ghost sweep.
+  // Fail-safe, like RunLiveness: `undefined` means the check-run could not be READ (transport
+  // error, 404, rate limit) and must never be taken for 'completed' (which would silently
+  // retire a real ghost) nor for 'in_progress' (which would invite concluding a check-run on
+  // no evidence). Every other answer is the host's own word.
+  checkRunStatus?(repoId: string, checkRunId: number): Promise<CheckRunSnapshot | undefined>;
   // Re-trigger a FAILED deployment on `ref` (a merge commit sha): re-run the failed jobs of
   // the workflow run(s) that produced the failing deployment check, so a transient deploy
   // failure (registry blip, infra flake) recovers without a human. Returns true if a rerun
@@ -417,6 +430,15 @@ export interface CIRunner {
   // run ids were never correlated, so id-based cancellation silently does nothing there --
   // which is exactly when a superseded round is most likely to still be running. Optional.
   cancelStagesFor?(repoId: string, opts: { stage: Stage; shortId: string }): Promise<number>;
+  // Read one dispatched run's liveness WITHOUT issuing a grant: has it finished, and what did
+  // it conclude (see RunLiveness). checkStage answers a much richer question -- it downloads the
+  // verdict artifact and maps it to a StageResult -- and needs a signed grant for the stage,
+  // because it is part of DRIVING one. Concluding a check-run the run already settled is
+  // RECONCILIATION of a fact that happened on the host, so it must not have to mint a grant (or
+  // pass a drive gate) to ask. Optional and fail-safe: resolves undefined when the outcome
+  // cannot be determined, which callers must treat as "unknown", never as still-running and
+  // never as a pass. A runner without it simply has no ghost sweep.
+  runLiveness?(repoId: string, runId: number): Promise<RunLiveness | undefined>;
 }
 
 // The pluggable coding-agent seam the thin runner drives for coding stages

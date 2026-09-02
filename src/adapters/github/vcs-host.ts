@@ -1,7 +1,7 @@
 // GitHub implementation of the VCSHost contract (src/contracts/adapters.ts).
 
 import type { ClaimRefResult, OpenPR, PrFeedback, PublishedCheck, VCSHost } from '../../contracts/adapters.ts';
-import type { CheckResult, PRStatus } from '../../contracts/types.ts';
+import type { CheckResult, CheckRunSnapshot, PRStatus } from '../../contracts/types.ts';
 import { GitHubApiError, GitHubClient, type GitHubClientConfig } from './rest.ts';
 
 interface GhRef {
@@ -504,6 +504,33 @@ export class GitHubVCSHost implements VCSHost {
     const created = await this.client.request<{ id: number }>('POST', `/repos/${repoId}/check-runs`, payload);
     if (!created) throw new Error(`GitHub returned no body for created check-run "${check.name}" in ${repoId}`);
     return { id: created.id };
+  }
+
+  // The read half of publishCheck (see the VCSHost contract). One GET, no pagination: the
+  // check-run is addressed by the id publishCheck returned, so there is no name/ref matching to
+  // get wrong.
+  //
+  // Fail-safe by construction. `requestOptional` maps a 404 to undefined and rethrows everything
+  // else, so the catch turns every OTHER failure (5xx, rate limit, breaker cooldown, transport)
+  // into undefined too, and an unrecognised status string is undefined as well. All three mean
+  // "could not be read", which is the SAFE side here -- the sweep leaves the check-run pending
+  // and surfaces it. That is the opposite of the aheadBy shape, where "cannot compare" degraded
+  // into 0 and looked exactly like a real answer.
+  async checkRunStatus(repoId: string, checkRunId: number): Promise<CheckRunSnapshot | undefined> {
+    try {
+      const run = await this.client.requestOptional<{ status?: string; name?: string }>(
+        'GET',
+        `/repos/${repoId}/check-runs/${checkRunId}`,
+      );
+      const status = run?.status;
+      if (status !== 'queued' && status !== 'in_progress' && status !== 'completed') return undefined;
+      // A run with no name is as unusable as one with no status: the completing publish would
+      // have to invent one, so report it as unread rather than half-read.
+      if (!run?.name) return undefined;
+      return { status, name: run.name };
+    } catch {
+      return undefined;
+    }
   }
 
   async rerunDeployment(repoId: string, ref: string): Promise<boolean> {

@@ -618,6 +618,41 @@ export interface Snippet {
   sourceUrl?: string;
 }
 
+// One dispatched CI run's LIVENESS, read without a grant: has it finished, and what did it
+// conclude. This is the fact the ghost-check-run sweep reconciles against (watchdog.ts) -- a
+// check-run left `in_progress` by a run that has already finished is a ghost, and only the run
+// itself can say so.
+//
+// The three answers are deliberately distinct and must stay that way. A reader resolving
+// `undefined` means the outcome COULD NOT BE DETERMINED (transport error, run not found, rate
+// limit); an object with `status !== 'completed'` means the run is GENUINELY still going; a
+// completed run with `conclusion: null` is a host that finished without saying how. Only the
+// middle one is "not finished yet". Collapsing "cannot determine" into a normal-looking value is
+// exactly the flaw that made a `.catch` on VCSHost.aheadBy dead code (its `?? 0` already looked
+// like "equal or behind"), so nothing here defaults.
+// One published check-run as the host currently holds it -- the read half of
+// VCSHost.publishCheck. Carries the NAME as well as the status because completing a check-run
+// goes back through publishCheck, whose payload includes `name`: a caller that guessed the name
+// from the stage would silently RENAME any run it guessed wrong.
+export interface CheckRunSnapshot {
+  status: 'queued' | 'in_progress' | 'completed';
+  name: string;
+}
+
+export interface RunLiveness {
+  status: 'queued' | 'in_progress' | 'completed';
+  // GitHub's run conclusion once `status` is 'completed' ('success' | 'failure' | 'cancelled' |
+  // 'skipped' | 'timed_out' | 'neutral' | ...). null while the run is unfinished, and also on a
+  // completed run the host reported without one -- which is indeterminate, never a pass.
+  conclusion: string | null;
+  // When the run finished (ISO), when the host reports it. The ghost sweep's grace period is
+  // anchored HERE so the drive loop gets its own chances to publish the real verdict first, and
+  // there is no substitute anchor: absent (or unparseable) means the sweep cannot measure that
+  // window at all, so it leaves the check-run pending and surfaces it rather than acting on a
+  // window it never measured. Optional only because a host may not report one.
+  completedAt?: string;
+}
+
 // A CI stage that was dispatched but hasn't been observed complete yet. Persisted on the
 // ticket/subtask so the drive loop can DISPATCH a stage and RETURN immediately, then RECONCILE
 // the run's result on a later tick -- instead of blocking the whole tick awaiting the run. This
