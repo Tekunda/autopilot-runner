@@ -321,12 +321,20 @@ export async function runHeavyGateStage(grant: ExecutionGrant, deps: RunHeavyGat
 // so it blocks the merge, correctly attributed to the build rather than to a phantom SEO finding.
 function siteServeFailureChecks(site: SiteConfig, urlBoundIds: ReadonlySet<string>, err: unknown): CheckResult[] {
   const message = err instanceof Error ? err.message : String(err);
+  // `baseId` for the same reason run-gate-stage.ts's toChecks sets it on every suffixed check: the
+  // never-run / no-baseline ledger and the enabled-gate set are keyed by the BARE gate id
+  // (promotion.ts's `baseIdOf`), so without it `baseId ?? id` falls back to this SUFFIXED name and
+  // can never match an enabled id. That matters most precisely here -- "a gate that never ran
+  // because its site would not serve" is the scenario the never-run diagnostic exists to report.
   const skipChecks: CheckResult[] = [...urlBoundIds].map((id) => ({
     name: `${id} (${site.name})`,
+    baseId: id,
     status: 'pending',
     skipped: true,
     skipReason: 'infra',
   }));
+  // `heavy-serve` is a per-site synthetic check, not one of the tenant's enabled gates, so it
+  // carries no baseId -- there is no bare id for the ledger to match it against.
   const serveCheck: CheckResult = isTransientBuildFault(phaseOf(err), message)
     ? { name: `heavy-serve (${site.name})`, status: 'fail', unjudged: true, unjudgedReason: 'infra', findings: [message] }
     : { name: `heavy-serve (${site.name})`, status: 'fail', findings: [message] };

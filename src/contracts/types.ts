@@ -226,8 +226,10 @@ export interface CheckResult {
   // alongside it.
   unjudged?: true;
   // When `unjudged`, WHY the gate reached no verdict -- it NEVER lets an unjudged pass, it only
-  // routes escalation. 'infra': the judge could not RUN (the vision model stayed rate-limited/429
-  // past its own backoff -- a transient infra fault). No code edit clears a 429, so a `fix` stage
+  // routes escalation. 'infra': the check could not RUN -- the vision model stayed rate-limited/429
+  // past its own backoff (visual-qa.ts), or a site's install/build/serve died on a transient fault
+  // (serve-and-gate.ts's `heavy-serve`). Both are the same fact: no verdict, for a reason outside
+  // the diff. Nothing downstream may assume the rate-limit case; quote the check's own message. No code edit clears a 429, so a `fix` stage
   // is useless, but a re-run might reach a verdict: the dispatch path re-runs the gate on the
   // shared `fix.maxBuildRetries` infra budget and the blocking fix loop grants one gate-only retry,
   // and only a fault outliving that reaches a human. 'content': the judge RAN but reached no
