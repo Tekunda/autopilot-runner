@@ -288,11 +288,20 @@ export function createStructureGate(): Gate {
       // so the gate's only real assertion did not run at all. A tenant who configures
       // `testFileExtensions: ['.sh']` would otherwise get a permanent green from a check that
       // cannot fire -- this file's own defect, reintroduced through config.
+      //
+      // `unjudgeable-language`, NOT `invalid-config`: this branch is decided by the DIFF
+      // (`selected`/`scannable` are both derived from ctx.changedFiles), so a polyglot tenant
+      // configured `['.ts', '.sh']` lands here on a .sh-only PR and judges the very next .ts PR
+      // normally, with nothing edited. `invalid-config` promises the control plane a permanent,
+      // config-determined fault (gates/types.ts), and claiming it here made the ledger tell an
+      // operator that a working gate had "stopped enforcing" on every .sh-only promotion. Still
+      // non-benign, so #358's intent is intact: excluded from coverage, and a gate that NEVER
+      // gets a judgeable file still raises gate_never_fired.
       if (selected.length > 0 && scannable.length === 0) {
         return {
           id: 'structure',
           status: 'skip',
-          skipReason: 'invalid-config',
+          skipReason: 'unjudgeable-language',
           findings: [
             `structure selected ${selected.length} test file(s) (${unsupported.slice(0, 5).join(', ')}) but the ` +
               `false-green-test check has no patterns for that language, so it asserted nothing. Point ` +

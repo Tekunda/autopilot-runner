@@ -22,16 +22,15 @@
 //     config, not in the diff.
 //
 //     This was a `skip` in the first cut of this change, on the reasoning that the
-//     never-fired ledger would raise it. It does not, and that must not be re-attempted: for
-//     any gate that has EVER produced a real verdict on the branch -- which is precisely
-//     every tenant carrying this defect, since the gate has been reporting `pass` for months
-//     -- `lastRealVerdictAt` is sticky forever (gate-verdict-ledger recordVerdicts keeps the
-//     prior stamp across a skip), so promotion.ts short-circuits before `gate_never_fired`,
-//     re-adds the gate to the regression set before the coverage diff, and `toCheckStatus`
-//     maps the skip to `pending` rather than a failure. Every alarm is silent, the finding
-//     renders nowhere (fix-loop and deploy-watch render findings only for `fail`), and the
-//     gate becomes a silent no-op instead of an escalation. Converting a false green into a
-//     silent no-op is not a fix.
+//     never-fired ledger would raise it, and that must not be re-attempted. A skip here is
+//     STILL not an escalation: `toCheckStatus` maps it to `pending` rather than a failure, so
+//     the finding renders nowhere (fix-loop and deploy-watch render findings only for `fail`)
+//     and the gate becomes a silent no-op. Converting a false green into a silent no-op is not
+//     a fix. The ledger's reach has since grown -- a skip tagged `invalid-config` now alarms
+//     (`gate_config_invalidated`) and drops out of the regression set even for a gate with a
+//     long verdict history (#3794), where before `lastRealVerdictAt` being sticky forever
+//     silenced every signal -- but an operator alarm on a merged promotion is a different thing
+//     from blocking the PR that broke it, which is what this defect needs.
 //
 //   - The dirs exist but this diff touched none of them (a docs-only PR) -> `skip` +
 //     `no-matching-route`. Honest for one PR, and the non-benign reason keeps it out of the

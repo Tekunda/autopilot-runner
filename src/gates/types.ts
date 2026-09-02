@@ -46,12 +46,28 @@ export interface GateContext {
 // indistinguishable from a pass (the exact hole that let a perpetual-skip `layout-rules` be flipped
 // to blocking though it never produced a verdict). The reason drives escalation: `no-config`/
 // `disabled` are benign (the gate has nothing to do), while a gate WITH rules that skips every time
-// (`no-matching-route`/`no-baseurl`) is a diagnosable misconfiguration worth surfacing. `invalid-config`
-// is a rule set that WAS declared but parsed to nothing (every entry malformed) -- a typo'd config
-// that would otherwise masquerade as a benign `no-config` no-op forever, so it is suspicious too.
+// (`no-matching-route`/`no-baseurl`/`unjudgeable-language`) is a diagnosable misconfiguration worth
+// surfacing, so those are suspicious rather than benign.
+//
+// `invalid-config` CARRIES A STRONGER CLAIM THAN THE REST, and a producer must earn it: the gate's
+// declared config parsed to nothing, so the gate cannot run on THIS promotion or any later one
+// until a human edits the config. The control plane reads that permanence (control-plane/
+// gate-verdict-ledger.ts classifies it `config-invalid`) and will say so to an operator even for a
+// gate with a long verdict history, because history is not evidence a gate with unusable config
+// still gates. So `invalid-config` may only be returned from a decision made on CONFIG ALONE.
+// A skip that depends on the DIFF -- "this PR's files happen to be ones I can't judge" -- is not
+// permanent, recurs whenever the diff swings back, and must use a diff-scoped reason instead
+// (`no-matching-route`, `unjudgeable-language`). Overloading `invalid-config` for a diff-conditional
+// skip makes the control plane assert a config fault that is not there, on every such PR.
 export type SkipReason =
   | 'no-baseurl'
   | 'no-matching-route'
+  // The diff DID select files for this gate, but they are all in a language/format the gate's
+  // checker has no patterns for, so it asserted nothing on this PR. Diff-scoped, NOT a config
+  // verdict: the same config judges the next diff fine (see `invalid-config` above). Non-benign,
+  // so it still stays out of the coverage record and still raises `gate_never_fired` for a gate
+  // that NEVER produces a verdict.
+  | 'unjudgeable-language'
   | 'no-config'
   | 'invalid-config'
   | 'disabled'
