@@ -381,18 +381,26 @@ export interface VCSHost {
   // a review summary with no inline comments has no thread to resolve, so a reply is the only
   // acknowledgement. Best-effort.
   replyToPr(repoId: string, prNumber: number, body: string): Promise<void>;
-  // Publish a REVIEW on a PR: a summary body plus per-file inline comments. This is the
-  // emitting half of the feedback loop the pipeline already consumes -- listPrFeedback reads
-  // other people's reviews and dispatches fixes for them, but Autopilot's own findings had
-  // nowhere to go except the tracker and a check summary, so a maintainer never saw them
-  // against the code. Comments whose anchor no longer exists in the diff are rejected by the
-  // host, so callers should treat a failure as best-effort and keep the summary body
-  // authoritative. Optional: a host without PR reviews simply never gets them.
-  createReview?(
-    repoId: string,
-    prNumber: number,
-    review: { body: string; comments?: { path: string; line: number; body: string }[] },
-  ): Promise<void>;
+  // Publish a REVIEW on a PR: a summary body, and ONLY a summary body. This is the emitting half
+  // of the feedback loop the pipeline already consumes -- listPrFeedback reads other people's
+  // reviews and dispatches fixes for them, but Autopilot's own findings had nowhere to go except
+  // the tracker and a check summary, so a maintainer never saw them against the code.
+  //
+  // There is deliberately NO way to attach per-file inline comments. The signature is most of the
+  // enforcement, not all of it: a direct call with an extra `comments` key is an excess-property
+  // error, but a call routed through `Function.call` -- which both production call sites use, to
+  // narrow this optional member first -- is NOT checked, so the shape is also asserted on the
+  // recorded payload in pr-ops.test.ts. A host turns an inline review comment into an unresolved review THREAD, and an
+  // unresolved thread is the fact unresolvedThreadAuthors HOLDS the promotion merge on. That hold
+  // does not consult the self-marker (by design, #410: a reviewer who quotes our marker must not
+  // be able to drop their own P1 from it), while the fix dispatch and the ack resolve both do --
+  // so a thread opened under Autopilot's own identity holds its own promotion forever, dispatches
+  // no fix, never escalates, and can never be resolved. Findings carry their `file:line` in the
+  // summary body instead (see reviewFindingsBody). Re-adding a `comments` field here is not a
+  // feature; it is that wedge.
+  //
+  // Optional: a host without PR reviews simply never gets them.
+  createReview?(repoId: string, prNumber: number, review: { body: string }): Promise<void>;
   // The TAIL of a FAILED CI check's log -- the diagnostic evidence a fixer needs when
   // name/conclusion alone rarely say what broke (Track F red-check self-heal).
   // Split-plane contract: log TEXT is diagnostic evidence, not source code and not a diff,

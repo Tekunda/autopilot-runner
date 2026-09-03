@@ -74,11 +74,16 @@ export interface GatePolicy {
   reviewBlockingSeverities?: string[];
   // Publish each terminal review round's OUTCOME onto the ticket's promotion PR as a real PR
   // review: a per-lens section (every enabled lens's pass/advisory/blocking result and its
-  // findings at all severities, or an explicit all-clear), an aggregate line, and inline
-  // comments on the file/line each finding names. Records a green round too, not just a
+  // findings at all severities, or an explicit all-clear), an aggregate line, and a summary
+  // table carrying the file/line each finding names. Records a green round too, not just a
   // blocking one, so the review is auditable on the PR and not only via the check summary.
   // Per-tenant like every other gate field. Optional; defaults to TRUE (opt-out) -- a tenant
   // that reviews solely in the tracker sets it false to keep the bot off its PR conversation.
+  //
+  // The review SUMMARY only -- never an inline comment. GitHub turns an inline comment into an
+  // unresolved review THREAD, and an unresolved thread is what holds the promotion merge, so
+  // one opened under Autopilot's own identity wedges the promotion it is driving. See
+  // publishFindingsToPr.
   publishReviewFindingsToPr?: boolean;
   // When the bounded repair loop is spent, REPLAN instead of blocking for a human: discard
   // the recorded plan and re-architect with every finding forwarded into the ticket, so the

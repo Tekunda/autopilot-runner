@@ -1202,29 +1202,17 @@ export class GitHubVCSHost implements VCSHost {
   // COMMENT, never REQUEST_CHANGES: a request-changes review from the app would block the
   // very merge this pipeline is driving, and on a repo requiring review dismissal it needs a
   // human to clear it -- the opposite of surfacing findings for the fixer. The severity is
-  // already carried in each comment's text and in the `Autopilot / review` check.
-  async createReview(
-    repoId: string,
-    prNumber: number,
-    review: { body: string; comments?: { path: string; line: number; body: string }[] },
-  ): Promise<void> {
-    // Inline comments are posted in one review so they land as a single conversation rather
-    // than N notifications. GitHub rejects the WHOLE review if any anchor is outside the
-    // diff, so retry bodyless on failure: the summary is what must not be lost.
-    const comments = (review.comments ?? []).map((c) => ({ path: c.path, line: c.line, body: c.body }));
-    try {
-      await this.client.request('POST', `/repos/${repoId}/pulls/${prNumber}/reviews`, {
-        body: review.body,
-        event: 'COMMENT',
-        ...(comments.length ? { comments } : {}),
-      });
-    } catch (err) {
-      if (!comments.length) throw err;
-      await this.client.request('POST', `/repos/${repoId}/pulls/${prNumber}/reviews`, {
-        body: review.body,
-        event: 'COMMENT',
-      });
-    }
+  // already carried in the summary body and in the `Autopilot / review` check.
+  // The summary body only. This posts no `comments` array, so GitHub opens no review thread --
+  // see VCSHost.createReview for why an inline comment from this identity wedges the promotion
+  // it is reviewing. The retry that used to re-post without comments when GitHub rejected an
+  // out-of-diff anchor went with them: with nothing to anchor there is nothing to reject, so a
+  // failure here is a real failure and is left to the caller's best-effort catch.
+  async createReview(repoId: string, prNumber: number, review: { body: string }): Promise<void> {
+    await this.client.request('POST', `/repos/${repoId}/pulls/${prNumber}/reviews`, {
+      body: review.body,
+      event: 'COMMENT',
+    });
   }
 
   // Resolves a failing check's job-log evidence. The name-based lookup on the head
