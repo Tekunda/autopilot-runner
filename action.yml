@@ -38,7 +38,20 @@ outputs:
 runs:
   using: 'composite'
   steps:
-    - uses: actions/setup-node@v4
+    # EVERY third-party action below is pinned to an immutable commit SHA, with the tag it was cut
+    # from in a trailing comment so the pin stays auditable and upgradable by a human.
+    #
+    # Why: this action runs inside the CUSTOMER's repository, holding the customer's model
+    # credential and (for coding stages) a PAT with write access. A floating `@v4` / `@v1` tag is a
+    # mutable pointer somebody else controls -- whoever can move that tag can run code on every
+    # tenant at once, and nothing in this file would change. A SHA cannot be moved. Upgrading is a
+    # deliberate edit here, reviewed like any other, and the tag comment is what makes "which
+    # version is this?" answerable without a GitHub round-trip.
+    #
+    # The runner's OWN reference (Tekunda/autopilot-runner@v1 in .github/workflows/runner.yml) is
+    # deliberately NOT a SHA: tenants must keep receiving fixes without editing their workflow. That
+    # moving tag is protected on our side instead -- see docs/deploy.md, "Runner release trust".
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
       with:
         node-version: 24
 
@@ -94,7 +107,7 @@ runs:
     # run real tooling against the checked-out tree, not just diff metadata.
     - name: Checkout customer repo
       if: steps.prepare.outputs.resolved == 'false' || steps.parse-grant.outputs.stage == 'gate'
-      uses: actions/checkout@v7
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         # Full history: computeChangedFiles three-dot-diffs HEAD against the base, which
         # needs the merge-base -- unreachable from a default depth-1 checkout.
@@ -108,6 +121,21 @@ runs:
         # persisted broad PAT is trivially readable (`cat .git/config`) and exfiltratable. A
         # non-coding checkout resolves stage-kind != 'coding' (empty for the gate stage, which
         # never pushes), so persist-credentials is false there.
+        #
+        # WHAT THIS DOES *NOT* DO, so nobody reads more into it than it earns: the vendor action
+        # RE-ADDS a credential. claude-code-action's agent mode calls configureGitAuth ->
+        # replaceCheckoutCredentials(), writing its own token into the checkout's git config on
+        # every agent stage. So wiping the PAT here does not leave a judgment stage
+        # credential-free -- and `accept`, the one non-coding stage that keeps Bash
+        # (prepare-stage.ts baseAllowedTools), can read that token back out of the tree.
+        #
+        # This is still strictly better than the alternative: the token the vendor writes is the
+        # one we hand it (see the `github_token` note below), scoped to this job's two
+        # permissions, rather than the OIDC-minted app token carrying issues:write that it would
+        # mint for itself. The load-bearing control for a stage holding attacker-influenceable
+        # text remains the least-privilege TOOL set, not this flag -- and it is only for
+        # `architect`, which has neither Bash nor network egress, that the credential-theft
+        # channel is closed outright.
         persist-credentials: ${{ steps.prepare.outputs.stage-kind == 'coding' }}
 
     # The checkout's HEAD before the vendor agent touches anything. The `fix` stage's finalize
@@ -144,7 +172,11 @@ runs:
         if [ "$(node src/runner/corepack-guard.ts)" = "enable" ]; then
           corepack enable || true
         fi
-        npm install playwright@1 --no-save
+        # PINNED, exactly like every `uses:` above: `playwright@1` resolved to whatever the latest
+        # 1.x was at run time, so two runs of the same grant could provision different browser
+        # tooling, and a bad publish reached every tenant's heavy gate on its own schedule. Bump
+        # this deliberately. `npx playwright` then resolves the version just installed.
+        npm install playwright@1.62.1 --no-save
         npx playwright install --with-deps chromium
 
     # Runs only for a `gate` stage grant: verifies the grant, builds a GateContext from the
@@ -185,7 +217,7 @@ runs:
     # file a skip, not an error.
     - name: Upload gate report
       if: always() && steps.parse-grant.outputs.stage == 'gate'
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
       with:
         name: gate-report
         path: gate-report.json
@@ -211,19 +243,37 @@ runs:
     - name: Run with claude-code-action
       id: claude
       if: steps.prepare.outputs.resolved == 'false' && fromJSON(inputs.coding-executor-config).provider == 'claude-code'
-      uses: anthropics/claude-code-action@v1
+      uses: anthropics/claude-code-action@fa2b2666b747000bf42767d1f332065b375e3c8f # v1.0.214
       with:
         claude_code_oauth_token: ${{ fromJSON(inputs.coding-executor-config).oauthToken || '' }}
         anthropic_api_key: ${{ fromJSON(inputs.coding-executor-config).apiKey || '' }}
         # Only the coding stage (which pushes) receives the customer PAT. Every read-only /
-        # judgment stage gets an EMPTY token: it touches no GitHub API, only the local checkout
-        # and plan.json, so it needs no repo credential -- and withholding it removes the token
-        # from a stage whose prompt carries attacker-influenceable ticket text. claude-code-action
-        # tolerates an empty github_token (its action.yml declares the input `required: false`
-        # and falls back to the ambient `github.token`), so the non-coding stages still function.
-        # NOTE (P4 follow-on): the ideal is a minted, read-only, repo-scoped token here rather
-        # than empty; tracked as the recommended next step.
-        github_token: ${{ steps.prepare.outputs.stage-kind == 'coding' && fromJSON(inputs.vcs-host-config).token || '' }}
+        # judgment stage gets the AMBIENT job token instead: it touches no GitHub API, only the
+        # local checkout and plan.json, so it needs no broad credential -- and withholding the PAT
+        # keeps it out of a stage whose prompt carries attacker-influenceable ticket text. The
+        # ambient token is scoped to exactly the two permissions runner.yml declares
+        # (contents: write, pull-requests: write) and dies with the job.
+        #
+        # It is NOT `''`, and the comment that used to sit here claiming claude-code-action
+        # "tolerates an empty github_token and falls back to the ambient github.token" was WRONG in
+        # the way that matters. Read the pinned vendor source: its action.yml sets
+        # `OVERRIDE_GITHUB_TOKEN: ${{ inputs.github_token }}` with no fallback, and
+        # src/github/token.ts setupGitHubToken() does `if (providedToken) { return }` then falls
+        # straight through to getOidcToken(), which THROWS
+        # "Could not fetch an OIDC token. Did you remember to add `id-token: write`". An empty
+        # string is falsy, so every non-coding stage would have taken the OIDC path. The
+        # `inputs.github_token || github.token` fallbacks in that action exist only in its
+        # setup-bun checkout and cleanup steps, not on this path.
+        #
+        # So passing a real token here is what lets `id-token: write` be dropped from runner.yml.
+        # The alternative -- letting the vendor mint an App token over OIDC -- is strictly worse:
+        # it grants contents+pull_requests+ISSUES write, minted through a third-party exchange
+        # endpoint, to the stage we least want holding credentials.
+        #
+        # NOTE (follow-on): the ideal is still a read-only token for judgment stages. Job-level
+        # `permissions:` cannot express that, since one job runs every stage kind -- it needs the
+        # runner workflow split per stage kind, which is a tenant-template change.
+        github_token: ${{ steps.prepare.outputs.stage-kind == 'coding' && fromJSON(inputs.vcs-host-config).token || github.token }}
         allowed_bots: 'delivery-autopilot'
         prompt: ${{ steps.prepare.outputs.prompt }}
         base_branch: ${{ steps.prepare.outputs.base-ref }}
@@ -267,7 +317,7 @@ runs:
     - name: Run with codex-action
       id: codex
       if: steps.prepare.outputs.resolved == 'false' && fromJSON(inputs.coding-executor-config).provider == 'codex'
-      uses: openai/codex-action@v1
+      uses: openai/codex-action@86365089eb2b84e0a8fb0717b304f8bdcb13b20e # v1.12
       with:
         openai-api-key: ${{ fromJSON(inputs.coding-executor-config).apiKey }}
         responses-api-endpoint: ${{ fromJSON(inputs.coding-executor-config).responsesApiEndpoint || '' }}
@@ -287,7 +337,7 @@ runs:
     # plan uploads nothing, which surfaces as a failed decomposition that blocks the ticket.
     - name: Upload architect plan
       if: steps.prepare.outputs.stage-kind == 'architect'
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
       with:
         name: plan
         path: plan.json
@@ -309,6 +359,11 @@ runs:
         # github-actions[bot] -- valid on any repo, never claude.
         COMMITTER_NAME: ${{ steps.prepare.outputs.committer-name || 'github-actions[bot]' }}
         COMMITTER_EMAIL: ${{ steps.prepare.outputs.committer-email || '41898282+github-actions[bot]@users.noreply.github.com' }}
+        # The revision this checkout was at BEFORE the agent ran. The conflict-marker scan below
+        # diffs the index against it so it judges only what THIS STAGE staged -- `git add -A` makes
+        # the index the whole tree, and an unscoped scan would refuse the push for any file already
+        # committed in the customer's repo that happens to document a merge conflict.
+        PRE_AGENT_SHA: ${{ steps.pre-agent.outputs.sha }}
       run: |
         git config user.name "$COMMITTER_NAME"
         git config user.email "$COMMITTER_EMAIL"
@@ -318,6 +373,15 @@ runs:
         # else; the finalize step reads it out of the working tree and reports it as the round's
         # verdict, so it must never become a commit -- "changed nothing" has to mean nothing.
         git add -A -- . ':(exclude)autopilot-fix-dispute.json'
+        # REFUSE A HALF-RESOLVED MERGE (src/runner/conflict-markers.ts). `git add -A` will happily
+        # stage a file still carrying `<<<<<<< HEAD`, and the commit + force-push below would put
+        # literal markers into the branch and the PR diff. The scan reads the INDEX -- exactly what
+        # is about to be committed -- restricted to the paths this stage staged since
+        # $PRE_AGENT_SHA, so a pre-existing file in the customer's repo that documents a conflict is
+        # never judged. It is TypeScript, not bash inlined here, so it is unit tested and so the
+        # failure can name every offending file and line. Non-zero exit fails this step
+        # (bash -eo pipefail), and nothing below it runs.
+        AUTOPILOT_PRE_AGENT_SHA="$PRE_AGENT_SHA" node "${{ github.action_path }}/src/runner/conflict-markers.ts"
         if ! git diff --cached --quiet; then
           git commit -m "Delivery Autopilot: $STAGE"
         fi
@@ -378,7 +442,7 @@ runs:
     # control plane.
     - name: Upload fix report
       if: always() && steps.parse-grant.outputs.stage == 'fix'
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
       with:
         name: fix-report
         path: fix-report.json

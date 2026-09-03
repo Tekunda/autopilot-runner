@@ -313,6 +313,19 @@ export type ExecutionGrant = {
   // unconsumed id. Absent on legacy grants, which still verify; they fall back to
   // sha256(sig), the same stable telemetry id both planes already derive.
   jti?: string;
+  // Which signing key signed this grant: grantKeyId() of the key's public half
+  // (control-plane/grant-verify.ts). Part of the signed payload like everything else, so it
+  // cannot be re-pointed at a different trusted key without breaking the signature -- and it is
+  // a SELECTOR, not a credential: it says which key should check the signature, never that the
+  // grant is authorized.
+  //
+  // Two things depend on it. Per-TENANT keys: every tenant's grants are signed with that
+  // tenant's own key, so a grant that escaped one customer's logs cannot verify in another's
+  // repository at all. And ROTATION: while a tenant's verify secret holds both the outgoing and
+  // incoming public keys, the keyId picks the right one immediately, so a grant signed by a key
+  // the repo was never given reports exactly that instead of a bare "invalid signature".
+  // Absent on legacy grants, which still verify against every configured key.
+  keyId?: string;
   // The branch a coding stage (build/fix) must base its work on and open its PR
   // against -- set server-side to the ticket's integration branch so subtask
   // work never targets the customer's live default branch directly. The only

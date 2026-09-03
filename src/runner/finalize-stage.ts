@@ -16,7 +16,7 @@ import type { CodingExecutor } from '../contracts/adapters.ts';
 import type { VCSHost } from '../contracts/adapters.ts';
 import type { CheckResult, ExecutionGrant, FixVerdict, StatusTelemetry } from '../contracts/types.ts';
 import { GrantLedger } from '../control-plane/grant-ledger.ts';
-import { verifyGrant, type KeyInput } from '../control-plane/grant-verify.ts';
+import { verifyGrant, type GrantEnvironment, type KeyInput } from '../control-plane/grant-verify.ts';
 import { buildFixVerdict } from './fix-verdict.ts';
 import { codingBranchName, DEFAULT_BASE_REF, digestFor, grantId, rejectedTelemetry } from './prepare-stage.ts';
 
@@ -25,8 +25,14 @@ export interface FinalizeStageDeps {
   vcsHost: VCSHost;
   /** Customer repository's default branch, supplied by the runner workflow. */
   baseRef?: string;
-  /** Public key used to verify the grant's signature. */
-  verifyKey: KeyInput;
+  /** Public key(s) used to verify the grant's signature -- a list during a key rotation. */
+  verifyKey: KeyInput | readonly KeyInput[];
+  /**
+   * The environment this run is executing in (repository slug, tenant), checked against the
+   * grant's SIGNED tenantId/repoId. Threaded in as data by action-entry.ts so verification stays
+   * a pure function. Absent -> unbound.
+   */
+  environment?: GrantEnvironment;
   /**
    * Consume ledger for replay detection (Track G): once a grant verifies, its
    * consumption is recorded here, so finalizing the SAME issued grant again in this
@@ -122,9 +128,9 @@ export interface ActionOutcome {
 export function finalizeJudgmentStage(
   grant: ExecutionGrant,
   outcome: ActionOutcome,
-  deps: Pick<FinalizeStageDeps, 'verifyKey' | 'now' | 'grantLedger'>,
+  deps: Pick<FinalizeStageDeps, 'verifyKey' | 'environment' | 'now' | 'grantLedger'>,
 ): StatusTelemetry {
-  const verification = verifyGrant(grant, deps.verifyKey, deps.now ?? new Date());
+  const verification = verifyGrant(grant, deps.verifyKey, deps.now ?? new Date(), deps.environment);
   if (!verification.ok) return rejectedTelemetry(grant, verification.reason);
   deps.grantLedger?.markConsumed(grant, `${grant.stage}:${grant.ticketId}`);
 
@@ -191,7 +197,7 @@ export async function finalizeCodingStage(
   outcome: ActionOutcome,
   deps: FinalizeStageDeps,
 ): Promise<StatusTelemetry> {
-  const verification = verifyGrant(grant, deps.verifyKey, deps.now ?? new Date());
+  const verification = verifyGrant(grant, deps.verifyKey, deps.now ?? new Date(), deps.environment);
   if (!verification.ok) {
     return rejectedTelemetry(grant, verification.reason);
   }

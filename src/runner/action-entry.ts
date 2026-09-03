@@ -24,32 +24,39 @@ import {
 } from './adapters.ts';
 import type { GateRegistry } from '../gates/registry.ts';
 import { GrantLedger } from '../control-plane/grant-ledger.ts';
-import { verifyGrant } from '../control-plane/grant-verify.ts';
+import { parseVerifyKeys, verifyGrant, type GrantEnvironment } from '../control-plane/grant-verify.ts';
 import { finalizeCodingStage, finalizeJudgmentStage, type ActionOutcome } from './finalize-stage.ts';
 import { FIX_REPORT_FILE } from './fix-verdict.ts';
 import { createRunnerGateRegistry } from './gate-registry.ts';
 import { CODING_STAGES, computeChangedFiles, DEFAULT_BASE_REF, prepareStage, rejectedTelemetry, type PreparedStage } from './prepare-stage.ts';
-import { resolveClaimSha, tryClaimGrant, type ClaimEmitter } from './replay-claim.ts';
+import { isDirectlyExecuted } from './entrypoint.ts';
+import { claimRejection, resolveClaimSha, tryClaimGrant, type ClaimEmitter } from './replay-claim.ts';
 import { runGateStage, type GateTarget } from './run-gate-stage.ts';
 import { runHeavyGateStage } from './serve-and-gate.ts';
 
 export class ActionInputError extends Error {}
 
+// Fields every mode carries. `verifyKey` is the raw `verify-key` input, which may hold SEVERAL
+// concatenated PEM blocks during a signing-key rotation (grant-verify.ts parseVerifyKeys).
+// `environment` is what the grant is BOUND to: read from the Actions env here, in the one place
+// that touches process.env, and threaded down as data so every verification stays pure.
+interface CommonInputs {
+  grant: ExecutionGrant;
+  verifyKey: string;
+  environment?: GrantEnvironment;
+}
+
 export type ActionInputs =
-  | {
+  | (CommonInputs & {
       mode: 'prepare';
-      grant: ExecutionGrant;
-      verifyKey: string;
       baseRef: string;
       codingExecutor: CodingExecutorConfig;
       // The VCS host config for the durable replay claim placed before the vendor step. Optional:
       // absent -> no claim (the run proceeds unchanged, without replay prevention).
       vcsHost?: VCSHostConfig;
-    }
-  | {
+    })
+  | (CommonInputs & {
       mode: 'finalize';
-      grant: ExecutionGrant;
-      verifyKey: string;
       baseRef: string;
       codingExecutor: CodingExecutorConfig;
       vcsHost: VCSHostConfig;
@@ -60,7 +67,7 @@ export type ActionInputs =
       // fix's own commit. Optional so a direct/test invocation without it still runs (the scan
       // then reports that it could not run, which is the fail-safe direction).
       preAgentSha?: string;
-    }
+    })
   // `gate` runs the fast deterministic gates against the PR checkout only. `heavy-gate` runs the
   // dedicated browser/server-capable stage (docs/ci-gate-refit-plan.md §5): it builds + serves the
   // site, threads the served base URL into the URL-bound gates, runs the heavy gates (SEO crawl,
@@ -68,25 +75,21 @@ export type ActionInputs =
   // toolchain/browser only for `heavy-gate`. Kept as two single-literal variants (not one
   // `'gate' | 'heavy-gate'` member) so the discriminated-union narrowing in runActionEntry stays
   // clean.
-  | {
+  | (CommonInputs & {
       mode: 'gate';
-      grant: ExecutionGrant;
-      verifyKey: string;
       vcsHost: VCSHostConfig;
       target: GateTarget;
       // The tenant's executor config, forwarded so the heavy stage can derive the vision judge's
       // credential from it (the SAME one the reviewer/architect steps use). Optional: the fast
       // gate path never calls a model, and a malformed value must not break deterministic gates.
       codingExecutor?: CodingExecutorConfig;
-    }
-  | {
+    })
+  | (CommonInputs & {
       mode: 'heavy-gate';
-      grant: ExecutionGrant;
-      verifyKey: string;
       vcsHost: VCSHostConfig;
       target: GateTarget;
       codingExecutor?: CodingExecutorConfig;
-    };
+    });
 
 function requireEnv(env: NodeJS.ProcessEnv, name: string): string {
   const value = env[name];
@@ -103,18 +106,38 @@ function requireJsonEnv<T>(env: NodeJS.ProcessEnv, name: string): T {
   }
 }
 
+// What the grant is checked against: the repository this workflow is actually running in, and
+// (when the tenant workflow declares one) the tenant it belongs to. GITHUB_REPOSITORY is set by
+// the Actions runner itself and is not forgeable from the dispatch inputs an attacker controls,
+// which is exactly why it is the right thing to compare the SIGNED repoId to.
+//
+// THIS is the only function in the runner that reads the environment for verification. Everything
+// downstream receives a GrantEnvironment value, so verifyGrant stays pure and every binding case
+// is testable without mutating process.env.
+//
+// AUTOPILOT_TENANT_ID is optional and belongs to the tenant's own workflow; absent, the tenant
+// binding is carried implicitly by the per-tenant signing key instead
+// (control-plane/tenant-signing-key.ts).
+export function runnerEnvironment(env: NodeJS.ProcessEnv = process.env): GrantEnvironment | undefined {
+  const repository = env.GITHUB_REPOSITORY?.trim();
+  const tenantId = env.AUTOPILOT_TENANT_ID?.trim();
+  if (!repository && !tenantId) return undefined; // not in Actions (local/test) -- unbound, as before
+  return { ...(repository ? { repository } : {}), ...(tenantId ? { tenantId } : {}) };
+}
+
 // GitHub Actions exposes action inputs as `INPUT_<NAME>` env vars: uppercased, with
 // hyphens preserved — so input "verify-key" becomes env "INPUT_VERIFY-KEY".
 export function parseInputs(env: NodeJS.ProcessEnv = process.env): ActionInputs {
   const mode = requireEnv(env, 'INPUT_MODE');
   const grant = requireJsonEnv<ExecutionGrant>(env, 'INPUT_GRANT');
   const verifyKey = requireEnv(env, 'INPUT_VERIFY-KEY');
+  const environment = runnerEnvironment(env);
+  const common = { grant, verifyKey, ...(environment ? { environment } : {}) };
 
   if (mode === 'prepare') {
     return {
+      ...common,
       mode,
-      grant,
-      verifyKey,
       baseRef: env['INPUT_BASE-REF'] || DEFAULT_BASE_REF,
       codingExecutor: requireJsonEnv<CodingExecutorConfig>(env, 'INPUT_CODING-EXECUTOR-CONFIG'),
       ...(env['INPUT_VCS-HOST-CONFIG']
@@ -125,9 +148,8 @@ export function parseInputs(env: NodeJS.ProcessEnv = process.env): ActionInputs 
 
   if (mode === 'finalize') {
     return {
+      ...common,
       mode,
-      grant,
-      verifyKey,
       baseRef: env['INPUT_BASE-REF'] || DEFAULT_BASE_REF,
       codingExecutor: requireJsonEnv<CodingExecutorConfig>(env, 'INPUT_CODING-EXECUTOR-CONFIG'),
       vcsHost: requireJsonEnv<VCSHostConfig>(env, 'INPUT_VCS-HOST-CONFIG'),
@@ -138,9 +160,8 @@ export function parseInputs(env: NodeJS.ProcessEnv = process.env): ActionInputs 
 
   if (mode === 'gate' || mode === 'heavy-gate') {
     return {
+      ...common,
       mode,
-      grant,
-      verifyKey,
       vcsHost: requireJsonEnv<VCSHostConfig>(env, 'INPUT_VCS-HOST-CONFIG'),
       target: requireJsonEnv<GateTarget>(env, 'INPUT_GATE-TARGET'),
       ...(env['INPUT_CODING-EXECUTOR-CONFIG']
@@ -192,18 +213,23 @@ function resolvedTelemetry(result: ActionResult): StatusTelemetry | undefined {
 // Verify the grant and run the requested phase. Adapter construction is injectable so
 // tests can run against fakes instead of live credentials.
 export async function runActionEntry(inputs: ActionInputs, deps: RunActionDeps = {}): Promise<ActionResult> {
+  // One `verify-key` input, one or more keys: a rotation puts both PEM blocks in the tenant's
+  // secret and every grant signed by either half keeps verifying (grant-verify.ts parseVerifyKeys).
+  const verifyKey = parseVerifyKeys(inputs.verifyKey);
+  const environment = inputs.environment;
+
   if (inputs.mode === 'gate' || inputs.mode === 'heavy-gate') {
     const vcsHost = deps.vcsHost ?? createVCSHost(inputs.vcsHost);
     // Durable replay claim for the gate stage: verify the signature, then atomically claim the
     // grant before running (and publishing) any gate. A replayed gate grant re-dispatched into a
     // fresh job would otherwise re-publish a stale verdict; the claim rejects it here. runGateStage
     // verifies again harmlessly. Fail-open on any non-definitive claim outcome (see replay-claim.ts).
-    const gateVerification = verifyGrant(inputs.grant, inputs.verifyKey, deps.now ?? new Date());
+    const gateVerification = verifyGrant(inputs.grant, verifyKey, deps.now ?? new Date(), environment);
     if (gateVerification.ok) {
       const sha = await resolveClaimSha(inputs.grant, vcsHost, inputs.target.branch || inputs.target.baseRef);
       const claim = await tryClaimGrant(inputs.grant, vcsHost, sha, deps.emitClaimEvent);
-      if (claim.status === 'replayed') {
-        return { mode: 'gate', telemetry: rejectedTelemetry(inputs.grant, 'replayed grant') };
+      if (claim.status !== 'claimed' && claim.status !== 'unavailable') {
+        return { mode: 'gate', telemetry: rejectedTelemetry(inputs.grant, claimRejection(claim)) };
       }
     }
     const registry = deps.gateRegistry ?? createRunnerGateRegistry();
@@ -212,7 +238,8 @@ export async function runActionEntry(inputs: ActionInputs, deps: RunActionDeps =
       registry,
       target: inputs.target,
       workspaceRoot: workspaceRoot(),
-      verifyKey: inputs.verifyKey,
+      verifyKey,
+      ...(environment ? { environment } : {}),
       now: deps.now,
     };
     // The heavy stage wraps the same gate execution with build/serve/teardown around it, so a
@@ -235,7 +262,8 @@ export async function runActionEntry(inputs: ActionInputs, deps: RunActionDeps =
     const prepared = await prepareStage(inputs.grant, {
       codingExecutor,
       baseRef: inputs.baseRef,
-      verifyKey: inputs.verifyKey,
+      verifyKey,
+      ...(environment ? { environment } : {}),
       executorProvider: inputs.codingExecutor.provider,
       ...('model' in inputs.codingExecutor && inputs.codingExecutor.model
         ? { configuredModel: inputs.codingExecutor.model }
@@ -254,7 +282,8 @@ export async function runActionEntry(inputs: ActionInputs, deps: RunActionDeps =
         codingExecutor,
         vcsHost: deps.vcsHost ?? createVCSHost(inputs.vcsHost),
         baseRef: inputs.baseRef,
-        verifyKey: inputs.verifyKey,
+        verifyKey,
+        ...(environment ? { environment } : {}),
         grantLedger: deps.grantLedger ?? processGrantLedger,
         // The customer tree, not the action copy: the finalize step runs with
         // working-directory ${{ github.action_path }}, which has no .git and none of the
@@ -264,7 +293,8 @@ export async function runActionEntry(inputs: ActionInputs, deps: RunActionDeps =
         now: deps.now,
       })
     : finalizeJudgmentStage(inputs.grant, inputs.actionOutcome, {
-        verifyKey: inputs.verifyKey,
+        verifyKey,
+        ...(environment ? { environment } : {}),
         grantLedger: deps.grantLedger ?? processGrantLedger,
         now: deps.now,
       });
@@ -387,16 +417,6 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Gate mode (fast or heavy): compute the changed-file scope from this checkout. The dispatch
-  // input carries only prNumber/branch/baseRef routing data, so a large PR's changed paths
-  // (~12KB) never ride through it -- the list is computed where the tree lives.
-  if (inputs.mode === 'gate' || inputs.mode === 'heavy-gate') {
-    inputs = {
-      ...inputs,
-      target: { ...inputs.target, changedFiles: await computeChangedFiles(inputs.target.baseRef, workspaceRoot()) },
-    };
-  }
-
   // Defense-in-depth (independent of serve-and-gate.ts's own per-site catch): ANY unexpected
   // throw out of runActionEntry must still land as reported telemetry, not an unhandled
   // rejection that silently vanishes with zero logs and no gate-report.json -- the exact crash
@@ -407,6 +427,22 @@ async function main(): Promise<void> {
   // burns the whole fix-round budget on a crash no edit can diagnose.
   let result: ActionResult;
   try {
+    // Gate mode (fast or heavy): compute the changed-file scope from this checkout. The dispatch
+    // input carries only prNumber/branch/baseRef routing data, so a large PR's changed paths
+    // (~12KB) never ride through it -- the list is computed where the tree lives.
+    //
+    // INSIDE the crash-catch, deliberately. This shells out to git, and it used to sit above the
+    // try: a checkout whose base ref could not be resolved (a shallow/empty tree, a deleted base
+    // branch) threw an unhandled rejection here -- raw stack trace, no gate-report.json, and the
+    // control plane left with nothing but a job conclusion. Found by the release acceptance test
+    // (src/packaging/runner-release.test.ts), which asserts that a fresh clone of the published
+    // runner fails CLEANLY rather than merely failing.
+    if (inputs.mode === 'gate' || inputs.mode === 'heavy-gate') {
+      inputs = {
+        ...inputs,
+        target: { ...inputs.target, changedFiles: await computeChangedFiles(inputs.target.baseRef, workspaceRoot()) },
+      };
+    }
     result = await runActionEntry(inputs);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -439,6 +475,6 @@ async function main(): Promise<void> {
   process.exitCode = exitCodeFor(result);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isDirectlyExecuted(import.meta.url)) {
   void main();
 }

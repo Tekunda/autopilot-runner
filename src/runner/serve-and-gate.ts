@@ -274,7 +274,7 @@ export async function runHeavyGateStage(grant: ExecutionGrant, deps: RunHeavyGat
   // Verify the grant HERE, before serving -- the serve recipe's startCommand runs a shell
   // command, so a forged/tampered grant must be rejected before any command executes. runGateStage
   // verifies again (harmlessly) when we delegate to it below.
-  const verification = verifyGrant(grant, deps.verifyKey, deps.now ?? new Date());
+  const verification = verifyGrant(grant, deps.verifyKey, deps.now ?? new Date(), deps.environment);
   if (!verification.ok) {
     return rejectedTelemetry(grant, verification.reason);
   }

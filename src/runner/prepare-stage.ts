@@ -24,17 +24,24 @@ import type { CodingExecutor, VCSHost } from '../contracts/adapters.ts';
 import { effortForTier, resolveModel } from '../config/model-tiers.ts';
 import type { ExecutionGrant, Stage, StatusTelemetry } from '../contracts/types.ts';
 import { slugify } from '../control-plane/branch-names.ts';
-import { verifyGrant, type KeyInput } from '../control-plane/grant-verify.ts';
+import { verifyGrant, type GrantEnvironment, type KeyInput } from '../control-plane/grant-verify.ts';
 import { resolveBaseSha } from '../gates/git.ts';
 import { buildMcpConfig } from './mcp-config.ts';
-import { resolveClaimSha, tryClaimGrant, type ClaimEmitter } from './replay-claim.ts';
+import { claimRejection, resolveClaimSha, tryClaimGrant, type ClaimEmitter } from './replay-claim.ts';
 
 export interface PrepareStageDeps {
   codingExecutor: CodingExecutor;
   /** Customer repository's default branch, supplied by the runner workflow. */
   baseRef?: string;
-  /** Public key used to verify the grant's signature. */
-  verifyKey: KeyInput;
+  /** Public key(s) used to verify the grant's signature -- a list during a key rotation. */
+  verifyKey: KeyInput | readonly KeyInput[];
+  /**
+   * The environment this run is executing in (repository slug, tenant), checked against the
+   * grant's SIGNED tenantId/repoId. Read from the Actions env by action-entry.ts and threaded
+   * here as data so verification stays pure. Absent -> unbound, the pre-GA behaviour where any
+   * signed grant ran in any repository that trusted the same key.
+   */
+  environment?: GrantEnvironment;
   /**
    * The selected vendor Action's provider id (`claude-code` | `codex` | ...), used
    * to turn the grant's signed `modelTier` into a concrete model id for that
@@ -182,7 +189,7 @@ export function rejectedTelemetry(grant: ExecutionGrant, reason: string | undefi
 // Verify the grant, then prepare the selected vendor Action step. A bad/expired grant is rejected before
 // any adapter is touched.
 export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps): Promise<PreparedStage> {
-  const verification = verifyGrant(grant, deps.verifyKey, deps.now ?? new Date());
+  const verification = verifyGrant(grant, deps.verifyKey, deps.now ?? new Date(), deps.environment);
   if (!verification.ok) {
     return { kind: 'resolved', telemetry: rejectedTelemetry(grant, verification.reason) };
   }
@@ -201,13 +208,15 @@ export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps
   // Durable replay claim: this is the FIRST runner step for the grant, so before any vendor step
   // (and before the MCP file this phase writes), atomically claim the grant against GitHub. A
   // replay -- the same signed grant re-dispatched into a fresh job within its TTL -- collides on
-  // the claim ref and is rejected here, before any AI spend or push. Any other claim-store outcome
-  // fails open (see replay-claim.ts). Skipped entirely when no VCS host is supplied.
+  // the claim ref and is rejected here, before any AI spend or push. A claim store that cannot
+  // ANSWER now also rejects, after a bounded retry: a run that cannot prove it is not a replay
+  // must not spend the customer's model credential (see replay-claim.ts's header for the trade).
+  // Skipped entirely when no VCS host is supplied.
   if (deps.vcsHost) {
     const sha = await resolveClaimSha(grant, deps.vcsHost, baseBranch);
     const claim = await tryClaimGrant(grant, deps.vcsHost, sha, deps.emitClaimEvent);
-    if (claim.status === 'replayed') {
-      return { kind: 'resolved', telemetry: rejectedTelemetry(grant, 'replayed grant') };
+    if (claim.status !== 'claimed' && claim.status !== 'unavailable') {
+      return { kind: 'resolved', telemetry: rejectedTelemetry(grant, claimRejection(claim)) };
     }
   }
 

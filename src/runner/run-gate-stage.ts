@@ -12,7 +12,7 @@
 
 import type { VCSHost } from '../contracts/adapters.ts';
 import type { CheckResult, CheckStatus, ExecutionGrant, GateSpec, StatusTelemetry } from '../contracts/types.ts';
-import { verifyGrant, type KeyInput } from '../control-plane/grant-verify.ts';
+import { verifyGrant, type GrantEnvironment, type KeyInput } from '../control-plane/grant-verify.ts';
 import { createCommandGate } from '../gates/command/command-gate.ts';
 import type { GateRegistry } from '../gates/registry.ts';
 import { describeStack, detectStackAt, type StackProfile } from '../gates/stack-profile.ts';
@@ -81,8 +81,14 @@ export interface RunGateStageDeps {
    * take down a gate stage before it writes gate-report.json.
    */
   stackDetector?: (workspaceRoot: string) => readonly StackProfile[];
-  /** Public key used to verify the grant's signature. */
-  verifyKey: KeyInput;
+  /** Public key(s) used to verify the grant's signature -- a list during a key rotation. */
+  verifyKey: KeyInput | readonly KeyInput[];
+  /**
+   * The environment this run is executing in (repository slug, tenant), checked against the
+   * grant's SIGNED tenantId/repoId. Threaded in as data by action-entry.ts so verification stays
+   * a pure function. Absent -> unbound.
+   */
+  environment?: GrantEnvironment;
   /** Clock override for tests; defaults to the current time. */
   now?: Date;
 }
@@ -149,7 +155,7 @@ function grantPRNumber(grant: ExecutionGrant): number | undefined {
 // resulting checks as StatusTelemetry -- only results/checks cross back, never source or
 // diffs (AGENTS.md, "split plane").
 export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps): Promise<StatusTelemetry> {
-  const verification = verifyGrant(grant, deps.verifyKey, deps.now ?? new Date());
+  const verification = verifyGrant(grant, deps.verifyKey, deps.now ?? new Date(), deps.environment);
   if (!verification.ok) {
     return rejectedTelemetry(grant, verification.reason);
   }

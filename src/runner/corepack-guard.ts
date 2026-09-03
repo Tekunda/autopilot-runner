@@ -14,6 +14,8 @@
 
 import { detectStack, memoryReader, readerAt, type StackProfile } from '../gates/stack-profile.ts';
 
+import { isDirectlyExecuted } from './entrypoint.ts';
+
 export interface CorepackDecision {
   // Whether the caller should run `corepack enable`. True ONLY when the repo pins a manager.
   enableCorepack: boolean;
@@ -73,6 +75,6 @@ export function runCorepackGuard(
   out.write(decision.enableCorepack ? 'enable\n' : 'skip\n');
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isDirectlyExecuted(import.meta.url)) {
   runCorepackGuard(process.env, process.stdout, process.stderr);
 }
