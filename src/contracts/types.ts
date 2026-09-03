@@ -1577,6 +1577,19 @@ export interface TicketState {
   // externalQaFixAttempts so a flake never eats the content fix-loop budget; capped at 1, then
   // the drive falls through to a terminal fail that names the real cause. Reset on a real verdict.
   qaNoVerdictRetries?: number;
+  // How many consecutive `fix` dispatches the model PROVIDER refused before any model ran (a
+  // rate/usage limit on the agent credential -- classified runner-side, see
+  // runner/provider-rejection.ts). Kept SEPARATE from externalQaFixAttempts for the same reason
+  // qaNoVerdictRetries is: a request that never reached a model repaired nothing, so charging it
+  // to the content fix-loop budget spends repair rounds on attempts nobody made and then reports
+  // the PR as unfixable.
+  //
+  // ONE free re-dispatch per streak, then the drive falls through to ordinary accounting -- a
+  // sustained outage still reaches a terminal state rather than re-dispatching forever, it just
+  // does not pay for the first refusal. Reset ONLY by a fix run that actually reached a model:
+  // resetting on every consume (including a rejected run past the cap) made the counter oscillate
+  // 1,0,1,0... and charged every SECOND rejection, which is a half-fix wearing a cap's name.
+  providerRejectionRetries?: number;
   // The PR head sha the EXHAUSTED external-QA budget above was charged against, stamped once
   // the budget is spent. externalQaFixAttempts only ratchets up, so without this a PR that
   // spent it was terminal forever: every later tick re-stamped the same qa=fail without

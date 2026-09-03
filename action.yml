@@ -713,6 +713,15 @@ runs:
         INPUT_ACTION-CONCLUSION: ${{ fromJSON(inputs.coding-executor-config).provider == 'claude-code' && steps.claude.conclusion || steps.codex.conclusion }}
         INPUT_BASE-REF: ${{ github.event.repository.default_branch }}
         INPUT_PRE-AGENT-SHA: ${{ steps.pre-agent.outputs.sha }}
+        # The vendor step's own execution log ($RUNNER_TEMP/claude-execution-output.json). The
+        # step CONCLUSION alone cannot distinguish "the provider refused the request, so the agent
+        # never ran" from "the agent ran and failed" -- and the control plane bills a repair round
+        # for the second. The raw result object inside this file is what separates them
+        # (src/runner/provider-rejection.ts). claude-code-action publishes the path on its FAILING
+        # path too (its entrypoint catch calls setExecutionFileOutputIfPresent), which is the only
+        # reason this is readable at all on the run that matters. Empty for codex, or for a vendor
+        # step that never got as far as writing one -- then nothing is classified.
+        INPUT_EXECUTION-FILE: ${{ steps.claude.outputs.execution_file }}
       run: node src/runner/action-entry.ts
 
     # The fix stage's own verdict on the round it just ran (disputed findings, encoding

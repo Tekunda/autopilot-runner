@@ -19,6 +19,7 @@ import { GrantLedger } from '../control-plane/grant-ledger.ts';
 import { verifyGrant, type GrantEnvironment, type KeyInput } from '../control-plane/grant-verify.ts';
 import { buildFixVerdict } from './fix-verdict.ts';
 import { codingBranchName, DEFAULT_BASE_REF, digestFor, grantId, rejectedTelemetry } from './prepare-stage.ts';
+import { PROVIDER_REJECTED_CHECK } from './provider-rejection.ts';
 
 export interface FinalizeStageDeps {
   codingExecutor: CodingExecutor;
@@ -65,8 +66,31 @@ export interface FinalizeStageDeps {
    * Defaults to buildFixVerdict() over `workspaceRoot`.
    */
   readFixVerdict?: (cwd: string, baseSha: string) => Promise<FixVerdict>;
+  /**
+   * The vendor step's own reason, when its failure was the PROVIDER REJECTING the request rather
+   * than the agent running and failing (classifyProviderRejection over the execution log
+   * action.yml threads in). Absent on every ordinary run -- action-entry.ts only sets it when the
+   * classifier is certain.
+   */
+  providerRejection?: string;
   /** Clock override for tests; defaults to the current time. */
   now?: Date;
+}
+
+// The check that carries a provider rejection back to the control plane. `unjudged` with
+// `unjudgedReason: 'infra'` is the whole point: fix-loop.ts routes that pair to a bounded infra
+// retry that does NOT bill the fix budget, where a bare `fail` (or a reason-less unjudged, which
+// means 'content') would spend a repair round on a stage that never reached a model. The
+// provider's own message rides in the finding so the escalation a human eventually reads says
+// what actually happened.
+export function providerRejectedCheck(reason: string): CheckResult {
+  return {
+    name: PROVIDER_REJECTED_CHECK,
+    status: 'fail',
+    unjudged: true,
+    unjudgedReason: 'infra',
+    findings: [reason],
+  };
 }
 
 // Turn a fix round's self-verdict into the checks that carry it, and into the outcome the run
@@ -128,7 +152,7 @@ export interface ActionOutcome {
 export function finalizeJudgmentStage(
   grant: ExecutionGrant,
   outcome: ActionOutcome,
-  deps: Pick<FinalizeStageDeps, 'verifyKey' | 'environment' | 'now' | 'grantLedger'>,
+  deps: Pick<FinalizeStageDeps, 'verifyKey' | 'environment' | 'now' | 'grantLedger' | 'providerRejection'>,
 ): StatusTelemetry {
   const verification = verifyGrant(grant, deps.verifyKey, deps.now ?? new Date(), deps.environment);
   if (!verification.ok) return rejectedTelemetry(grant, verification.reason);
@@ -137,7 +161,11 @@ export function finalizeJudgmentStage(
   return {
     grantId: grantId(grant),
     result: outcome.conclusion === 'success' ? 'pass' : 'error',
-    checks: [],
+    // A judgment stage's telemetry does not ride an artifact back to the control plane (only
+    // gate-report.json and fix-report.json do), so this check is a LOG-side record for the
+    // operator reading the run, not a routing signal. Carried anyway: the reason belongs with the
+    // run that produced it, and a judgment stage that gains an artifact channel later inherits it.
+    checks: deps.providerRejection ? [providerRejectedCheck(deps.providerRejection)] : [],
     logDigest: digestFor(grant.repoId, grant.ticketId, grant.stage, outcome.conclusion),
   };
 }
@@ -232,6 +260,12 @@ export async function finalizeCodingStage(
       deps.preAgentSha ?? '',
     );
     const verdictChecks = fixVerdictChecks(verdict);
+    // FIRST in the list, because this is the fact that outranks every other one in the report: a
+    // round the provider refused produced no diff, so the verdict scan below it is trivially
+    // clean and would otherwise be the only thing a reader sees. This is the check that reaches
+    // the control plane -- fix-report.json is uploaded as an artifact and ci-runner.ts substitutes
+    // its checks for the job-name fallback -- and it is what stops the round being billed.
+    const rejectionChecks = deps.providerRejection ? [providerRejectedCheck(deps.providerRejection)] : [];
     return {
       grantId: grantId(grant),
       // A refused round must not report `pass`. The control plane blocks on the verdict itself
@@ -239,11 +273,18 @@ export async function finalizeCodingStage(
       // a non-pass into a failing step, so a runner whose verdict artifact never arrives still
       // shows red rather than a green fix that quietly re-gates.
       result: verdictChecks.length > 0 ? 'fail' : result.outcome,
-      checks: [...result.checks, ...verdictChecks],
+      checks: [...rejectionChecks, ...result.checks, ...verdictChecks],
       logDigest: result.logDigest,
       fixVerdict: verdict,
     };
   }
+
+  // The BUILD path's copy of the same record. Log-only today, exactly like the judgment stage's:
+  // ci-runner.ts fetches the fix-report artifact only for `stage === 'fix'`, so a build-stage
+  // rejection does not yet route anywhere -- it is carried so the run says what happened and so
+  // the build path is not silently the one stage that stays mute. Wiring it to the build retry
+  // budget needs a channel this PR does not open.
+  const rejectionChecks = deps.providerRejection ? [providerRejectedCheck(deps.providerRejection)] : [];
 
   // Mirror prepare-stage: the grant's server-set baseBranch (ticket integration
   // branch) wins, so the subtask PR opens against it -- never the live default.
@@ -286,7 +327,7 @@ export async function finalizeCodingStage(
         return {
           grantId: grantId(grant),
           result: 'error',
-          checks: result.checks,
+          checks: [...rejectionChecks, ...result.checks],
           logDigest: digestFor(grant.repoId, grant.ticketId, grant.stage, 'pr-open-failed'),
         };
       }
@@ -296,7 +337,7 @@ export async function finalizeCodingStage(
   return {
     grantId: grantId(grant),
     result: result.outcome,
-    checks: result.checks,
+    checks: [...rejectionChecks, ...result.checks],
     ...(prUrl ? { prUrl } : {}),
     logDigest: result.logDigest,
   };

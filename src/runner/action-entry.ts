@@ -11,7 +11,7 @@
 // a diff. action.yml carries no logic of its own; everything lives here so it can be
 // tested.
 
-import { appendFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 
 import type { CodingExecutor, VCSHost } from '../contracts/adapters.ts';
 import type { ExecutionGrant, StatusTelemetry } from '../contracts/types.ts';
@@ -27,6 +27,7 @@ import { GrantLedger } from '../control-plane/grant-ledger.ts';
 import { parseVerifyKeys, verifyGrant, type GrantEnvironment } from '../control-plane/grant-verify.ts';
 import { finalizeCodingStage, finalizeJudgmentStage, type ActionOutcome } from './finalize-stage.ts';
 import { FIX_REPORT_FILE } from './fix-verdict.ts';
+import { classifyProviderRejection } from './provider-rejection.ts';
 import { createRunnerGateRegistry } from './gate-registry.ts';
 import { CODING_STAGES, computeChangedFiles, DEFAULT_BASE_REF, prepareStage, rejectedTelemetry, type PreparedStage } from './prepare-stage.ts';
 import { isDirectlyExecuted } from './entrypoint.ts';
@@ -67,6 +68,12 @@ export type ActionInputs =
       // fix's own commit. Optional so a direct/test invocation without it still runs (the scan
       // then reports that it could not run, which is the fail-safe direction).
       preAgentSha?: string;
+      // Path to the vendor step's own execution log ($RUNNER_TEMP/claude-execution-output.json,
+      // published as claude-code-action's `execution_file` output -- set on the FAILING path too).
+      // It is the only place the real result object exists; the conclusion string alone cannot
+      // tell a provider rejection from a fixer that ran and failed. Optional: an unset/unreadable
+      // path classifies nothing and finalize behaves exactly as it did before.
+      executionFile?: string;
     })
   // `gate` runs the fast deterministic gates against the PR checkout only. `heavy-gate` runs the
   // dedicated browser/server-capable stage (docs/ci-gate-refit-plan.md §5): it builds + serves the
@@ -155,6 +162,7 @@ export function parseInputs(env: NodeJS.ProcessEnv = process.env): ActionInputs 
       vcsHost: requireJsonEnv<VCSHostConfig>(env, 'INPUT_VCS-HOST-CONFIG'),
       actionOutcome: { conclusion: requireEnv(env, 'INPUT_ACTION-CONCLUSION') },
       ...(env['INPUT_PRE-AGENT-SHA'] ? { preAgentSha: env['INPUT_PRE-AGENT-SHA'] } : {}),
+      ...(env['INPUT_EXECUTION-FILE'] ? { executionFile: env['INPUT_EXECUTION-FILE'] } : {}),
     };
   }
 
@@ -186,8 +194,28 @@ export interface RunActionDeps {
   grantLedger?: GrantLedger;
   /** Observability seam for the replay-claim attempt; defaults to replay-claim's own emitter. */
   emitClaimEvent?: ClaimEmitter;
+  /**
+   * Read + classify the vendor's execution log at a path (finalize only). Injectable so tests
+   * exercise the wiring without a file on disk; defaults to defaultReadExecutionLog.
+   */
+  readExecutionLog?: (path: string) => string | undefined;
   /** Clock override for tests; defaults to the current time. */
   now?: Date;
+}
+
+// Read the vendor step's execution log off disk and classify it. A missing, unreadable or
+// unparseable file is NOT an error here: it means "nothing can be said about why the vendor
+// failed", which is exactly the state finalize was in before this input existed. Swallowing the
+// read is therefore the correct behaviour and not a hidden failure -- the alternative, throwing,
+// would turn a cosmetic missing-file into a runner crash on a stage that already failed.
+export function defaultReadExecutionLog(path: string): string | undefined {
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch {
+    return undefined;
+  }
+  return classifyProviderRejection(raw);
 }
 
 // One consume ledger per runner process (Track G replay DETECTION): each Actions step
@@ -277,6 +305,14 @@ export async function runActionEntry(inputs: ActionInputs, deps: RunActionDeps =
     return { mode: 'prepare', prepared };
   }
 
+  // Read ONCE, before either branch: the vendor's own result object is what separates "the
+  // provider refused the request" from "the agent ran and failed", and the conclusion string
+  // action.yml passes cannot express that difference. Any read/parse problem yields undefined and
+  // finalize behaves exactly as it did before -- an unreadable log must never invent a rejection.
+  const providerRejection = inputs.executionFile
+    ? (deps.readExecutionLog ?? defaultReadExecutionLog)(inputs.executionFile)
+    : undefined;
+
   const telemetry = CODING_STAGES.has(inputs.grant.stage)
     ? await finalizeCodingStage(inputs.grant, inputs.actionOutcome, {
         codingExecutor,
@@ -290,12 +326,14 @@ export async function runActionEntry(inputs: ActionInputs, deps: RunActionDeps =
         // fixer's edits. Same reason gate mode roots its git at GITHUB_WORKSPACE.
         workspaceRoot: workspaceRoot(),
         ...(inputs.preAgentSha ? { preAgentSha: inputs.preAgentSha } : {}),
+        ...(providerRejection ? { providerRejection } : {}),
         now: deps.now,
       })
     : finalizeJudgmentStage(inputs.grant, inputs.actionOutcome, {
         verifyKey,
         ...(environment ? { environment } : {}),
         grantLedger: deps.grantLedger ?? processGrantLedger,
+        ...(providerRejection ? { providerRejection } : {}),
         now: deps.now,
       });
   return { mode: 'finalize', telemetry };
