@@ -787,6 +787,28 @@ export interface CheckRunSnapshot {
   name: string;
 }
 
+// One check-run the host still holds OPEN (queued/in_progress) on a ref, as returned by
+// VCSHost.listOpenCheckRuns. This is the discovery half of the ghost story: CheckRunSnapshot
+// answers "is the check-run I remember still open?", which only works while something still
+// remembers its id. Once the marker carrying that id is gone the check-run is unreachable by id
+// and can only be found by ASKING the ref what is still open on it -- which is what this is for.
+export interface OpenCheckRun {
+  id: number;
+  name: string;
+  // When the host says the check-run started (ISO). The orphan sweep's age bound is anchored
+  // here, so a host that does not report one gives the sweep nothing to measure and the
+  // check-run is left alone rather than retired on an unmeasured age.
+  startedAt?: string;
+  // The check-run's details link. Autopilot stamps its own stage runs with the backing workflow
+  // run's URL (subtask-pipeline runUrl), so this is how an orphan -- whose marker, and with it
+  // its runId, is gone -- can still be traced back to the run behind it.
+  detailsUrl?: string;
+  // The id of the GitHub App that created this check-run. The orphan sweep retires check-runs
+  // only when this matches the app it authenticates as, so it can never conclude another app's
+  // check even if a name collided.
+  appId?: number;
+}
+
 export interface RunLiveness {
   status: 'queued' | 'in_progress' | 'completed';
   // GitHub's run conclusion once `status` is 'completed' ('success' | 'failure' | 'cancelled' |

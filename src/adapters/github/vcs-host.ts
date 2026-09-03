@@ -9,7 +9,7 @@ import type {
   VCSHost,
 } from '../../contracts/adapters.ts';
 import { retryableHostMessage } from '../../contracts/adapters.ts';
-import type { CheckResult, CheckRunSnapshot, PRStatus } from '../../contracts/types.ts';
+import type { CheckResult, CheckRunSnapshot, OpenCheckRun, PRStatus } from '../../contracts/types.ts';
 import { GitHubApiError, GitHubClient, type GitHubClientConfig } from './rest.ts';
 
 interface GhRef {
@@ -47,6 +47,7 @@ interface GhCheckRun {
   details_url: string | null;
   started_at: string | null;
   id: number;
+  app?: { id?: number } | null;
 }
 
 interface GhCheckRunsResponse {
@@ -159,6 +160,11 @@ function asyncMergeMethodOf(body: unknown): string | undefined {
 
 
 export interface GitHubVCSHostConfig extends GitHubClientConfig {
+  /** The numeric id of the GitHub App whose installation token this host uses (GitHub's
+   *  `AUTOPILOT_GITHUB_APP_ID`). Supplied so listOpenCheckRuns can scope its listing to
+   *  check-runs this app itself created; omitted -> that listing reports "cannot determine"
+   *  and the orphan sweep does nothing. */
+  appId?: string | number;
   /** Injectable sleep for the asynchronous-merge poll. Defaults to real timers; tests pass a
    *  no-op so the bounded poll runs instantly and no test ever waits on a real clock. */
   asyncMergeSleep?: (ms: number) => Promise<void>;
@@ -170,6 +176,11 @@ export interface GitHubVCSHostConfig extends GitHubClientConfig {
 
 export class GitHubVCSHost implements VCSHost {
   private readonly client: GitHubClient;
+  // The GitHub App this host authenticates as, when the caller knows it. Only listOpenCheckRuns
+  // uses it, and only to refuse to run at all without it: that lane retires check-runs found by
+  // listing a ref rather than by an id somebody recorded, so app ownership is the ONLY thing
+  // standing between it and another app's check.
+  private readonly appId: number | undefined;
   private readonly asyncMergeSleep: (ms: number) => Promise<void>;
   private readonly asyncMergePollIntervalMs: number;
   private readonly asyncMergeDeadlineMs: number;
@@ -182,6 +193,8 @@ export class GitHubVCSHost implements VCSHost {
 
   constructor(config: GitHubVCSHostConfig) {
     this.client = new GitHubClient(config);
+    const parsed = config.appId === undefined ? Number.NaN : Number(config.appId);
+    this.appId = Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
     this.asyncMergeSleep = config.asyncMergeSleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.asyncMergePollIntervalMs = config.asyncMergePollIntervalMs ?? ASYNC_MERGE_POLL_INTERVAL_MS;
     this.asyncMergeDeadlineMs = config.asyncMergeDeadlineMs ?? ASYNC_MERGE_DEADLINE_MS;
@@ -819,6 +832,43 @@ export class GitHubVCSHost implements VCSHost {
       // have to invent one, so report it as unread rather than half-read.
       if (!run?.name) return undefined;
       return { status, name: run.name };
+    } catch {
+      return undefined;
+    }
+  }
+
+  // Every check-run THIS APP still holds open on `ref`'s head commit -- the discovery half of
+  // the ghost story (see the VCSHost contract). `filter=all` on purpose: GitHub's default
+  // `filter=latest` returns one run per name, which hides an older stranded run behind a newer
+  // one of the same name, and a hidden orphan is exactly the state this lane exists to end.
+  //
+  // Two independent ownership guards, because this is the one read whose results are acted on
+  // without any id we recorded ourselves: the `app_id` query narrows the listing server-side,
+  // and every row is re-checked against `this.appId` client-side, so a host that ignored the
+  // query parameter cannot smuggle a foreign check-run through. With no app id at all the
+  // answer is `undefined` ("cannot determine"), never `[]` -- an unattributable listing must
+  // not read as "this ref has no orphans".
+  async listOpenCheckRuns(repoId: string, ref: string): Promise<OpenCheckRun[] | undefined> {
+    const appId = this.appId;
+    if (appId === undefined) return undefined;
+    try {
+      const sha = (await this.getBranchSha(repoId, ref)) ?? ref;
+      const result = await this.client.request<GhCheckRunsResponse>(
+        'GET',
+        `/repos/${repoId}/commits/${sha}/check-runs?per_page=100&filter=all&app_id=${appId}`,
+      );
+      // No body is not an empty ref: `request` resolves undefined for a response GitHub sent
+      // with nothing in it, which says nothing about what is open on the commit.
+      if (!result) return undefined;
+      return (result.check_runs ?? [])
+        .filter((run) => run.status !== 'completed' && run.app?.id === appId)
+        .map((run) => ({
+          id: run.id,
+          name: run.name,
+          ...(run.started_at ? { startedAt: run.started_at } : {}),
+          ...(run.details_url ? { detailsUrl: run.details_url } : {}),
+          ...(run.app?.id !== undefined ? { appId: run.app.id } : {}),
+        }));
     } catch {
       return undefined;
     }

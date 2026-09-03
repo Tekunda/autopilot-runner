@@ -11,6 +11,7 @@ import type {
   CodingExecutorInput,
   ExecutionGrant,
   ExecutorResult,
+  OpenCheckRun,
   PRStatus,
   RunLiveness,
   Snippet,
@@ -274,6 +275,22 @@ export interface VCSHost {
   // retire a real ghost) nor for 'in_progress' (which would invite concluding a check-run on
   // no evidence). Every other answer is the host's own word.
   checkRunStatus?(repoId: string, checkRunId: number): Promise<CheckRunSnapshot | undefined>;
+  // Every check-run this host's OWN app still holds open (queued/in_progress) on `ref`'s head
+  // commit. checkRunStatus can only answer for an id somebody still remembers; this is the only
+  // way to find a check-run whose owning marker was cleared without concluding it, which leaves
+  // it `in_progress` with nothing anywhere pointing at it -- invisible to every id-addressed
+  // lane and blocking `mergeStateStatus` on every PR that carries the commit.
+  //
+  // Scoped to the implementation's own app on purpose: concluding another app's check-run would
+  // erase a gate Autopilot never owned. A host that cannot establish its own app identity must
+  // return `undefined`, not `[]`.
+  //
+  // Fail-safe like checkRunStatus and compareRefs: `undefined` means the listing could NOT be
+  // made (no app identity, transport error, rate limit) and `[]` means the ref genuinely has no
+  // open check-run of ours. Callers must keep those apart -- reading a failed listing as "no
+  // orphans" is the silent-pass shape this contract exists to avoid.
+  // Optional -- a host without it simply has no orphan sweep.
+  listOpenCheckRuns?(repoId: string, ref: string): Promise<OpenCheckRun[] | undefined>;
   // Re-trigger a FAILED deployment on `ref` (a merge commit sha): re-run the failed jobs of
   // the workflow run(s) that produced the failing deployment check, so a transient deploy
   // failure (registry blip, infra flake) recovers without a human. Returns true if a rerun
