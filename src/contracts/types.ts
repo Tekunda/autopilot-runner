@@ -1168,10 +1168,13 @@ export interface GateBlockProvenance {
   // converse does not hold -- a control-plane-only deploy changes it too -- which is why the
   // re-evaluation is bounded to once per version rather than run as a loop.
   gateVersion?: string;
-  // Which check produced which findings. The block REASON flattens all of them into one prose blob
-  // for the human; this is the only structured record of the attribution, so a later reader can ask
-  // "which gate blocked this" without parsing English.
-  checks: { name: string; findings: string[] }[];
+  // Which check failed, and HOW MUCH it said -- never what it said. The findings prose reached
+  // the human at block time (the block reason and the PR comment quote it); retaining it here
+  // would duplicate it into durable state whole, so this record keeps only the attribution a
+  // reader needs: the gate name, a finding count, and a digest that proves two blocks saw the
+  // same report without storing it. See recoverBlockedOnGateChange (blocked-recovery.ts), whose
+  // alarm reads the NAMES only.
+  checks: { name: string; findingDigest: string; findingCount: number }[];
   recordedAt: string; // ISO 8601
 }
 
@@ -1665,12 +1668,13 @@ export interface TicketState {
   // the per-tick drive (runTicketOnce) so a sustained outage backs off instead of re-dispatching
   // every tick; `rejections` drives the curve; `firstRejectedAt` anchors the one-time 6h
   // escalation. `escalatedAt` is the DURABLE gate on that one-time escalation -- stamped the
-  // moment it fires, checked before ever computing the escalation notice again, so a growing
-  // `lastReason` (a real rate-limit message quotes a reset timestamp, so it varies rejection to
-  // rejection) can never defeat a text-dedupe and re-escalate every tick past 6h. Cleared the
-  // moment any dispatch on this ticket reaches a model (clearProviderBackoff, fix-loop.ts) -- a
-  // streak never survives a run that actually ran.
-  providerBackoff?: { rejections: number; firstRejectedAt: string; notBefore: string; lastReason: string; escalatedAt?: string };
+  // moment it fires, checked before ever computing the escalation notice again, so the provider's
+  // varying per-rejection words (a rate-limit message quotes a reset timestamp) can never defeat a
+  // text-dedupe and re-escalate every tick past 6h. The provider's own words are NOT retained:
+  // they were quoted on the deferral check-run at rejection time, and no reader wants them back.
+  // Cleared the moment any dispatch on this ticket reaches a model (clearProviderBackoff,
+  // fix-loop.ts) -- a streak never survives a run that actually ran.
+  providerBackoff?: { rejections: number; firstRejectedAt: string; notBefore: string; escalatedAt?: string };
   // The PR head sha the EXHAUSTED external-QA budget above was charged against, stamped once
   // the budget is spent. externalQaFixAttempts only ratchets up, so without this a PR that
   // spent it was terminal forever: every later tick re-stamped the same qa=fail without
