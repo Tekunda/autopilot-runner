@@ -50,6 +50,37 @@ export interface TaskReply {
  */
 export type NoticeDialect = 'markdown' | 'rich' | 'plain';
 
+/**
+ * THE MACHINE-READABLE LEAD every pipeline comment line starts with.
+ *
+ * Chosen over the prose leads it replaces ("Delivery Autopilot:", "Watchdog:", "Blocked:") because
+ * those were three vocabularies, only two of which `isAutopilotComment` knew -- four call sites
+ * posted a bare `Blocked: ...` matching no prefix at all, and stayed out of the human-reply set
+ * only via the reply's `isBot` flag. A tracker whose readReplies cannot mark our own comments as
+ * bot-authored therefore read the pipeline's own block notice back as a human asking to resume, and
+ * re-drove the ticket off its own output.
+ *
+ * Properties that make it safe:
+ *  - It is a LITERAL, at the very start, so `isAutopilotComment`'s `startsWith` sees it.
+ *  - It is not English, so no human writes it by accident, and it survives any rewording after it.
+ *  - It is inert in both sinks: markdown renders `[autopilot]` as the characters `[autopilot]`
+ *    (a link needs a following `(` or `[`), and Notion rich text has no bracket syntax at all.
+ *  - It is ADDITIVE. The old prose prefixes stay in AUTOPILOT_COMMENT_PREFIXES as a fallback, so
+ *    the comments already sitting on customers' boards keep being recognised. This is a live tenant
+ *    migration, not a clean slate: a ticket blocked last week must not resume itself off a comment
+ *    the pipeline wrote before this change.
+ *
+ * IT LIVES HERE, in the contract, and not in the renderer that emits it, because BOTH sides need
+ * it: the control plane writes the lead, and a sink has to recognise it to do anything structural
+ * with the line -- the Notion adapter finds the notice's link line by it (its COMMENT_AUTHOR_MARKER
+ * is this same constant). That is the placement `.dependency-cruiser.cjs` prescribes in as many
+ * words -- "move the shared piece into src/contracts/ or a neutral module instead" -- and the only
+ * one that costs nothing: routing it through a control-plane module instead would put the whole
+ * notice renderer in every adapter's module graph, which the layering ratchet cannot see, because
+ * it compares DIRECT file pairs and the new hop would be control-plane to control-plane.
+ */
+export const TRACKER_NOTICE_LEAD = '[autopilot]';
+
 /** The dialect of each surface the notice layer writes to. See TaskBackend.noticeDialects. */
 export interface NoticeDialects {
   /** `comment()` / `escalate()`. */
