@@ -47,12 +47,20 @@ export interface TaskBackend {
   // backend without a mentionable owner (or a bot reporter) falls back to a plain comment, and a
   // caller without this implemented calls `comment` directly -- every OTHER comment (progress,
   // routine gate/entitlement blocks, coverage notes) stays a plain `comment`, never this.
+  //
+  // Implemented by: notion, github. Absent from: jira, the in-memory fake. The conformance suite
+  // (contracts/conformance/taskBackend.ts) exercises every optional method below and SKIPS it
+  // loudly for a backend that doesn't implement it -- "not written" and "works" must never look
+  // the same on a green run, which is how the GitHub backend shipped at 1-of-11.
   escalate?(ticketId: string, body: string): Promise<void>;
   // Stamp a ticket/subtask's pull-request URL onto the tracker as structured data (e.g. Notion's
   // "Pull Request" URL property), so the board surfaces the PR without reading comments. Called
   // idempotently by the reconciler each tick; implementations MUST no-op when the value already
   // matches (avoid edit-churn) and when there's no configured property/resolvable page. Optional:
   // backends without a PR field (or where the host IS the PR, e.g. GitHub issues) don't implement it.
+  // (The GitHub backend implements it anyway: an issue and its PR live in different lists, so one
+  // idempotent line in a delimited section of the issue body is what makes the link visible from
+  // the board -- and that section is subtracted from `description`, so it never reads as spec.)
   setPullRequestUrl?(ticketId: string, url: string): Promise<void>;
   // WHO last edited this ticket on the tracker: 'self' when it was THIS integration (our own
   // credential), 'human' when it was anybody else, 'unknown' when the backend could not tell.
@@ -92,7 +100,10 @@ export interface TaskBackend {
   // takes minutes; see the notion adapter). The control plane calls this each tick to land the
   // relation once the page is indexed. Backends whose linkBlockedBy is a plain comment/issue-link
   // (github/jira) do NOT implement it -- their one-shot linkBlockedBy at decompose is enough and
-  // re-calling it would spam. Resolves to true when the relation is present after the call
+  // re-calling it would spam. (The GitHub backend now DOES implement it: its blocked-by write is a
+  // delimited, machine-readable section of the issue body rather than a comment, so a per-tick
+  // re-assert is one idempotent no-op PATCH and posts nothing. Jira still does not.) Resolves to
+  // true when the relation is present after the call
   // (written now or already there), false when it couldn't be asserted yet (e.g. Notion hasn't
   // indexed the sibling page -- the next tick's reconcile retries). Never throws.
   reassertBlockedBy?(ticketId: string, blockingTicketId: string): Promise<boolean>;
@@ -166,6 +177,9 @@ export interface TaskBackend {
   // Reflect "the ticket's promotion PR merged into the base branch" on the tracker by moving
   // it to the tenant-configured merged status (e.g. a "test" column), instead of leaving it in
   // review. A one-way cosmetic write; no-op when the tenant hasn't configured it. Optional.
+  // (Where the tracker has no status to move to, a backend may mark the merge some other way:
+  // the GitHub backend stamps a label deliberately OUTSIDE its status namespace, so the next
+  // setStatus neither strips it nor reads it back as a status. Same one-way, cosmetic contract.)
   notifyMergedToBase?(ticketId: string): Promise<void>;
   // Retire a subtask's tracker page/issue outright, for a subtask a REPLAN discarded: its
   // scope is gone from the new plan, so leaving the page linked to the parent hands the

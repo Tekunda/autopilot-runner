@@ -159,6 +159,32 @@ export class GitHubClient {
     }
   }
 
+  /**
+   * Like request(), but resolves to undefined instead of throwing on ANY fault -- the single
+   * place in these adapters where a GitHub rejection is deliberately discarded.
+   *
+   * It exists so that reasoning lives once rather than at a dozen `.catch(() => undefined)`
+   * call sites, each of which has to be re-justified by a reader. Use it for exactly two
+   * shapes, and nothing else:
+   *
+   *  - a best-effort REPORTING write the TaskBackend contract says must never throw into a
+   *    drive (a status callout, a merge marker, assigning a reviewer). Rethrowing there turns a
+   *    cosmetic tracker fault into a failed ticket;
+   *  - a read whose ABSENCE is already a meaningful answer the caller handles ('unknown' for
+   *    lastEditedBy, "no stamped child found" for the subtask adoption scan).
+   *
+   * Anything whose failure the caller cannot distinguish from a real answer must use request()
+   * or requestOptional() and let the fault travel. There is no logger seam in an adapter, so a
+   * discard here really is a discard -- the caller's own fallback is the entire handling.
+   */
+  async requestBestEffort<T>(method: string, path: string, body?: unknown): Promise<T | undefined> {
+    try {
+      return await this.request<T>(method, path, body);
+    } catch {
+      return undefined;
+    }
+  }
+
   /** Raw-body variant for endpoints that answer text/plain rather than JSON (today:
    *  the Actions job-logs read behind VCSHost.getCheckLogTail). Resolves the body as a
    *  string, or undefined when the call fails for ANY reason -- these reads are
