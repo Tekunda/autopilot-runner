@@ -35,6 +35,22 @@ export interface TaskReply {
   body: string;
 }
 
+// What a ticket's blocked-by relation says, split into the two answers the caller has to tell
+// apart. `blockers` is the dependencies still standing -- store keys, so the caller can look each
+// one up. `dropped` is the ones the tracker no longer holds any work for, because a human deleted
+// the blocking page/issue outright; the backend removes those from `blockers` (a deleted page can
+// never reach 'done', so a caller waiting for it waits forever) and names them here instead.
+//
+// The split exists because two very different situations otherwise arrive as the same empty list:
+// "this ticket has no dependencies" (never a wake -- there was nothing to wait for) and "every
+// dependency this ticket had was deleted" (a wake, and one a human needs told about by name).
+// Backends with no way to observe a deleted blocker answer `dropped: []`, which reads as "none
+// were dropped" and preserves exactly the behaviour a plain id list had.
+export interface TicketBlockers {
+  blockers: string[];
+  dropped: string[];
+}
+
 export interface TaskBackend {
   listReady(): Promise<TicketState[]>;
   get(ticketId: string): Promise<TicketState>;
@@ -109,14 +125,13 @@ export interface TaskBackend {
   reassertBlockedBy?(ticketId: string, blockingTicketId: string): Promise<boolean>;
   // The ticket-level blocked-by dependency, as recorded on the tracker (the page's
   // "Blocked by" relation): the ticket/page ids blocking this one. Read by the control
-  // plane's dependency-wake (a blocked ticket whose blockers have ALL shipped gets held
-  // for a replan/continue decision). Optional:
-  //  - undefined  => this backend can't expose ticket-level dependencies (feature off);
-  //  - []         => no blockers recorded;
-  //  - ids        => the blocking ticket ids (store keys, so the caller can look each up).
+  // plane's dependency-wake (a blocked ticket whose blockers have ALL shipped resumes, or
+  // is held for a replan/continue decision). Optional:
+  //  - undefined              => this backend can't expose ticket-level dependencies (feature off);
+  //  - { blockers, dropped }  => see TicketBlockers.
   // Only relations recorded in the backend's own blocked-by property are visible -- a
   // human linking pages via an unrelated property is invisible here.
-  listBlockers?(ticketId: string): Promise<string[] | undefined>;
+  listBlockers?(ticketId: string): Promise<TicketBlockers | undefined>;
   // Render the architect's plan onto the PARENT ticket for a human: a PO-facing "For review"
   // block, the engineer plan narrative, touched areas, and (best-effort) assign the reporter
   // as reviewer. Optional -- backends that can't render rich bodies simply don't implement it.
