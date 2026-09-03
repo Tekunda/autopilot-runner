@@ -1469,12 +1469,22 @@ export interface TicketState {
   // autofix so a PR Autopilot can't get green is left for its author instead of looping.
   // Track F reuses the same counter (and its fix.maxFixRounds bound) for the customer-CI
   // autofix loop on PROMOTION PRs -- a ticket has one shared CI-repair budget either way.
+  // The two lanes SCOPE it differently: in the external-PR lane it is head-scoped (a new head
+  // resets it -- see externalQaExhaustedSha below), while in the promotion lane it is
+  // ticket-lifetime and never reset, so a promotion ticket that spends it stays spent.
   externalQaFixAttempts?: number;
   // How many times QA was auto-retried after a CLEAN run wrote no verdict (plan.json missing)
   // -- an infra/agent-behavior flake, not a content defect. Kept SEPARATE from
   // externalQaFixAttempts so a flake never eats the content fix-loop budget; capped at 1, then
   // the drive falls through to a terminal fail that names the real cause. Reset on a real verdict.
   qaNoVerdictRetries?: number;
+  // The PR head sha the EXHAUSTED external-QA budget above was charged against, stamped once
+  // the budget is spent. externalQaFixAttempts only ratchets up, so without this a PR that
+  // spent it was terminal forever: every later tick re-stamped the same qa=fail without
+  // running QA, even after the author pushed exactly what the gate asked for. A head that no
+  // longer matches this sha is somebody else's push -- new work, and it gets a fresh budget.
+  // Only meaningful while the budget is spent; the reset clears it.
+  externalQaExhaustedSha?: string;
   // Set when the control plane holds a decomposed ticket for a replan/continue decision --
   // its recorded plan is possibly stale (the ticket re-entered the ready status, or every
   // ticket blocking it has shipped) and a human must choose: reply "replan" to discard the
