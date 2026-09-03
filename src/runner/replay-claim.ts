@@ -44,7 +44,7 @@
 //     production host implements it (asserted in replay-claim.test.ts), which is what keeps this
 //     exemption from quietly becoming the norm.
 
-import type { VCSHost } from '../contracts/adapters.ts';
+import type { ClaimRefResult, VCSHost } from '../contracts/adapters.ts';
 import type { ExecutionGrant } from '../contracts/types.ts';
 import { grantLedgerId } from '../control-plane/grant-ledger.ts';
 
@@ -258,6 +258,30 @@ export async function tryClaimGrant(
     return { status: 'blocked', reason };
   }
 
+  const claimed = await claimWithRetry(grant, vcsHost.createClaimRef.bind(vcsHost), ref, sha, retry);
+  if (claimed.result !== undefined) {
+    const status = claimed.result === 'exists' ? 'replayed' : 'claimed';
+    emit(status === 'replayed' ? 'grant_replayed' : 'grant_claimed', ref);
+    return { status };
+  }
+  emit('grant_claim_blocked', `${ref}: ${claimed.detail}`);
+  return { status: 'blocked', reason: claimed.detail };
+}
+
+// The bounded retry loop behind tryClaimGrant: create the claim ref, retry a non-permanent
+// failure on the backoff schedule, and give up the moment the WALL-CLOCK budget is spent.
+// Split out so tryClaimGrant stays inside the complexity budget -- the loop is where every one
+// of its branches lived, and none of them are about the caller's guard clauses or its telemetry.
+//
+// Answers either the store's own verdict (`result`) or the reason the phase ended without one
+// (`detail`). It never emits: the caller owns the telemetry, so the two cannot drift apart.
+async function claimWithRetry(
+  grant: ExecutionGrant,
+  createClaimRef: (repoId: string, ref: string, sha: string) => Promise<ClaimRefResult>,
+  ref: string,
+  sha: string,
+  retry: ClaimRetryDeps,
+): Promise<{ result?: ClaimRefResult; detail: string }> {
   const backoffs = retry.backoffsMs ?? CLAIM_RETRY_BACKOFFS_MS;
   const wait = retry.sleep ?? sleep;
   const now = retry.now ?? Date.now;
@@ -266,36 +290,24 @@ export async function tryClaimGrant(
   let lastDetail = 'unknown error';
   for (let attempt = 0; ; attempt++) {
     const settled = await withinBudget(
-      vcsHost.createClaimRef(grant.repoId, ref, sha).then(
+      createClaimRef(grant.repoId, ref, sha).then(
         (result) => ({ result }),
         (err: unknown) => ({ err }),
       ),
       deadline - now(),
     );
-    if (settled === BUDGET_EXPIRED) {
-      lastDetail = `the claim store did not answer within ${budgetMs}ms`;
-      break;
-    }
-    if ('result' in settled) {
-      if (settled.result === 'exists') {
-        emit('grant_replayed', ref);
-        return { status: 'replayed' };
-      }
-      emit('grant_claimed', ref);
-      return { status: 'claimed' };
-    }
+    if (settled === BUDGET_EXPIRED) return { detail: `the claim store did not answer within ${budgetMs}ms` };
+    if ('result' in settled) return { result: settled.result, detail: lastDetail };
     const err = settled.err;
     lastDetail = err instanceof Error ? err.message : String(err);
     const status = claimErrorStatus(err);
     // A permission failure will read the same on attempt four as on attempt one; refuse now so
     // the operator sees the actionable message instead of a four-second pause first.
-    if (status !== undefined && PERMANENT_CLAIM_STATUSES.has(status)) break;
+    if (status !== undefined && PERMANENT_CLAIM_STATUSES.has(status)) return { detail: lastDetail };
     const backoff = backoffs[attempt];
-    if (backoff === undefined) break;
+    if (backoff === undefined) return { detail: lastDetail };
     await wait(backoff);
   }
-  emit('grant_claim_blocked', `${ref}: ${lastDetail}`);
-  return { status: 'blocked', reason: lastDetail };
 }
 
 // Control-plane GC sweep: which of the given claim refs are safe to delete now -- those whose

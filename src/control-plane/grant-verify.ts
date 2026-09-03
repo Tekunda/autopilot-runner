@@ -132,6 +132,50 @@ function selectKeys(grant: ExecutionGrant, keys: readonly KeyInput[]): { keys: K
   return { keys: matched };
 }
 
+// Does the signature check out against any of the candidate keys? Returns the failure reason, or
+// undefined when one key verified it. Split out of verifyGrant, which had grown past the
+// complexity budget: this is the half with the loop and the two-way "malformed vs invalid" verdict.
+function signatureFailureReason(bytes: Buffer, sig: string, keys: readonly KeyInput[]): string | undefined {
+  let signature: Buffer;
+  try {
+    signature = Buffer.from(sig, 'base64');
+  } catch {
+    return 'malformed signature'; // `sig` absent or not a string
+  }
+
+  let threw = 0;
+  for (const key of keys) {
+    try {
+      if (cryptoVerify(null, bytes, toPublicKey(key), signature)) return undefined;
+    } catch {
+      // A signature of the wrong length, or a key this runner cannot use for this algorithm: try
+      // the rest of the list before deciding, so one bad block in a rotating secret cannot veto a
+      // grant the other key would have accepted.
+      threw += 1;
+    }
+  }
+  // "Malformed" only if NO key could even attempt the check. If any key reached a clean verdict
+  // and said no, the grant is a forgery, not a malformed one -- and during a rotation, where one
+  // key may throw while another cleanly rejects, calling that "malformed" would send the reader
+  // to inspect the secret instead of the grant.
+  return threw === keys.length ? 'malformed signature' : 'invalid signature';
+}
+
+// Is this grant bound to the environment it is executing in? Returns the failure reason, or
+// undefined when it belongs here. Checked by verifyGrant AFTER the signature (so a forged grant
+// still reads as a forgery) and BEFORE expiry (a grant in the wrong repository is wrong regardless
+// of how long it has left). The compared values are the SIGNED ones, so a grant cannot be
+// re-pointed at another repo or tenant without breaking the signature.
+function bindingFailureReason(grant: ExecutionGrant, environment?: GrantEnvironment): string | undefined {
+  if (environment?.repository && !sameRepo(grant.repoId, environment.repository)) {
+    return `grant is scoped to repository "${grant.repoId}" but is executing in "${environment.repository}"`;
+  }
+  if (environment?.tenantId && grant.tenantId !== environment.tenantId) {
+    return `grant is scoped to tenant "${grant.tenantId}" but is executing as tenant "${environment.tenantId}"`;
+  }
+  return undefined;
+}
+
 // Verify a grant's signature, its binding to the executing environment, and its expiry.
 //
 // `verifyKey` accepts one key or a LIST (see parseVerifyKeys). More than one key is what makes a
@@ -155,53 +199,11 @@ export function verifyGrant(
   const selected = selectKeys(grant, all);
   if (selected.keys.length === 0) return { ok: false, reason: selected.reason ?? 'no verify key configured' };
 
-  const bytes = canonicalize(payload as Omit<ExecutionGrant, 'sig'>);
-  let signature: Buffer;
-  try {
-    signature = Buffer.from(sig, 'base64');
-  } catch {
-    return { ok: false, reason: 'malformed signature' }; // `sig` absent or not a string
-  }
+  const signatureFailure = signatureFailureReason(canonicalize(payload as Omit<ExecutionGrant, 'sig'>), sig, selected.keys);
+  if (signatureFailure) return { ok: false, reason: signatureFailure };
 
-  let signatureValid = false;
-  let threw = 0;
-  for (const key of selected.keys) {
-    try {
-      if (cryptoVerify(null, bytes, toPublicKey(key), signature)) {
-        signatureValid = true;
-        break;
-      }
-    } catch {
-      // A signature of the wrong length, or a key this runner cannot use for this algorithm: try
-      // the rest of the list before deciding, so one bad block in a rotating secret cannot veto a
-      // grant the other key would have accepted.
-      threw += 1;
-    }
-  }
-  if (!signatureValid) {
-    // "Malformed" only if NO key could even attempt the check. If any key reached a clean verdict
-    // and said no, the grant is a forgery, not a malformed one -- and during a rotation, where one
-    // key may throw while another cleanly rejects, calling that "malformed" would send the reader
-    // to inspect the secret instead of the grant.
-    return { ok: false, reason: threw === selected.keys.length ? 'malformed signature' : 'invalid signature' };
-  }
-
-  // BINDING, checked after the signature (so a forged grant still reads as a forgery) and before
-  // expiry (a grant in the wrong repository is wrong regardless of how long it has left). The
-  // compared values are the SIGNED ones, so a grant cannot be re-pointed at another repo or
-  // tenant without breaking the signature above.
-  if (environment?.repository && !sameRepo(grant.repoId, environment.repository)) {
-    return {
-      ok: false,
-      reason: `grant is scoped to repository "${grant.repoId}" but is executing in "${environment.repository}"`,
-    };
-  }
-  if (environment?.tenantId && grant.tenantId !== environment.tenantId) {
-    return {
-      ok: false,
-      reason: `grant is scoped to tenant "${grant.tenantId}" but is executing as tenant "${environment.tenantId}"`,
-    };
-  }
+  const bindingFailure = bindingFailureReason(grant, environment);
+  if (bindingFailure) return { ok: false, reason: bindingFailure };
 
   const expiresAt = new Date(grant.expiresAt);
   if (Number.isNaN(expiresAt.getTime())) {

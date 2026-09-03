@@ -259,6 +259,19 @@ export interface VCSHost {
   // opening a PR from it, rather than trusting a vendor coding-agent Action step's own
   // self-reported branch name (src/runner/finalize-stage.ts, issue #113).
   getBranchSha(repoId: string, branch: string): Promise<string | undefined>;
+  // `ref`'s head commit and HOW MANY PARENTS it has. The parent count is the one cheap fact
+  // that separates the two ways a branch head moves under this control plane:
+  //   - a STAGE RUN pushed work -- an ordinary single-parent commit;
+  //   - the control plane itself refreshed the branch -- `updateBranch` (the watchdog's merge
+  //     keepalive) and `mergeBranch` (the promotion recheck's base refresh) BOTH land a
+  //     two-parent merge commit, and both fire on the same integration branch a feedback fix
+  //     is dispatched against, on their own schedule, mid-run.
+  // Without it, "the head moved since we dispatched" is not evidence that the FIX pushed
+  // anything -- an unrelated writer produces exactly the same reading, and the review-feedback
+  // lane used that reading to resolve a reviewer's thread and clear a merge hold.
+  // Optional, and fail-CLOSED at the caller: a host that cannot answer offers no evidence, and
+  // no evidence must never be read as proof of a push.
+  headCommit?(repoId: string, ref: string): Promise<{ sha: string; parentCount: number } | undefined>;
   // The open PR whose head is `headBranch`, if there is one. A rebuild of the same
   // subtask reuses its existing PR instead of opening a second one for the same work
   // (src/runner/finalize-stage.ts) -- the live trace accumulated duplicate build PRs
@@ -282,7 +295,12 @@ export interface VCSHost {
   // corrective feedback (a `changes_requested` review, or a review/PR comment) from a
   // human reviewer or an external review bot (e.g. Codex) and dispatch a fix -- the way
   // the old agent-fix did. Returns reviews and issue comments together, newest-inclusive.
-  listPrFeedback(repoId: string, prNumber: number): Promise<PrFeedback[]>;
+  //
+  // Answers a PrFeedbackReading, never a bare list: callers gate a MERGE on this, and a bare
+  // list cannot distinguish "no unresolved thread" from "the thread read failed" (see
+  // PrFeedbackReading). An implementation that cannot read one of its sources must say so on
+  // the 'unreadable' arm rather than returning the sources it could read as if they were all.
+  listPrFeedback(repoId: string, prNumber: number): Promise<PrFeedbackReading>;
   // The actor's permission on the repo ('admin' | 'write' | 'read' | 'none'). Used to
   // gate whose PR feedback is allowed to drive a fix -- a write/admin human or a trusted
   // review bot, never a drive-by comment from an unprivileged account.
@@ -514,6 +532,25 @@ export function permanentHostRefusal(err: unknown): HostRefusal | undefined {
 export type BranchRulesReading =
   | { outcome: 'read'; requiredChecks: string[]; requiresReview: boolean }
   | { outcome: 'unreadable'; reason: string };
+
+// What VCSHost.listPrFeedback answers. The same two arms, for the same reason, as
+// BranchRulesReading above -- and load-bearing in the same way:
+//   - 'read'       -- every source answered. `feedback` is COMPLETE, so an empty list genuinely
+//                     means "this PR has no feedback" and the absence of a thread genuinely means
+//                     "no thread is open on it". That is the ONLY reading a merge may proceed on.
+//   - 'unreadable' -- at least one source did not answer (a transport fault, a 5xx, a rate limit,
+//                     a credential without the scope, or a GraphQL response carrying `errors[]`).
+//                     `feedback` still carries whatever WAS read -- partial data is more useful
+//                     than none, and dropping it would lose the REST half over a GraphQL fault --
+//                     but it may be MISSING entries, so it can never be read as "there are none".
+//
+// This is an arm and not a throw on purpose. GitHub answers a permission/scope/field error on
+// /graphql with HTTP 200 and an `errors[]` array, which no `catch` can see; the review-thread
+// read failing that way is precisely the case the merge guard exists for, and an implementation
+// that reported it as an empty thread list -- as this one did -- fails OPEN on it.
+export type PrFeedbackReading =
+  | { outcome: 'read'; feedback: PrFeedback[] }
+  | { outcome: 'unreadable'; feedback: PrFeedback[]; reason: string };
 
 // The result of an atomic claim-ref creation: 'created' when this caller won the ref, 'exists'
 // when it was already present (the replay signal). Any hard failure throws instead.

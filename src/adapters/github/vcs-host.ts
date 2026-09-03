@@ -5,6 +5,7 @@ import type {
   ClaimRefResult,
   OpenPR,
   PrFeedback,
+  PrFeedbackReading,
   PublishedCheck,
   VCSHost,
 } from '../../contracts/adapters.ts';
@@ -121,6 +122,11 @@ const ASYNC_MERGE_POLL_INTERVAL_MS = 5_000;
 // commit. Making it explicit only removes the repository setting's ability to change it silently.
 const MERGE_METHOD = 'merge';
 
+// The merge methods that would land a pull request WITHOUT a merge commit -- the one outcome
+// MERGE_METHOD exists to prevent, and therefore the only values that justify refusing to adopt
+// an already-running asynchronous merge. Compared lowercased; see mergeAsync's 409 branch.
+const SQUASHING_MERGE_METHODS = new Set(['squash', 'rebase']);
+
 // The result of PUT /repos/{repo}/pulls/{n}/merge-async and of GET .../merge-async/{uuid}.
 // `status` is the whole verdict: 'merged' is done, 'failed' is a permanent refusal carrying
 // GitHub's reason, 'pending'/'enqueued' mean keep polling.
@@ -190,6 +196,9 @@ export class GitHubVCSHost implements VCSHost {
   // repeat every tick. Instance-scoped rather than module-scoped so one tenant's warning cannot
   // silence another's, and so it is observable from a test.
   private warnedUnresumable409 = false;
+  // One-shot, like the above: the 409's `merge_method` carrying an unrecognised value is adopted
+  // rather than refused, and a silent adoption is what makes a shape change undiagnosable.
+  private warnedUnknownAsyncMergeMethod = false;
 
   constructor(config: GitHubVCSHostConfig) {
     this.client = new GitHubClient(config);
@@ -297,15 +306,37 @@ export class GitHubVCSHost implements VCSHost {
       // named method that is not ours is a PERMANENT refusal that says which method it saw.
       // An ABSENT method is adopted: our own submits always name `merge`, and refusing on a field
       // GitHub merely omitted would wedge every ordinary resume.
+      //
+      // The refusal is TERMINAL (a 403, which permanentHostRefusal reads as permanent and merge.ts
+      // turns into `blocked` on tick one), so it is spent only on a value that POSITIVELY names a
+      // method that is not ours. `merge_method` in a 409 body is not part of the documented
+      // contract -- the 409 documents the uuid -- and it is evidenced solely by this repo's own
+      // stub, exactly the argument this same lane makes about the uuid. A terminal verdict keyed
+      // on a guess about an undocumented field's spelling is TEK-3766 with the sign flipped: our
+      // own healthy async merge refused on tick two, with a fabricated reason describing somebody
+      // else's merge. So: case-insensitive, and only the two methods that would actually land the
+      // PR without a merge commit count. Anything else -- absent, unrecognised, a shape this code
+      // does not know -- is ADOPTED, with a one-shot warning so it is diagnosable in one run.
       const runningMethod = asyncMergeMethodOf(err.body);
-      if (runningMethod !== undefined && runningMethod !== MERGE_METHOD) {
-        throw this.asyncMergeRefusal(
-          repoId,
-          prNumber,
-          `an asynchronous merge is already running for this pull request with merge_method ` +
-            `"${runningMethod}", not "${MERGE_METHOD}" -- adopting it would land the pull request ` +
-            `without a merge commit`,
-        );
+      const normalizedMethod = runningMethod?.trim().toLowerCase();
+      if (normalizedMethod !== undefined && normalizedMethod !== MERGE_METHOD) {
+        if (SQUASHING_MERGE_METHODS.has(normalizedMethod)) {
+          throw this.asyncMergeRefusal(
+            repoId,
+            prNumber,
+            `an asynchronous merge is already running for this pull request with merge_method ` +
+              `"${runningMethod}", not "${MERGE_METHOD}" -- adopting it would land the pull request ` +
+              `without a merge commit`,
+          );
+        }
+        if (!this.warnedUnknownAsyncMergeMethod) {
+          this.warnedUnknownAsyncMergeMethod = true;
+          console.warn(
+            `github: PR #${prNumber}: the running asynchronous merge reports merge_method ` +
+              `"${runningMethod}", which is neither "${MERGE_METHOD}" nor a known history-rewriting ` +
+              `method -- adopting it rather than refusing a merge that is most likely our own`,
+          );
+        }
       }
 
       const resumable = asyncMergeUuidOf(err.body);
@@ -462,7 +493,7 @@ export class GitHubVCSHost implements VCSHost {
     return 'pending';
   }
 
-  async listPrFeedback(repoId: string, prNumber: number): Promise<PrFeedback[]> {
+  async listPrFeedback(repoId: string, prNumber: number): Promise<PrFeedbackReading> {
     // Both endpoints default to oldest-first, 30/page -- so on a busy PR (many Codex
     // re-reviews + human back-and-forth) the NEWEST feedback lands on a later page and a
     // single fetch would miss it, never advancing the cursor. Paginate (bounded) so every
@@ -518,11 +549,24 @@ export class GitHubVCSHost implements VCSHost {
     // Paginate every page (a PR can carry >100 open threads; dropping the tail silently loses
     // reviewer feedback). A transient GraphQL error is already retried under the breaker by
     // client.request (resilient-request.ts), so a throw here means a non-transient or
-    // retry-exhausted failure -- and we still can't rethrow: the caller wraps this in
-    // `.catch(() => [])`, so throwing would drop the REST feedback too. On failure we keep
-    // whatever threads we already paged plus the REST feedback, and let the next tick re-read
-    // (the missing threads stay below the cursor, so they aren't marked seen).
+    // retry-exhausted failure -- and we still can't rethrow: throwing would drop the REST
+    // feedback too. On failure we keep whatever threads we already paged plus the REST feedback
+    // and report the reading as 'unreadable', which is what the merge guards hold on. Reporting
+    // it as a clean, thread-less read is what let a promotion merge over an open Codex P1 with
+    // the guard in place and green.
+    //
+    // THREE ways the thread read fails, and only one of them is a throw:
+    //   1. client.request throws (transport, retry-exhausted, a hard status).
+    //   2. GitHub answers HTTP 200 with an `errors[]` array -- its ORDINARY shape for a
+    //      permission/scope/field error on /graphql, and for a secondary rate limit. No catch
+    //      ever sees this one.
+    //   3. HTTP 200, no errors, but the connection isn't there (a null `repository` on a
+    //      token that can't see it). "Cannot tell" again, never "no threads".
+    let threadsUnreadable: string | undefined;
     const [owner, repo] = repoId.split('/');
+    if (!owner || !repo) {
+      threadsUnreadable = `"${repoId}" is not an owner/repo id, so its review threads could not be read`;
+    }
     if (owner && repo) {
       const query = `query($owner:String!,$repo:String!,$pr:Int!,$after:String){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor}nodes{id isResolved comments(first:1){nodes{databaseId body author{login __typename}}}}}}}}`;
       const threads: GhReviewThread[] = [];
@@ -530,13 +574,31 @@ export class GitHubVCSHost implements VCSHost {
       for (let page = 0; page < 50; page++) {
         let conn: GhReviewThreadsConnection | undefined;
         try {
-          const res: { data?: GhReviewThreadsData } | undefined = await this.client.request<{ data?: GhReviewThreadsData }>('POST', '/graphql', {
+          const res: GhGraphQLResponse<GhReviewThreadsData> | undefined = await this.client.request<
+            GhGraphQLResponse<GhReviewThreadsData>
+          >('POST', '/graphql', {
             query,
             variables: { owner, repo, pr: prNumber, after },
           });
+          const errors = res?.errors;
+          if (Array.isArray(errors) && errors.length > 0) {
+            // Case 2: a 200 carrying errors[]. This is what a dropped `read:discussion`, a
+            // rotated PAT, an App permission change and a secondary rate limit all look like.
+            threadsUnreadable =
+              `the review-thread GraphQL query was refused: ` +
+              errors.map((e) => e?.message ?? 'unknown error').join('; ');
+            break;
+          }
           conn = res?.data?.repository?.pullRequest?.reviewThreads;
-        } catch {
-          break; // non-transient or retry-exhausted: keep prior pages + REST, retry next tick
+          if (!conn) {
+            // Case 3: a 200 with neither errors nor the connection. Nothing was read.
+            threadsUnreadable = 'the review-thread GraphQL query returned no reviewThreads connection';
+            break;
+          }
+        } catch (err) {
+          // Case 1: non-transient or retry-exhausted. Keep prior pages + REST, retry next tick.
+          threadsUnreadable = `the review-thread GraphQL query failed: ${err instanceof Error ? err.message : String(err)}`;
+          break;
         }
         threads.push(...(conn?.nodes ?? []));
         if (!conn?.pageInfo?.hasNextPage) break;
@@ -564,7 +626,29 @@ export class GitHubVCSHost implements VCSHost {
         });
       }
     }
-    return out;
+    return threadsUnreadable === undefined
+      ? { outcome: 'read', feedback: out }
+      : { outcome: 'unreadable', feedback: out, reason: threadsUnreadable };
+  }
+
+  // The head commit of `ref` and its parent count -- see the VCSHost contract for why the
+  // parent count is the fact that matters. `undefined` on ANY failure (a missing ref, a
+  // transport fault, a body without a usable sha): the caller reads that as "no evidence",
+  // which is the safe direction, and never as "the head did not move".
+  async headCommit(repoId: string, ref: string): Promise<{ sha: string; parentCount: number } | undefined> {
+    try {
+      const commit = await this.client.requestOptional<{ sha?: string; parents?: unknown[] }>(
+        'GET',
+        `/repos/${repoId}/commits/${ref}`,
+      );
+      if (!commit?.sha) return undefined;
+      // A commit with no `parents` array at all is a shape we do not understand, not a root
+      // commit -- reporting 0 there would read as "an ordinary push", the permissive answer.
+      if (!Array.isArray(commit.parents)) return undefined;
+      return { sha: commit.sha, parentCount: commit.parents.length };
+    } catch {
+      return undefined;
+    }
   }
 
   async collaboratorPermission(repoId: string, login: string): Promise<'admin' | 'write' | 'read' | 'none'> {
@@ -1139,6 +1223,15 @@ interface GhReviewThreadsConnection {
 
 interface GhReviewThreadsData {
   repository?: { pullRequest?: { reviewThreads?: GhReviewThreadsConnection } };
+}
+
+// GitHub's /graphql envelope. `errors` is the half that matters here: a permission/scope/field
+// refusal and a secondary rate limit both arrive as HTTP 200 with `errors[]` and a `data` whose
+// fields are null -- indistinguishable, to any code that only inspects `data`, from a genuine
+// "this pull request has no review threads".
+interface GhGraphQLResponse<T> {
+  data?: T;
+  errors?: { message?: string }[];
 }
 
 function mapPRState(state: string, merged: boolean): 'open' | 'closed' | 'merged' {

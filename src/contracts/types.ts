@@ -1196,8 +1196,20 @@ export interface TicketState {
   // among the fix lanes, every one of which spends fix.maxFixRounds and then blocks
   // (resolveConflict, the external-PR lane, the promotion CI lane, fix-loop.ts). Counted when a
   // dispatched feedback fix TERMINATES, pass or fail -- never while one is in flight, so a
-  // multi-minute run can't burn the budget one tick at a time. Reset when the ticket's promotion
-  // merges, alongside conflictFixAttempts.
+  // multi-minute run can't burn the budget one tick at a time.
+  //
+  // NEVER reset, unlike conflictFixAttempts -- this is a whole-lifetime budget for the ticket's
+  // promotion PR, and deliberately so. (An earlier version of this comment claimed a reset "when
+  // the ticket's promotion merges, alongside conflictFixAttempts", which never existed in code
+  // and could not: conflictFixAttempts is reset at the ROLLUP merge, which happens BEFORE the
+  // promotion PR is even opened, and the promotion merge is the ticket's terminal event -- this
+  // lane never runs again after it, so a reset there would bound nothing at all.)
+  //
+  // The consequence is real and intended: two rounds spent on an early nit leave fewer for a P1
+  // that arrives hours later, and the ticket then blocks for a human. That is the honest end
+  // state -- the fixer has had its rounds on this PR and a finding still stands -- and the knob
+  // for "a reviewer-heavy PR needs more rounds" is fix.maxFixRounds, not a reset that would let
+  // an unfixable finding loop forever by re-earning its budget.
   feedbackFixAttempts?: number;
   // How many times a `fix` stage has been dispatched to auto-resolve a merge conflict on
   // this ticket's PR. Bounds the conflict self-heal so a genuinely unresolvable conflict
