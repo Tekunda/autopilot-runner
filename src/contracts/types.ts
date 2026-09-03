@@ -1135,6 +1135,13 @@ export interface SubtaskState {
   // Set when THIS subtask was blocked by a gate VERDICT (findings), naming the gate
   // implementation that produced those findings. See GateBlockProvenance.
   gateBlock?: GateBlockProvenance;
+  // Consecutive dispatches on this subtask (build/gate/fix/ciFix) the model PROVIDER refused
+  // before any model ran. Counted separately from buildAttempts/reviewAttempts/ciFixAttempts so
+  // a refusal never spends a repair budget nobody's fixer touched -- the ticket-level
+  // TicketState.providerBackoff is what actually paces the retry; this is only the per-subtask
+  // "was the last round a refusal" fact those lanes read before charging their own counter.
+  // Reset by any dispatch that reaches a model, pass or fail.
+  providerRejections?: number;
 }
 
 // WHICH gate implementation produced the findings that blocked a subtask (and, rolled up, its
@@ -1653,24 +1660,17 @@ export interface TicketState {
   // externalQaFixAttempts so a flake never eats the content fix-loop budget; capped at 1, then
   // the drive falls through to a terminal fail that names the real cause. Reset on a real verdict.
   qaNoVerdictRetries?: number;
-  // How many consecutive dispatches the model PROVIDER refused before any model ran (a
-  // rate/usage limit on the agent credential -- classified runner-side, see
-  // runner/provider-rejection.ts). Counts the `fix` autofix AND the `accept` QA run that gates the
-  // same PR, on one counter rather than two, because it is one fact about one credential: whether
-  // the provider is refusing this ticket's dispatches right now. The observed incident interleaved
-  // them -- external-pr-1534 was refused once as QA and three times as autofix inside 52 minutes
-  // -- so a per-lane counter would have granted each lane its own free retry and still billed the
-  // PR for the rest. Kept SEPARATE from externalQaFixAttempts for the same reason
-  // qaNoVerdictRetries is: a request that never reached a model repaired nothing, so charging it
-  // to the content fix-loop budget spends repair rounds on attempts nobody made and then reports
-  // the PR as unfixable.
-  //
-  // ONE free re-dispatch per streak, then the drive falls through to ordinary accounting -- a
-  // sustained outage still reaches a terminal state rather than re-dispatching forever, it just
-  // does not pay for the first refusal. Reset ONLY by a fix run that actually reached a model:
-  // resetting on every consume (including a rejected run past the cap) made the counter oscillate
-  // 1,0,1,0... and charged every SECOND rejection, which is a half-fix wearing a cap's name.
-  providerRejectionRetries?: number;
+  // Backoff while the model PROVIDER is refusing this ticket's dispatches (every lane: architect,
+  // review, external-QA/autofix, subtask build/gate/fix, promotion self-heal). `notBefore` gates
+  // the per-tick drive (runTicketOnce) so a sustained outage backs off instead of re-dispatching
+  // every tick; `rejections` drives the curve; `firstRejectedAt` anchors the one-time 6h
+  // escalation. `escalatedAt` is the DURABLE gate on that one-time escalation -- stamped the
+  // moment it fires, checked before ever computing the escalation notice again, so a growing
+  // `lastReason` (a real rate-limit message quotes a reset timestamp, so it varies rejection to
+  // rejection) can never defeat a text-dedupe and re-escalate every tick past 6h. Cleared the
+  // moment any dispatch on this ticket reaches a model (clearProviderBackoff, fix-loop.ts) -- a
+  // streak never survives a run that actually ran.
+  providerBackoff?: { rejections: number; firstRejectedAt: string; notBefore: string; lastReason: string; escalatedAt?: string };
   // The PR head sha the EXHAUSTED external-QA budget above was charged against, stamped once
   // the budget is spent. externalQaFixAttempts only ratchets up, so without this a PR that
   // spent it was terminal forever: every later tick re-stamped the same qa=fail without
