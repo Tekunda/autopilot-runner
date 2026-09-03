@@ -10,6 +10,7 @@ import type {
   VCSHost,
 } from '../../contracts/adapters.ts';
 import { retryableHostMessage } from '../../contracts/adapters.ts';
+import { sameRepoId } from '../../contracts/types.ts';
 import type { CheckResult, CheckRunSnapshot, OpenCheckRun, PRStatus } from '../../contracts/types.ts';
 import { GitHubApiError, GitHubClient, type GitHubClientConfig } from './rest.ts';
 
@@ -957,41 +958,40 @@ export class GitHubVCSHost implements VCSHost {
     return ref?.object.sha;
   }
 
-  // GitHub's `head` filter is `owner:branch`; the owner is the repo's own owner for
-  // every branch Autopilot pushes (we never fork).
-  //
-  // The owner here comes from the tenant's CONFIGURED repoId, which is spelled however the
-  // tenant-store entry spelled it (`tekunda/website`) and may differ in case from the repo's
-  // canonical `full_name` (`Tekunda/Website`) -- see sameRepoId in contracts/types.ts. The
-  // `/repos/{repoId}` PATH is case-insensitive, but this filter is matched against the stored
-  // head LABEL, which is a different matcher, so it needed its own evidence before anything
-  // could rely on it. VERIFIED 2026-09-03 against live repos, in the exact percent-encoded wire
-  // form this method builds (`:` -> %3A, `/` -> %2F). Pinned against a MERGED head branch with
-  // `state=all` so the commands keep reproducing -- an open-PR example stops matching the moment
-  // that PR merges, which would quietly turn this evidence into three zeros:
-  //   B=autopilot/pipeline-validation-help-center-article-pages-em-build-76186c4f
-  //   gh api "repos/Tekunda/Website/pulls?state=all&head=Tekunda%3A$B" -q length  -> 4
-  //   gh api "repos/Tekunda/Website/pulls?state=all&head=tekunda%3A$B" -q length  -> 4
-  //   gh api "repos/Tekunda/Website/pulls?state=all&head=TEKUNDA%3A$B" -q length  -> 4
-  //   gh api "repos/Tekunda/Website/pulls?state=all&head=octocat%3A$B" -q length  -> 0
-  // The octocat line is the CONTROL, and it is what makes the other three mean anything: a real
-  // but unrelated owner returns 0, so the filter is genuinely being matched rather than ignored.
-  // (A filter GitHub silently dropped would return 4 for every spelling too, including octocat.)
-  //
-  // So the OWNER half is matched case-insensitively and a mis-cased repoId still finds its PR:
-  // no canonicalization is needed, and none is done (resolving `full_name` per call would buy
-  // nothing and add a metadata request that can fail on a path that must not fail open).
-  // The BRANCH half is NOT case-insensitive -- the same query with the branch upper-cased
-  // returned 0 -- but branch names are minted by this pipeline and round-trip verbatim, so
-  // they never cross the config seam that the owner does.
-  //
-  // IF THIS EVER FLIPS: the test in vcs-host.test.ts pins OUR assumption via a stub, so it keeps
-  // passing no matter what GitHub does -- a server-side change here is SILENT and destructive
-  // (mis-cased tenant -> `undefined` -> openPrOn says no PR -> the reset lanes delete the branch
-  // -> GitHub closes the open PR with it). Re-running the commands above is the only detection.
-  // The real hedge is not more code on this path: it is normalizing repoId against the repo's
-  // `full_name` ONCE at tenant registration, so no lookup ever crosses the casing seam. That is
-  // a separate task; until it exists, treat the four lines above as the load-bearing evidence.
+  // The repo's own spelling of its "owner/repo" slug. Called once at tenant registration
+  // (multi-tenant-service.ts / main.ts) so `repoId` is canonical from startup on; comparisons
+  // against a repoId stored earlier still go through sameRepoId (contracts/types.ts). No memo:
+  // every caller of this discards its host the moment it gets an answer (a rebuilt host on a
+  // corrected repoId is a fresh instance that is never asked again), so a cache here could only
+  // ever miss.
+  async canonicalRepoId(repoId: string): Promise<string> {
+    const repo = await this.client.request<{ full_name?: unknown }>('GET', `/repos/${repoId}`);
+    if (typeof repo?.full_name !== 'string' || !repo.full_name.includes('/')) {
+      throw new Error(`canonicalRepoId: no full_name in the response for ${repoId}`);
+    }
+    const fullName = repo.full_name;
+    // GET /repos/{old} 301-follows a RENAMED or TRANSFERRED repo too, not only a re-cased one --
+    // so a full_name that fails sameRepoId means the configured repoId no longer names this repo
+    // at all. Adopting it would point every future call at whatever now sits at the OLD address;
+    // refuse, and leave the mismatch for a human to resolve in the tenant's own config.
+    if (!sameRepoId(fullName, repoId)) {
+      console.warn(
+        `canonicalRepoId: "${repoId}" now resolves to "${fullName}" -- a DIFFERENT repo name, not just a different case. This looks like a rename or transfer; refusing to adopt it. Update the tenant's configured repoId by hand.`,
+      );
+      return repoId;
+    }
+    return fullName;
+  }
+
+  // The owner half of GitHub's `head=owner:branch` filter is matched case-insensitively, the
+  // branch half is not. VERIFIED against a live repo: `gh api "repos/Tekunda/Website/pulls?state=all&head=tekunda%3A$B"`
+  // returns the same count as the canonically-cased query; the CONTROL is the same query with
+  // `head=octocat%3A$B`, which returns 0 -- a real but unrelated owner, proving the filter is
+  // genuinely matched rather than silently dropped. Re-run that pair to detect a server-side flip.
+  // repoId is canonicalized at startup (see canonicalRepoId), so this assumption is not
+  // load-bearing for a tenant started after that -- but it still is on canonicalRepoId's own
+  // fallback path (a lookup that fails keeps the configured spelling) and for any ticket/tenant
+  // whose store entries predate this change.
   async findOpenPR(repoId: string, headBranch: string): Promise<{ url: string; number: number } | undefined> {
     const owner = repoId.split('/')[0];
     const head = encodeURIComponent(`${owner}:${headBranch}`);

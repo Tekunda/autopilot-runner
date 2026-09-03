@@ -273,6 +273,12 @@ export interface TaskBackend {
 }
 
 export interface VCSHost {
+  // The repo's own spelling of its "owner/repo" slug (GitHub: `full_name`). Optional because it
+  // is a capability, not a requirement -- a host that does not implement it (or a fake standing
+  // in for one) degrades to "keep whatever repoId the caller already has", exactly the same
+  // degradation as a lookup that fails at runtime. See resolveCanonicalRepoId, the one place
+  // this is called: once, at tenant registration, so `repoId` is canonical everywhere after.
+  canonicalRepoId?(repoId: string): Promise<string>;
   createBranch(repoId: string, name: string, fromRef: string): Promise<void>;
   openPR(
     repoId: string,
@@ -656,6 +662,33 @@ export function permanentHostRefusal(err: unknown): HostRefusal | undefined {
   if (retryableHostMessage(message)) return undefined;
   if (status === 403 || status === 422) return { status, message };
   return undefined;
+}
+
+// The one place a configured repoId is resolved to canonical -- called once, at tenant
+// registration (multi-tenant-service.ts's buildControlPlane, main.ts's applyCanonicalRepoId), so
+// `repoId` is the host's own spelling everywhere downstream from then on. Never throws: a host
+// with no canonicalRepoId (a fake, or a provider that never grows one) and a lookup that fails
+// both degrade to the SAME outcome -- keep the configured spelling, warn that canonicalization
+// was skipped -- because neither is a reason to refuse to start. `warn` is the caller's own
+// logger: this module has no I/O of its own, so the message is built here (once, not duplicated
+// at each call site) and handed to whatever the caller already logs through.
+export async function resolveCanonicalRepoId(
+  vcsHost: VCSHost,
+  repoId: string,
+  label: string,
+  warn: (message: string) => void,
+): Promise<string> {
+  if (!vcsHost.canonicalRepoId) return repoId;
+  try {
+    const canonical = await vcsHost.canonicalRepoId(repoId);
+    if (canonical !== repoId) {
+      warn(`${label}: configured repoId "${repoId}" differs from GitHub's canonical "${canonical}" -- using the canonical spelling`);
+    }
+    return canonical;
+  } catch (err) {
+    warn(`${label}: repoId canonicalization failed (${err instanceof Error ? err.message : String(err)}) -- using configured "${repoId}"`);
+    return repoId;
+  }
 }
 
 // What VCSHost.readBranchRules answers. Two arms, never collapsible into one:

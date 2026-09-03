@@ -1957,8 +1957,14 @@ export function isExternalPrTicket(ticketId: string): boolean {
 // stricter check, it is a WRONG one, and it fails SILENTLY in both directions: the external-PR
 // sweep reads every same-repo PR as a fork and adopts nothing, and a legitimate grant reads as
 // executing in the wrong repository. Comparisons between two values that came from the SAME side
-// of the seam (a stored ticket's repoId against the tenant's, a fake's own key) need nothing from
-// here and use `===`.
+// of the seam (two fakes' own keys in a test) need nothing from here and use `===`.
+//
+// A tenant's repoId is canonicalized once at registration (adapters/github/vcs-host.ts's
+// canonicalRepoId), so `this.config.repoId` IS the host's own spelling from then on -- but a
+// ticket's own repoId is stamped once at import and never re-stamped, so a ticket imported before
+// its tenant's repoId was canonicalized (or before this normalization existed at all) still
+// carries the OLD spelling. A stored ticket's repoId against the tenant's is therefore NOT
+// same-side any more and needs sameRepoId too (control-plane.ts's orphanScanRefs).
 export function sameRepoId(a: string, b: string): boolean {
   return a.trim().toLowerCase() === b.trim().toLowerCase();
 }
