@@ -1349,6 +1349,55 @@ export interface TicketState {
   // Typed as BlockReason, not string: only `blockReason()` can mint one, so a writer cannot
   // record an empty or non-string explanation. See block-reason.ts.
   blockedReason?: BlockReason;
+  /**
+   * Whether the block recorded in `blockedReason` is PERMANENT: a deterministic refusal that
+   * retrying cannot change. Set alongside `blockedReason` by whichever writer establishes the fact;
+   * cleared by every resume, exactly like `blockedReason` itself.
+   *
+   * WHY THIS IS A FIELD AND NOT A PHRASE. On 2026-09-02 an owner replied "try again" on a ticket
+   * blocked by a GitHub 403 refusing to merge a stacked PR synchronously. The resume re-drove it,
+   * the merge was retried eight times over three minutes, and it re-blocked with the byte-identical
+   * refusal -- because nothing in the state said "this answer will not change". Retrying a
+   * deterministic refusal can only reproduce it.
+   *
+   * The obvious fix -- match the reason text -- is the wrong one, and the audit names it as a root
+   * cause: several recovery lanes already select on English prefixes (`entitlement:`, `budget: repo`,
+   * `review not met`), which makes every reason string load-bearing, invisible to the compiler, and
+   * broken by rewording. So permanence is recorded as a STRUCTURED FACT, decided where the host's
+   * answer is actually in hand, and read as a boolean by the lane that must not re-drive.
+   *
+   * WHO SETS IT. Any writer that blocks a ticket on an answer it knows to be deterministic. The
+   * merge path is the first: `permanentHostRefusal(err)` (contracts/adapters.ts) classifies a host
+   * refusal, and a merge that returns `{ outcome: 'blocked', reason }` for one records
+   * `blockPermanent: true` beside the reason it carries verbatim. Nothing infers it from text, here
+   * or anywhere.
+   *
+   * WHO READS IT. `recoverBlockedOnReply`: a reply on a permanently-blocked ticket answers with what
+   * is actually needed instead of re-driving. An unset field means "not known to be permanent" and
+   * behaves exactly as before -- the safe direction, since the cost of a wrong `true` is a resume
+   * that has to be asked for twice.
+   */
+  blockPermanent?: true;
+  /**
+   * A resume this ticket is still owed an OUTCOME report for: WHO asked for it, and what it was
+   * resuming to do.
+   *
+   * It exists because "resumed" and "finished" are different events and only the first was ever
+   * visible: the three-minute retry above ran entirely through the host API, so no Actions run
+   * fired, nothing appeared on the PR, and the re-block was deduped against the block it repeated.
+   * From the owner's seat their reply was ignored. A resume that reports its outcome cannot look
+   * ignored, even when the outcome is "the same refusal, eight times".
+   *
+   * `by` is PROVENANCE, and it is load-bearing rather than bookkeeping. Most resumes on this system
+   * are automatic -- an auto-replan when a repair budget runs out, a gate-version re-validation, a
+   * dependency wake -- and an outcome report that says "your reply resumed this ticket" on one of
+   * those is a lie told on the customer's board about something they never did. Only a resume a
+   * PERSON asked for is owed this report; the automatic lanes narrate themselves at the moment they
+   * fire and have nothing further to answer for.
+   *
+   * Absent means no report is owed, which is the state every automatic resume leaves behind.
+   */
+  resumeAwaitingOutcome?: { by: 'reply' | 'board-move'; intent: string };
   // Consecutive times the watchdog has nudged a stalled QA/fixer stage back to
   // life without the stage making progress. Bounds the stall re-arm loop
   // (watchdog.ts MAX_STALL_RECOVERIES) so a genuinely dead runner is escalated
