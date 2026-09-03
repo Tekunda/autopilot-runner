@@ -163,8 +163,6 @@ function asyncMergeMethodOf(body: unknown): string | undefined {
   return undefined;
 }
 
-
-
 export interface GitHubVCSHostConfig extends GitHubClientConfig {
   /** The numeric id of the GitHub App whose installation token this host uses (GitHub's
    *  `AUTOPILOT_GITHUB_APP_ID`). Supplied so listOpenCheckRuns can scope its listing to
@@ -178,6 +176,9 @@ export interface GitHubVCSHostConfig extends GitHubClientConfig {
    *  defaults (ASYNC_MERGE_POLL_INTERVAL_MS / ASYNC_MERGE_DEADLINE_MS) are what production uses. */
   asyncMergePollIntervalMs?: number;
   asyncMergeDeadlineMs?: number;
+  /** Clock for the asynchronous-merge deadline. Defaults to the real one; a test drives it
+   *  explicitly so the bound is asserted deterministically rather than raced against wall time. */
+  now?: () => number;
 }
 
 export class GitHubVCSHost implements VCSHost {
@@ -190,6 +191,7 @@ export class GitHubVCSHost implements VCSHost {
   private readonly asyncMergeSleep: (ms: number) => Promise<void>;
   private readonly asyncMergePollIntervalMs: number;
   private readonly asyncMergeDeadlineMs: number;
+  private readonly now: () => number;
   // One-shot diagnostic for a 409 whose body yields no uuid. Once per HOST, which is once per
   // tenant for the life of its control plane: the first occurrence prints the shape GitHub
   // actually sent, which is the whole diagnosis, and this sits on a path that would otherwise
@@ -207,6 +209,7 @@ export class GitHubVCSHost implements VCSHost {
     this.asyncMergeSleep = config.asyncMergeSleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.asyncMergePollIntervalMs = config.asyncMergePollIntervalMs ?? ASYNC_MERGE_POLL_INTERVAL_MS;
     this.asyncMergeDeadlineMs = config.asyncMergeDeadlineMs ?? ASYNC_MERGE_DEADLINE_MS;
+    this.now = config.now ?? (() => Date.now());
   }
 
   async createBranch(repoId: string, name: string, fromRef: string): Promise<void> {
@@ -285,7 +288,7 @@ export class GitHubVCSHost implements VCSHost {
       // Any throw here (403 without the permission, 400 "the pull request is closed or a draft",
       // 422) propagates unchanged: the caller must see GitHub's own refusal, not a wrapped one.
       const accepted = await this.client.request<GhMergeAsyncResult>('PUT', path, { merge_method: MERGE_METHOD });
-      if (accepted?.status === 'merged') return; // 200: already merged
+      if (accepted?.status === 'merged') return await this.confirmMergeCommit(repoId, prNumber); // 200: already merged
       if (accepted?.status === 'failed') throw this.asyncMergeRefusal(repoId, prNumber, accepted.details?.message);
       uuid = asyncMergeUuidOf(accepted);
     } catch (err) {
@@ -362,29 +365,32 @@ export class GitHubVCSHost implements VCSHost {
     // instantly instead of spinning against a Date.now() that never advances. The wall-clock
     // check is the other half of the belt-and-braces: it stops a poll whose own requests ran long
     // enough to blow the deadline before the attempt budget ran out.
-    const started = Date.now();
+    const started = this.now();
     const maxPolls = Math.max(1, Math.ceil(this.asyncMergeDeadlineMs / this.asyncMergePollIntervalMs));
     for (let poll = 0; poll < maxPolls; poll++) {
       await this.asyncMergeSleep(this.asyncMergePollIntervalMs);
-      // Checked BEFORE the reads, not after them. At the end of the body it could only fire once
-      // the reads it was meant to bound had already been issued -- two GETs that can each burn
-      // the client's full timeout and retry budget -- so a single slow iteration could overrun
-      // the "well under one tick" window this whole design rests on.
-      if (Date.now() - started >= this.asyncMergeDeadlineMs) break;
+      // Checked on BOTH sides of the read block, and that is not belt-and-braces padding: the two
+      // catch different things. Measured, top-of-loop ALONE is a regression -- reads already
+      // started run to completion either way, so it gates the same iteration as a bottom check
+      // while paying one extra sleep, losing a poll for the same wall clock. Bottom-of-loop alone
+      // is what shipped before, and it cannot stop the NEXT sleep from being entered. Together,
+      // the cheap top check skips a sleep we know is pointless and the bottom check ends the call
+      // the moment the reads themselves blew the window.
+      if (this.now() - started >= this.asyncMergeDeadlineMs) break;
 
       // The merge request's own verdict, when we have its id. Authoritative and, crucially, the
       // only place a FAILED background merge is visible -- without it a conflict would look
       // identical to "still running" and burn the whole window every tick, forever.
       if (uuid) {
         const result = await this.readDuringMerge<GhMergeAsyncResult>(`${path}/${uuid}`);
-        if (result?.status === 'merged') return;
+        if (result?.status === 'merged') return await this.confirmMergeCommit(repoId, prNumber);
         if (result?.status === 'failed') throw this.asyncMergeRefusal(repoId, prNumber, result.details?.message);
       }
 
       // Ground truth regardless: the PR itself. `merged` is the only thing that lets this method
       // resolve.
       const pr = await this.readDuringMerge<GhPullDetail>(`/repos/${repoId}/pulls/${prNumber}`);
-      if (pr?.merged) return;
+      if (pr?.merged) return await this.confirmMergeCommit(repoId, prNumber, pr);
       // Closed without merging: stop polling, but do NOT call it a refusal. `completeOrArmMerge`
       // has a distinct `closed` outcome for exactly this -- "a human rejected this work" -- which
       // callers treat differently from `blocked`, and it reaches that outcome by re-reading the
@@ -394,6 +400,7 @@ export class GitHubVCSHost implements VCSHost {
       if (pr && pr.state === 'closed' && !pr.merged) {
         throw new GitHubApiError(504, 'PUT', path, `PR #${prNumber} was closed without merging while its asynchronous merge was running`);
       }
+      if (this.now() - started >= this.asyncMergeDeadlineMs) break;
     }
 
     // Still running, and this call is out of its window. NOT a refusal, and not a lost merge: it
@@ -406,6 +413,53 @@ export class GitHubVCSHost implements VCSHost {
       path,
       `asynchronous merge of PR #${prNumber} has not completed within ${Math.round(this.asyncMergeDeadlineMs / 1000)}s ` +
         `(${maxPolls} polls at ${this.asyncMergePollIntervalMs}ms): it is still running, and the next attempt will rejoin it`,
+    );
+  }
+
+  // THE INVARIANT, checked positively: every exit where `mergeAsync` concludes the PR merged must
+  // have landed a real merge commit -- two parents.
+  //
+  // Scoped to `mergeAsync` deliberately, and the comment says so rather than claiming the whole
+  // adapter: the synchronous `merge()` at the top of this file resolves unchecked. That is safe
+  // for a different reason -- its PUT names `merge_method: 'merge'` in the SAME request that
+  // lands the commit, so there is no window in which somebody else's method could be the one
+  // that ran. `mergeAsync` has exactly that window, which is what this guards.
+  //
+  // Everything upstream of this is a claim ABOUT the merge: the merge_method we asked for, the
+  // merge_method a 409 reported for a request we adopted, `status: 'merged'`, `pr.merged`. None of
+  // them is the invariant, and the gap between them is silent. A human clicking Merge with squash
+  // while our poll is running, a 409 that omits or renames its method field, an older deployment's
+  // enqueued request -- each ends with the poll reading 'merged' and merge() resolving, the ticket
+  // going done, and the rollup on the base as a squash with ONE parent. deploy.yml reads the
+  // second parent, and blocked-recovery treats such a ref as uncontained forever, so the work
+  // lands and nothing ever notices.
+  //
+  // Reading the commit is immune to whatever GitHub calls the method field, and it is the only
+  // check here that tests the thing that actually matters. The parent count comes from
+  // `headCommit`, which already exists for the watchdog and is the ONE place this repo reads
+  // "how many parents does this commit have" -- reusing it keeps a single reading of that fact
+  // rather than a private second parse of the same body. Its contract already matches what is
+  // needed here: `undefined` on ANY failure, never a fabricated 0.
+  //
+  // A read that FAILS is not a verdict (same rule as readDuringMerge): the merge did happen, so
+  // an unverifiable parent count resolves as before rather than inventing a refusal out of a
+  // failed request. That is also why the PR read here is `readDuringMerge` and not `getPR`, which
+  // shares the `merge_commit_sha` fact but THROWS on an unreadable PR -- inside merge() that
+  // throw would escape as though the merge itself had been refused.
+  private async confirmMergeCommit(repoId: string, prNumber: number, known?: GhPullDetail): Promise<void> {
+    const pr = known ?? (await this.readDuringMerge<GhPullDetail>(`/repos/${repoId}/pulls/${prNumber}`));
+    const sha = pr?.merge_commit_sha;
+    if (!sha) return;
+    const commit = await this.headCommit(repoId, sha);
+    if (!commit || commit.parentCount >= 2) return;
+    throw this.asyncMergeRefusal(
+      repoId,
+      prNumber,
+      `it landed as ${sha}, a commit with ${commit.parentCount} parent(s) rather than a merge ` +
+        `commit's two. The work is on the base branch, but as a squash or rebase, so the deploy ` +
+        `workflow's second parent is missing and the branch compares as uncontained. A human has ` +
+        `to decide how to restore it`,
+      'completed as the wrong kind of merge',
     );
   }
 
@@ -431,12 +485,22 @@ export class GitHubVCSHost implements VCSHost {
   // A background merge that FAILED: permanent. Carries a 403 so the control plane's
   // permanentHostRefusal blocks on the first tick with GitHub's own words, instead of filing it
   // as retryable and inventing a tick-count reason later.
-  private asyncMergeRefusal(repoId: string, prNumber: number, message: string | undefined): GitHubApiError {
+  //
+  // `outcome` is the headline, overridable because not every permanent refusal on this path is a
+  // merge that failed to finish. confirmMergeCommit's is the opposite: the merge DID complete,
+  // with the wrong shape, and "did not complete: it landed as <sha>" contradicts itself in the
+  // one line a human reads first.
+  private asyncMergeRefusal(
+    repoId: string,
+    prNumber: number,
+    message: string | undefined,
+    outcome = 'did not complete',
+  ): GitHubApiError {
     return new GitHubApiError(
       403,
       'PUT',
       `/repos/${repoId}/pulls/${prNumber}/merge-async`,
-      `asynchronous merge of PR #${prNumber} did not complete: ${message ?? 'the host reported no reason'}`,
+      `asynchronous merge of PR #${prNumber} ${outcome}: ${message ?? 'the host reported no reason'}`,
     );
   }
 

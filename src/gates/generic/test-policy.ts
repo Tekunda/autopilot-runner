@@ -33,7 +33,7 @@
 //     from blocking the PR that broke it, which is what this defect needs.
 //
 //   - The dirs exist but this diff touched none of them (a docs-only PR) -> `skip` +
-//     `no-matching-route`. Honest for one PR, and the non-benign reason keeps it out of the
+//     `no-matching-files`. Honest for one PR, and the non-benign reason keeps it out of the
 //     promotion coverage record.
 
 import { stat } from 'node:fs/promises';
@@ -125,7 +125,7 @@ function companionsFor(file: string, extensions: string[], markers: string[]): s
 // A source root is a REPO-RELATIVE directory. An absolute path or one that climbs out of the
 // checkout is not a misdirected root, it is an invalid one -- and left unclamped it is worse
 // than useless: `sourceDirs: ['/tmp/']` stats a directory that exists on every runner, so the
-// probe below would report the healthy `no-matching-route` forever and permanently hide the
+// probe below would report the healthy `no-matching-files` forever and permanently hide the
 // misconfiguration it exists to surface.
 async function isDirectoryInCheckout(root: string, dir: string): Promise<boolean> {
   const base = path.resolve(root);
@@ -186,7 +186,7 @@ export function createTestPolicyGate(): Gate {
         return {
           id: 'test-policy',
           status: 'skip',
-          skipReason: 'no-matching-route',
+          skipReason: 'no-matching-files',
           findings: [
             `test-policy examined 0 of ${ctx.changedFiles.length} changed file(s): none are under ` +
               `[${config.sourceDirs.join(', ')}] with extension [${config.sourceExtensions.join(', ')}] ` +

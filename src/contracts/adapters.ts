@@ -457,15 +457,20 @@ const RETRYABLE_MESSAGE_PATTERNS: readonly RegExp[] = [
   // GitHub's primary-rate-limit wording, for the 403s that carry no Retry-After either.
   /\bAPI rate limit exceeded\b/i,
   /\bplease retry your request again\b/i,
-  // DELIBERATELY ACCEPTED, not an oversight: "Validation failed, or the endpoint has been
-  // spammed." is the STANDARD 422 body for the merge endpoints, returned both for GitHub's spam
-  // throttle and for a genuine validation refusal. The two are indistinguishable from the
-  // response alone, so this pattern makes essentially every 422 from a merge retryable. That is
-  // the chosen direction: a throttle misread as permanent escalates a self-healing condition to
-  // a human and cannot be undone by waiting, while a validation refusal misread as transient
-  // costs a bounded retry budget and then blocks anyway. The incident this classifier exists for
-  // (a stacked-PR refusal) is a 403, which is unambiguous, so the 422 arm is not load-bearing.
-  /\bthe endpoint has been spammed\b/i,
+  // DELIBERATELY ABSENT: "Resource not accessible by integration". It is tempting -- it is a 403
+  // and it does arrive on merge writes -- but it is GitHub's canonical MISSING APP PERMISSION
+  // message, not a token-rotation one. An installation token that has expired mid-tick answers
+  // `401 Bad credentials`; this string means the App genuinely lacks the scope, or the base
+  // branch grew a ruleset the App does not bypass. Classifying it retryable turns the one
+  // failure a human can actually fix into a silent forever-retry: `completeOrArmMerge` returns
+  // `{outcome:'pending'}`, and `driveExternalPr` handles `merged`/`blocked`/`closed` and drops
+  // `pending` on the floor -- so an external PR would re-attempt every tick with nobody told,
+  // where today it blocks on tick one with an actionable line. Only the rollup lane bounds
+  // `pending` at all; the promotion lane and the watchdog's keepMergesLive do not. It would also
+  // stop `merge()` from falling through to merge-async, because that fallthrough is gated on
+  // `retryableHostMessage` -- so a stacked PR whose sync refusal carried this text would never
+  // reach the endpoint that can merge it. If a rotation window is ever evidenced, gate it on
+  // something that actually distinguishes one (`err.rateLimited`, or a 401), never on this text.
 ];
 
 /** True when the host's message is one GitHub itself asks you to retry. Exported because the
@@ -493,7 +498,14 @@ export function retryableHostMessage(message: string): boolean {
  *     `createClaimRef`, which treats only a message-matched 422 as definitive and lets every
  *     other one behave as an unknown. Here the conservatism points the other way (a false
  *     "permanent" escalates a ticket to a human, a false "transient" only costs a tick), so the
- *     retryable messages are the allowlist and an unmatched 422 is permanent.
+ *     retryable messages are the allowlist and an unmatched 422 is permanent. In practice a real
+ *     422 body carries "Validation Failed" plus an `errors` array, which matches nothing here and
+ *     is therefore permanent -- correct, since a validation refusal does not heal by waiting.
+ *     (An earlier version listed "the endpoint has been spammed" as retryable on the theory that
+ *     it was GitHub's standard 422 message. It is not: that string appears in GitHub's published
+ *     OpenAPI description ONLY as a response DESCRIPTION, never as a runtime message, so the
+ *     pattern matched nothing while the comment claimed every 422 self-healed. Verified and
+ *     removed rather than left as a comforting no-op.)
  *   - THROTTLES ARE NEVER PERMANENT, on either status. GitHub throttles with a 403 far more often
  *     than a 429, so this excludes both the ones the adapter could flag from headers
  *     (`rateLimited`) and the ones it could not, by message -- see RETRYABLE_MESSAGE_PATTERNS.

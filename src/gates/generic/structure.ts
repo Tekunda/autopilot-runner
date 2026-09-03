@@ -196,7 +196,7 @@ export function createStructureGate(): Gate {
         return {
           id: 'structure',
           status: 'skip',
-          skipReason: 'no-matching-route',
+          skipReason: 'no-matching-files',
           findings: ['structure examined 0 files: the changed-file list is empty, so nothing was checked'],
         };
       }
