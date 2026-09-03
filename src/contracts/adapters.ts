@@ -367,18 +367,38 @@ export interface HostRefusal {
 // Retry-After header and with rate budget still showing is indistinguishable, by status alone,
 // from a permission denial. Blocking a ticket on a throttle is the one failure worse than the bug
 // this classifier exists to fix, so these win over the status rules below.
+//
+// Every pattern here is GitHub's OWN phrasing, quoted. That is the whole discipline: a loose
+// pattern like /try.*again/ would swallow arbitrary refusals that happen to end in a suggestion,
+// and each one it swallows is a permanent refusal filed as retryable -- the original bug.
 const RETRYABLE_MESSAGE_PATTERNS: readonly RegExp[] = [
-  // "Validation failed, or the endpoint has been spammed." -- a throttle wearing a 422.
-  /spamm/i,
   // "Head branch was modified. Review and try the merge again." -- a race with a sibling push.
-  /\bwas modified\b/i,
-  // Anything where the host itself asks for another attempt, or names its own abuse throttle.
-  /\btry (?:the \w+ )?again\b/i,
-  /secondary rate limit|abuse detection/i,
-  // GitHub's primary-rate-limit wording, for the 403s that carry no Retry-After to flag them.
+  /\b(?:head|base) branch was modified\b/i,
+  /\breview and try the merge again\b/i,
+  // Secondary/abuse throttles, which often arrive with no Retry-After to flag them.
+  /\bsecondary rate limit\b/i,
+  /\babuse detection\b/i,
+  /\bwait a few minutes before you try again\b/i,
+  // GitHub's primary-rate-limit wording, for the 403s that carry no Retry-After either.
   /\bAPI rate limit exceeded\b/i,
+  /\bplease retry your request again\b/i,
+  // DELIBERATELY ACCEPTED, not an oversight: "Validation failed, or the endpoint has been
+  // spammed." is the STANDARD 422 body for the merge endpoints, returned both for GitHub's spam
+  // throttle and for a genuine validation refusal. The two are indistinguishable from the
+  // response alone, so this pattern makes essentially every 422 from a merge retryable. That is
+  // the chosen direction: a throttle misread as permanent escalates a self-healing condition to
+  // a human and cannot be undone by waiting, while a validation refusal misread as transient
+  // costs a bounded retry budget and then blocks anyway. The incident this classifier exists for
+  // (a stacked-PR refusal) is a 403, which is unambiguous, so the 422 arm is not load-bearing.
+  /\bthe endpoint has been spammed\b/i,
 ];
 
+/** True when the host's message is one GitHub itself asks you to retry. Exported because the
+ *  adapter needs the SAME test at the point it decides whether to escalate a failed synchronous
+ *  merge to a second endpoint: a throttle must not trigger another write. */
+export function retryableHostMessage(message: string): boolean {
+  return RETRYABLE_MESSAGE_PATTERNS.some((p) => p.test(message));
+}
 /**
  * Classify an unknown error thrown by a VCSHost as a PERMANENT refusal (the host will not do
  * this, and waiting cannot change that) or not. Returns the refusal -- status plus the host's
@@ -422,7 +442,7 @@ export function permanentHostRefusal(err: unknown): HostRefusal | undefined {
   if (candidate.rateLimited === true) return undefined;
 
   const { status, message } = { status: candidate.status, message: candidate.message };
-  if (RETRYABLE_MESSAGE_PATTERNS.some((p) => p.test(message))) return undefined;
+  if (retryableHostMessage(message)) return undefined;
   if (status === 403 || status === 422) return { status, message };
   return undefined;
 }
