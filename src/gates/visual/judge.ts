@@ -233,7 +233,15 @@ export function createAnthropicVisionJudge(opts: AnthropicVisionJudgeOptions = {
         }
 
         if (!res.ok) {
-          const detail = await res.text().catch(() => '');
+          // Best-effort detail: the status failure is always thrown below; a body that cannot be
+          // read only means the error names the status without the response text.
+          const detail = await res.text().catch((err: unknown) => {
+            console.warn(
+              `vision judge: could not read the error body for status ${res.status}: ` +
+                `${err instanceof Error ? err.message : String(err)} -- the thrown error names the status without the body text`,
+            );
+            return '';
+          });
           if (RETRYABLE_STATUSES.has(res.status)) {
             // Retries exhausted on a rate-limit/overload -- an infra failure, distinctly typed.
             throw new VisionRateLimitError(res.status, detail.slice(0, 200));
