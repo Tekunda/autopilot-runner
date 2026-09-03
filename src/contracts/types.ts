@@ -1482,6 +1482,16 @@ export interface TicketState {
   // into `prs` -- it is no longer a preview then. Left set, pointing at the still-open PR,
   // when review blocks: that PR is the evidence the human needs.
   draftPromotionPr?: string;
+  // THE live official promotion PR, set unconditionally at the two places one is opened
+  // (control-plane.ts's coalescing-open and promote()'s adopt) and cleared alongside
+  // `draftPromotionPr` when the close handler observes it closed-unmerged. `prs` stays an
+  // append-only history (never trimmed) for the mirror/audit readers.
+  //
+  // `prs[0]` was the live defect this field replaces: a dead (closed) PR left at that index
+  // forever once a replacement opened and got appended. `prs[last]` is correct-by-construction
+  // (appends are monotonic, so the newest is always last) and is promotionPrUrl's back-compat
+  // fallback ONLY, for a ticket stored before this field existed -- see pr-ops.ts.
+  promotionPr?: string;
   lastEventAt: string; // ISO 8601
   // Consecutive fail count for the ticket's *current* judgment stage
   // (enrich/plan -- no PR exists yet for a `fix` stage to work against).
