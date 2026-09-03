@@ -98,15 +98,29 @@ export interface RunGateStageDeps {
 // not-yet-run `pending` and a skip must stay distinguishable downstream, so toChecks
 // also tags a skip `skipped:true` (+ skipReason) -- otherwise a gate that skips 100%
 // of the time is banked as coverage exactly like a pass. A
-// `warn` is a non-blocking gate's report-only failure: it must not fail the
-// grant, so it maps to `pass` (its findings still ride through toChecks). An
-// `unjudged` gate RAN but reached no verdict -- it must NOT read as a pass, so
-// it maps to `fail` (and toChecks tags the check `unjudged:true` so the fix loop
-// escalates it to a human instead of burning fix rounds no edit can resolve).
-function toCheckStatus(status: GateResult['status']): CheckStatus {
-  if (status === 'fail') return 'fail';
-  if (status === 'unjudged') return 'fail';
-  if (status === 'skip') return 'pending';
+// A `warn` is a report-only failure that must not fail the grant -- but whether it
+// publishes as a PASS depends on something `warn` alone does not say: did the gate
+// judge? Four of the five producers did (a non-blocking command that exited non-zero,
+// assertion-delta's `enforce:false`, structure's integrity findings, a site crawl that
+// found only sub-blocking warnings) and keep mapping to `pass`, because they DID reach
+// a verdict and publishing them as "never ran" would be its own lie -- one that also
+// drops the gate out of the coverage baseline, so its real disappearance could never
+// regress. The fifth, cve's staged rollout, reached NO VERDICT (the audit could not
+// run at all) and says so with `noVerdict`: that one maps to `pending` and toChecks
+// tags it `reportOnly:true`. It used to map to `pass` like the rest, which published a
+// GREEN check and -- carrying no flag -- was banked downstream as a real verdict, so a
+// tenant whose runner has no osv-scanner got a green `cve` on every PR while
+// `gate_never_fired` stayed suppressed: the silent-off hole audit-outcome.ts rejected
+// `skip` for, recreated with `warn` and one step worse, `pass` being greener than
+// `pending`. See gates/types.ts for the producer-by-producer list. An `unjudged` gate
+// RAN but reached no verdict AND still blocks -- it must NOT read as a pass, so it maps
+// to `fail` (and toChecks tags the check `unjudged:true` so the fix loop escalates it
+// to a human instead of burning fix rounds no edit can resolve).
+function toCheckStatus(result: GateResult): CheckStatus {
+  if (result.status === 'fail') return 'fail';
+  if (result.status === 'unjudged') return 'fail';
+  if (result.status === 'skip') return 'pending';
+  if (result.status === 'warn') return result.noVerdict === true ? 'pending' : 'pass';
   return 'pass';
 }
 
@@ -117,13 +131,18 @@ function toChecks(results: GateResult[], nameSuffix = ''): CheckResult[] {
     // never-run/no-baseline ledger can match it against the enabled-gate set (which is keyed by
     // bare id). Omitted when unsuffixed -- `name` already IS the base id.
     ...(nameSuffix ? { baseId: result.id } : {}),
-    status: toCheckStatus(result.status),
+    status: toCheckStatus(result),
     ...(result.status === 'unjudged'
       ? { unjudged: true as const, ...(result.unjudgedReason ? { unjudgedReason: result.unjudgedReason } : {}) }
       : {}),
     ...(result.status === 'skip'
       ? { skipped: true as const, ...(result.skipReason ? { skipReason: result.skipReason } : {}) }
       : {}),
+    // Kept separate from `skipped`: this gate RAN, it just banked nothing. The promotion ledger
+    // excuses a skip on the gate's own history and must not excuse this one the same way.
+    // Keyed on `noVerdict`, NEVER on `warn` alone -- a warn that judged is a real verdict and
+    // tagging it here would drop a working gate out of the coverage baseline and alarm on it.
+    ...(result.status === 'warn' && result.noVerdict === true ? { reportOnly: true as const } : {}),
     ...(result.findings?.length ? { findings: result.findings } : {}),
     ...(result.detailsUrl ? { detailsUrl: result.detailsUrl } : {}),
   }));

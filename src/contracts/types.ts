@@ -303,6 +303,19 @@ export interface CheckResult {
   // suspicious escalation. `CheckStatus` stays a three-value union; these ride alongside it.
   skipped?: true;
   skipReason?: string;
+  // The gate RAN and REPORTED, but banked no verdict (`warn`): either an explicitly report-only
+  // gate that judged and found something, or the cve gate's staged rollout answering an audit it
+  // could not perform on a newly-covered repo (no osv-scanner on this runner, a dependency layout
+  // it cannot read). The third "not a pass" alongside `unjudged` and `skipped`, and the one that
+  // was missing: a `warn` mapped straight to `status:'pass'` and carried no flag, so it published
+  // GREEN and counted as a real verdict in the promotion ledger -- `gate_never_fired` suppressed
+  // forever while nothing was audited. It publishes `status:'pending'` (nothing was judged) and
+  // is carried to the host as a CONCLUDED check-run, never left in_progress: an honest state that
+  // wedges a required context is just a different outage.
+  // Distinct from `skipped` on purpose, because the ledger reads them differently: a skip is
+  // excused by the gate's own history, and audit-outcome.ts refused `skip` for exactly that
+  // reason. A report-only result is never banked as coverage and never stamps a real verdict.
+  reportOnly?: true;
   // The gate's base id BEFORE any per-site display suffix is appended to `name`. A URL-bound gate
   // that runs once per site publishes distinct display names (`seo-site-crawl (tekunda)`), but the
   // never-run/no-baseline ledger and the enabled-gate set are keyed by the bare gate id -- so the
@@ -1120,6 +1133,10 @@ export interface RecordedGateCheck {
   status: CheckStatus;
   skipped?: true;
   skipReason?: string;
+  // The gate RAN but only REPORTED (`warn`) -- see CheckResult.reportOnly. Banks no coverage and
+  // stamps no real verdict, so a gate whose every result is report-only still fires
+  // `gate_never_fired` instead of looking like a gate that has judged this branch.
+  reportOnly?: true;
   // The bare gate id when `id` carries a per-site display suffix (e.g. id `seo-site-crawl (tekunda)`,
   // baseId `seo-site-crawl`). The never-run/no-baseline ledger keys off this so a multi-site tenant's
   // URL-bound gates match the enabled-gate set instead of skipping the diagnostic entirely. Absent

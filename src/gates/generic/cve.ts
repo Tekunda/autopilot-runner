@@ -718,6 +718,11 @@ export function createCveGate(auditor: DependencyAuditor = createDependencyAudit
           return {
             id: 'cve',
             status: 'warn',
+            // This warn reached NO VERDICT -- the audit could not be performed at all. It is the
+            // one `warn` in the codebase that means that (gates/types.ts enumerates the other
+            // four, which all judged), and the flag is what stops it publishing a green check and
+            // banking coverage for an audit that never happened.
+            noVerdict: true,
             findings: [
               `${outcome.reason} ${
                 config.blocking === false

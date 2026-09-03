@@ -11,10 +11,44 @@
 import type { VCSHost } from '../contracts/adapters.ts';
 import type { StackProfile } from './stack-profile.ts';
 
-// `warn` is a report-only failure: the gate's check did not pass, but the gate
-// is non-blocking (a `blocking:false` command gate), so it must NOT fail the
-// grant. Aggregation treats it like a pass for the verdict while still carrying
-// its findings -- see runGates and run-gate-stage's toCheckStatus.
+// `warn` is a report-only failure: the gate's check did not pass, but it must NOT
+// fail the grant. Aggregation treats it like a pass FOR THE VERDICT while still
+// carrying its findings -- see runGates and run-gate-stage's `ok`.
+//
+// "Does not fail the grant" and "publishes as a pass" are two different statements,
+// and `warn` alone does not decide the second: that is what `noVerdict` (below) is
+// for. A `warn` that JUDGED publishes a green `pass`; a `warn` that reached no
+// verdict publishes `pending` + `reportOnly` and banks no coverage. Conflating the
+// two is a live defect in both directions -- a non-verdict banked as a pass hides a
+// gate that never ran, and a real verdict published as a non-verdict hides a gate
+// that did. THE FIVE PRODUCERS, and which they mean:
+//
+//   JUDGED (publishes `pass`, banks coverage, stamps a real verdict):
+//     - command/command-gate.ts        a `blocking:false` command that exited non-zero
+//     - generic/assertion-delta.ts     weakened assertions found, `enforce:false`
+//     - generic/structure.ts           repo-integrity findings
+//     - packs/seo/site-crawl.ts        the crawl ran and found only sub-blocking warnings
+//
+//   NO VERDICT (must set `noVerdict`; publishes `pending` + `reportOnly`, banks nothing):
+//     - generic/cve.ts                 an audit that COULD NOT RUN (no osv-scanner on this
+//                                      runner, an unreadable dependency layout) on a repo whose
+//                                      coverage is new, so it reports instead of blocking
+//
+// A new `warn` producer MUST decide which it is, and MUST NOT rely on the default to
+// be the safe answer -- it is not. The default (no flag) is "judged" for one reason
+// only: it is what the four producers that already existed mean, so the flag could be
+// added without changing any of their behaviour.
+//
+// Be aware which way that cuts. Omitting the flag on a producer that reached NO verdict
+// is the DANGEROUS mistake -- it publishes green and banks a real verdict for work that
+// never happened, which is the silent-off hole this flag exists to close. Setting it on
+// a producer that DID judge is the milder one: a working gate reads as "never ran",
+// banks no coverage, and alarms `gate_never_fired`. Neither is acceptable, and the
+// default protects you from neither. What protects you is that each producer's own
+// test pins its answer -- `assert.equal('noVerdict' in result, false)` in
+// structure.test.ts, assertion-delta.test.ts, command-gate.test.ts and
+// site-crawl.test.ts, and `assert.equal(result.noVerdict, true)` in cve-osv.test.ts.
+// All five, because a default cannot decide this for you.
 //
 // `unjudged` is the gate that EXECUTED but reached no verdict (e.g. the vision
 // judge stayed rate-limited past its retry budget). It is distinct from `warn`,
@@ -105,9 +139,10 @@ export type SkipReason =
   | 'disabled'
   | 'infra';
 
-export interface GateResult {
+// The fields every result carries, whatever its status. `GateResult` itself is a UNION over
+// `status` (below) so that `noVerdict` is structurally impossible anywhere it would be ignored.
+interface GateResultFields {
   id: string;
-  status: GateStatus;
   // Set on `status:'skip'` to explain WHY the gate never ran. Round-trips through the gate report
   // artifact (ci-runner parseGateReport) so the promotion record can tell a benign skip from a
   // suspicious perpetual one.
@@ -121,6 +156,29 @@ export interface GateResult {
   findings?: string[];
   detailsUrl?: string;
 }
+
+// `noVerdict` is a DISCRIMINATED property, not a free-floating flag: it is meaningful only on a
+// `warn`, and on anything else it would be silently dropped by run-gate-stage (which keys on
+// `status === 'warn' && noVerdict === true`). Silently-dropped flags are how a gate author comes
+// to believe they declared something they did not, so the type refuses the combination outright
+// instead: `{ status: 'pass', noVerdict: true }` is a compile error, not a no-op.
+export type GateResult =
+  | (GateResultFields & {
+      status: 'warn';
+      // Set to say this warn reached NO VERDICT -- the gate ran but judged nothing, and is demoted
+      // to reporting rather than blocking (cve.ts's staged rollout for a newly-covered repo whose
+      // audit could not run). The sibling of `unjudged`, which is the same fact for a gate that
+      // still BLOCKS; this one does not, which is exactly why it needs a flag: without one it is
+      // indistinguishable from the four `warn`s that DID judge, and downstream either banks a
+      // non-verdict as coverage or reports a real verdict as if the gate never ran.
+      //
+      // Absent (the default) means the warn JUDGED -- see the GateStatus comment above for which
+      // producer is which. run-gate-stage maps this to CheckResult.reportOnly; the two names
+      // differ because they state different things: `noVerdict` is what the GATE did,
+      // `reportOnly` is how the CHECK is published and banked.
+      noVerdict?: true;
+    })
+  | (GateResultFields & { status: Exclude<GateStatus, 'warn'>; noVerdict?: never });
 
 export interface Gate {
   id: string;
