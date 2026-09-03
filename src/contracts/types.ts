@@ -1220,8 +1220,11 @@ export interface ReviewRoundState {
   // at the cap the ticket blocks with the recorded evidence, mirroring rollupPendingTicks.
   // A placeholder round ({pending:{},results:{}}) persists just this counter between failed
   // START attempts -- an EMPTY pending alone does not mean "no round" (a fully collected
-  // round awaiting aggregation looks the same); any successful start writes a fresh round
-  // without this counter, resetting the streak.
+  // round awaiting aggregation looks the same); only a FULL round start -- a fresh sha pin
+  // building a brand-new round object -- writes without this counter and resets it. The
+  // partial-completion path that finishes a round already in flight (control-plane.ts,
+  // `round = {...round, pending: pendingAfter}`) deliberately PRESERVES it instead, since
+  // that is the very streak this field bounds.
   missingAttempts?: number;
   // Consecutive ticks on which at least one lens's poll returned an EVIDENCED result this round
   // could not attribute to its own dispatch -- a refused result whose correlation had a competing
@@ -1837,10 +1840,13 @@ export interface TicketState {
   //
   // Lives on the TICKET, not on ReviewRoundState, because the restart is exactly the event that
   // discards the round: a count on the round would die with it. And it is not
-  // ReviewRoundState.missingAttempts under another name -- that streak is reset by any successful
-  // round START, which is precisely what a restart does next tick, so it can never accumulate
-  // here. Reset when a round actually reaches AGGREGATION (green or blocking): the episode this
-  // bounds is "rounds that never produce a verdict", and a round that produced one ends it.
+  // ReviewRoundState.missingAttempts under another name -- that streak is reset only by a FULL
+  // round start, never by the partial-completion continuation, which deliberately preserves it.
+  // But a restart wipes reviewRound to `undefined` (the head-move guard above), so there is
+  // nothing left for the next tick to continue: the round it starts is necessarily a FULL one, and
+  // missingAttempts can never accumulate here. Reset when a round actually reaches AGGREGATION
+  // (green or blocking): the episode this bounds is "rounds that never produce a verdict", and a
+  // round that produced one ends it.
   reviewRestarts?: number;
   // Old subtasks a REPLAN discarded, held until the replacement plan exists. freshRestart
   // wipes `subtasks`, so without this the branches/PRs/child pages that plan left behind
