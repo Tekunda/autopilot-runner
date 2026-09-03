@@ -110,7 +110,47 @@ export interface TaskBackend {
   // block, the engineer plan narrative, touched areas, and (best-effort) assign the reporter
   // as reviewer. Optional -- backends that can't render rich bodies simply don't implement it.
   // Reporting, not control flow: a failure never fails the decomposition.
-  writeArchitectReview?(ticketId: string, review: ArchitectReview): Promise<void>;
+  //
+  // A REPLAN calls this again with a different plan, and the ticket must then show the NEW one --
+  // an implementation that skips the write because a review is already there leaves the product
+  // owner reading a superseded plan. Implementations MUST replace a differing review in place and
+  // MUST leave an identical one alone (a restart-driven re-decompose must not stack a copy).
+  //
+  // Resolves true only when it REPLACED an existing, different review AND the new plan actually
+  // reached the ticket. The caller owns the re-notification: nothing here posts a comment, so a
+  // true means "tell the reviewer the plan they already looked at has changed". A first write, an
+  // unchanged review, a failed write, or a backend that can't tell resolves false -- an
+  // implementation must never report a replacement it did not land.
+  writeArchitectReview?(ticketId: string, review: ArchitectReview): Promise<boolean>;
+  // Show WHERE THE TICKET IS in the pipeline, on the ticket itself, as a single prominent
+  // coloured notice (e.g. a Notion callout) -- so a product owner reads "building", "waiting on
+  // you" or "failed" off the ticket instead of reconstructing it from the comment thread. `tone`
+  // drives the colour: 'info' for routine progress, 'success' for a finished stage, 'warning'
+  // when a human is being waited on, 'failure' when the drive stopped.
+  //
+  // Idempotent by contract: repeated calls UPDATE the one notice in place (found by a stable
+  // lead the implementation owns), never append a second, so a per-tick status report does not
+  // stack. Returns whether the status is now on the ticket, so a caller can fall back to a
+  // comment when it isn't. Best-effort, never throws. Optional: backends without a rich body
+  // simply don't implement it and the caller keeps using plain comments.
+  //
+  // Caller-side obligation: the control plane's comment routing decides which drive events become
+  // a status notice here rather than a thread comment, and falls back to comment() on a false.
+  writeStatusCallout?(ticketId: string, statusText: string, tone?: 'info' | 'success' | 'warning' | 'failure'): Promise<boolean>;
+  // Append one entry to a collapsed, accumulating "pipeline log" on the ticket -- the durable
+  // home for the long per-stage detail (gate output, command transcripts, diffs) that otherwise
+  // buries the human conversation in the comment thread. `entry` is markdown; implementations
+  // render it natively where they can (headings, lists, fenced code) rather than as one blob.
+  //
+  // APPEND semantics: the log accumulates in order across a drive and across restarts -- this is
+  // history, not a status field, so it is never replaced. What IS idempotent is the container
+  // (exactly one log per ticket) and a repeat of the SAME entry (a retry, an unchanged re-tick),
+  // which implementations should drop rather than duplicate. Returns whether the entry is on the
+  // ticket. Best-effort, never throws. Optional.
+  //
+  // Caller-side obligation: the control plane's comment routing decides which per-stage detail is
+  // logged here rather than posted into the thread, where it buries the human conversation.
+  appendPipelineLog?(ticketId: string, entry: string): Promise<boolean>;
   // Record an architect HOLD on the ticket for a human: surface the open questions prominently
   // (e.g. at the top of the page body) so the PO sees why it's blocked. The control plane sets
   // the blocked STATUS separately -- that status is the only thing gating re-planning, so
