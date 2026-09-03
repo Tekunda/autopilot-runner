@@ -167,13 +167,35 @@ export function rejectedRoots(profile: StackProfile, workspaceRoot: string): str
 const SALESFORCE_METADATA_EXTENSIONS = [
   '.cls',
   '.trigger',
-  '.flow-meta.xml',
-  '.object-meta.xml',
-  '.permissionset-meta.xml',
   '.page',
   '.component',
   '.cmp',
   '.app',
+  '.flow-meta.xml',
+  '.object-meta.xml',
+  '.permissionset-meta.xml',
+  // THE SIDECARS, and the rule is ONE LINE: every source extension above gets its `-meta.xml`
+  // companion, plus `.js-meta.xml` for the LWC bundle whose `.js` is matched by the bundle rule
+  // below rather than by extension. Six above, seven here -- a reader checking the list against
+  // the rule should find nothing missing, because a list someone stopped adding to is
+  // indistinguishable from a list that is complete.
+  //
+  // They belong HERE and not under the bundle rule because a PR can change ONLY the sidecar: an
+  // `apiVersion` bump on `Foo.cls-meta.xml`, `isExposed` or a new `target` on
+  // `orderList.js-meta.xml`. Without them that diff selects no Salesforce gate at all -- the
+  // under-inclusion failure, where nothing runs, nothing is banked and nobody is told.
+  //
+  // THE BAR ANYTHING ADDED HERE HAS TO CLEAR, and the reason all seven clear it: each is a full
+  // Salesforce-only suffix, never a bare `.xml`. `pom.xml`, `web.config` and an ordinary
+  // `settings.xml` cannot match any of them, so none can wedge an ordinary PR on the
+  // merge-blocking `unjudged` this list feeds.
+  '.cls-meta.xml',
+  '.trigger-meta.xml',
+  '.page-meta.xml',
+  '.component-meta.xml',
+  '.cmp-meta.xml',
+  '.app-meta.xml',
+  '.js-meta.xml',
 ] as const;
 
 // Web files are Salesforce source ONLY inside a component bundle, and "inside a bundle" has to
@@ -193,10 +215,19 @@ const SALESFORCE_METADATA_EXTENSIONS = [
 // So the rule has to be exact, not merely conservative. The platform's own requirement is that
 // a bundle is a FOLDER under `lwc/` or `aura/` holding the files -- `lwc/<name>/<name>.js`,
 // `aura/<Cmp>/<Cmp>Helper.js`, `lwc/<name>/__tests__/<name>.test.js`. Every one of those puts
-// the file AT LEAST TWO SEGMENTS below the `lwc`/`aura` segment; `packages/lwc/index.js` and
-// `vendor/aura/x.js` put it exactly one. That single test admits every bundle shape -- including
-// the Aura `Helper`/`Controller`/`Renderer` files whose stems deliberately do NOT equal their
-// folder, and a `__tests__` subfolder at any depth -- while still excluding the npm package.
+// the file AT LEAST TWO SEGMENTS below the `lwc`/`aura` segment. That single test admits every
+// bundle shape -- including the Aura `Helper`/`Controller`/`Renderer` files whose stems
+// deliberately do NOT equal their folder, and a `__tests__` subfolder at any depth.
+//
+// WHAT IT DOES NOT EXCLUDE, stated plainly so nobody reads more into it. The depth test only
+// rejects the ONE-segment spelling: `packages/lwc/index.js` and `vendor/aura/x.js` are `false`,
+// but `packages/lwc/src/index.js` and `vendor/lwc/dist/engine/engine.js` are `true` -- a checked-in
+// copy of the `lwc` npm package outside `node_modules` is indistinguishable BY SHAPE from
+// `pkg/lwc/orderList/orderList.js`, and salesforceSourceOutsideRoots would report it as a
+// merge-blocking `unjudged`. That is accepted rather than patched: separating the two needs
+// content or manifest heuristics whose own false negatives would land on the UNDER-inclusion
+// side, which is the worse direction (see above). `node_modules`/`bower_components`, the one
+// place the vendored copy actually lives, is excluded by path below.
 const BUNDLE_SEGMENTS = ['lwc', 'aura'] as const;
 const BUNDLE_EXTENSIONS = ['.js', '.ts', '.html', '.css'] as const;
 

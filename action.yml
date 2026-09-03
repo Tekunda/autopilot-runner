@@ -322,7 +322,20 @@ runs:
       if: steps.parse-grant.outputs.stage == 'gate' && steps.sf-detect.outputs.salesforce == 'true'
       shell: bash
       working-directory: ${{ github.action_path }}
-      run: echo "key=$(node src/gates/salesforce/provision-cli.ts --cache-key)" >> "$GITHUB_OUTPUT"
+      # Belt and braces on the empty case: an empty key still produces the perfectly valid cache
+      # key `-Linux` below, which actions/cache accepts and every unrelated run shares. Nothing
+      # downstream would go red, so the check has to be here. An explicit `if` rather than
+      # `test -n "$key"` -- `-e` is on in both GitHub bash shells so either one fails the step,
+      # but `test -n` leaves only `Process completed with exit code 1` and a reader has to work
+      # out which of two commands died. This one names the cause, and it still fails if someone
+      # overrides the shell later.
+      run: |
+        key="$(node src/gates/salesforce/provision-cli.ts --cache-key)"
+        if [ -z "$key" ]; then
+          echo "provision-cli.ts --cache-key printed nothing" >&2
+          exit 1
+        fi
+        echo "key=$key" >> "$GITHUB_OUTPUT"
 
     # A cache HIT does not skip provisioning, it only saves the download. provision-cli.ts
     # re-verifies every tarball's SHA-256 on the warm path exactly as on the cold one -- the
