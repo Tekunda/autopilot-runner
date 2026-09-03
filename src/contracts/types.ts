@@ -920,11 +920,37 @@ export interface InFlightStage {
 // write that sets `inFlight`, so at most one of the two is ever set for a given stage.
 export interface DispatchIntent {
   // The stage about to be launched. An intent for a DIFFERENT stage than the one now being
-  // dispatched belongs to a generation the ticket has already left; it is dropped, not adopted.
+  // dispatched belongs to another of the ticket's lanes; it is stood aside for while its owner
+  // can still adopt it, and dropped once nobody can -- never adopted here.
   stage: Stage;
   // The ticket this intent was written for, so a record that was copied/merged from elsewhere
   // (a restored backup, a mis-keyed write) can be recognized as foreign instead of adopted.
   ticketId: string;
+  // WHICH lane wrote it, mirroring InFlightStage.origin -- because `stage` alone does not say.
+  // Four lanes dispatch stage `fix` on one ticket (external-PR QA autofix, promotion customer-CI
+  // autofix, review feedback, conflict resolve) and all four record the ticket's single `inFlight`
+  // slot; they are told apart by exactly this. Adopting another lane's run would bind this lane's
+  // bookkeeping -- its attempt counter, its feedback cursor, its check-run -- to a run launched to
+  // do something else. Absent for the ticket-level stage lane (architect/enrich/plan/accept/
+  // review), whose marker carries no origin either.
+  origin?: InFlightStage['origin'];
+  // ...and WHICH episode of that lane, where one lane runs more than one. The conflict lane has
+  // two per ticket -- a PR target and a branch target -- with separate attempt budgets and
+  // separate published checks, told apart everywhere else by TicketState.branchConflictTarget.
+  // Without it recorded here the two are indistinguishable (same stage, same origin, neither
+  // pinning a sha) and whichever episode ticks first would adopt the other's run: charging the
+  // wrong counter and publishing `Autopilot / conflict` about a merge that run never touched.
+  // Absent for every lane that has exactly one episode.
+  target?: string;
+  // The UNITS this generation launched, where a generation is more than one run. Only the assembled
+  // review round has any: it scales its lens set to the diff's risk (selectReviewLenses) and pins
+  // the chosen set on the round, because a later tick that recomputed a different set would wait on
+  // a lens the round never dispatched. The rebuild IS such a later tick, and it cannot recompute:
+  // assessDiffRisk fails OPEN by design (an unreadable diff reduces nothing), so a GitHub blip on
+  // the recovery tick would resurrect a two-lens round as a three-lens one and bill the reviewer
+  // the risk gate had just declined. Recorded here instead, so the rebuild reproduces the round it
+  // is recovering rather than the round today's compare call happens to describe.
+  lenses?: ReviewLens[];
   // The grant this dispatch was about to spend -- grantLedgerId(grant), i.e. the signed `jti`,
   // falling back to the sig digest on a legacy grant. AUDIT only, never the adoption key: every
   // tick re-issues a fresh grant with a fresh jti, so the run that survived the crash was
@@ -1834,6 +1860,33 @@ export const RUN_CORRELATION_SLACK_MS = 5_000;
 // page) leaving somebody else's as the only one there -- so that path is bounded by the positive
 // disproofs instead (StageResult.runTokenMismatch, and a created_at that predates the pin).
 export const TOKENLESS_ADOPTION_WINDOW_MS = 2 * 60_000;
+
+// How long a dispatched stage is given to finish before the runner calls it timed out -- the
+// CIRunner's default, overridable per deployment (ci-runner's `config.timeoutMs`).
+//
+// It lives here, next to the other two correlation bounds, because it is not only the adapter's
+// deadline: it is also the horizon past which a run can no longer be ADOPTED. correlationWindow
+// bounds a token-proven adoption at `startedAt + timeoutMs`, and checkStage anchors its deadline
+// on the run's own created_at, so a run older than this escalates as timed-out rather than being
+// waited on. A control-plane lane whose recovery IS an adoption must therefore know the same
+// number, or it gives up while the adapter would still have adopted -- so this is the DEFAULT and
+// the deployment's effective value is threaded to the plane (ControlPlaneConfig.stageTimeoutMs),
+// never assumed.
+export const DEFAULT_STAGE_TIMEOUT_MS = 15 * 60 * 1000;
+
+// ...and the value the HOSTED multi-tenant service actually runs with. Named here, beside the
+// default it overrides, because two things have to agree on it and they live in different layers:
+// the CIRunner it is passed to (its run-completion ceiling) and the control plane whose adoption
+// horizon has to reach as far as that ceiling does. It was a bare literal in tenant-adapters.ts,
+// which is how the two silently disagreed by 20 minutes -- long enough for the plane to block a
+// human on runs the adapter would still have adopted for free.
+//
+// 35 minutes, not the 15-minute default, because the external-PR QA stage runs the customer
+// repo's real install+build+validate, which can exceed 15 minutes on a cold build -- and a
+// timed-out poll would drop a verdict the run actually produced, false-failing the PR. A higher
+// ceiling only affects genuinely slow or hung stages; normal ticket stages complete when done,
+// well under it. Stays below the 45-minute grant TTL.
+export const HOSTED_STAGE_TIMEOUT_MS = 35 * 60 * 1000;
 
 // `mergeable` abstracts the host's merge-readiness signal for the watchdog's
 // keep-merges-live routine: 'clean' can be merged now, 'dirty' has a
