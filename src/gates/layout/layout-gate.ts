@@ -30,7 +30,7 @@
 // (see the aggregation below).
 
 import { readGateConfig } from '../generic/config.ts';
-import { asGateNotes, createContentReader, selectPages, type ContentFormat } from '../../packs/seo/content.ts';
+import { asGateNotes, createContentReader, selectPages, type ContentFormat } from '../content/reader.ts';
 import type { Gate, GateContext, GateResult } from '../types.ts';
 import { createPlaywrightLayoutBrowser, type LayoutBrowser, type Viewport } from './browser.ts';
 import { evaluateRules, measureSpecFor, normalizeRulesDetailed, rulesForViewport } from './rules.ts';

@@ -208,6 +208,41 @@ export interface PluginGrant {
   plugins: string[];
 }
 
+// Where the runner gets the DETERMINISTIC PACK GATES, and how it proves the bytes are ours.
+//
+// The runner used to bundle them. It cannot any more: runner-dist/ is mirrored verbatim into
+// the PUBLIC repo Tekunda/autopilot-runner, so every licensed pack file it copied was
+// world-readable (src/packaging/build-runner-dist.ts). The pack gates now ship as a PRIVATE
+// release asset the runner fetches per gate stage, and this is the whole of what the control
+// plane tells it about that asset -- resolved server-side from the tenant's PackConfig and
+// signed like every other grant field, so none of it can be swapped in transit.
+//
+// EVERY field here is load-bearing for the trust boundary:
+//   - `url`   the exact asset. https only, except a loopback host (tests / self-hosted
+//             mirrors); no redirect is followed, so the bearer token below reaches this
+//             origin and no other.
+//   - `sha256` the digest of the EXACT bytes, verified before anything is parsed, written,
+//             or imported (src/runner/checksum.ts). It is what makes the fetch trustworthy at
+//             all: the release host is not trusted, the SIGNATURE over this field is. A
+//             mismatch fails the stage closed -- never "run without those gates", which would
+//             bank a green verdict over gates that never executed.
+//   - `token` a SHORT-LIVED, READ-ONLY credential for the private release, minted per grant.
+//             It rides INSIDE the signed payload so it is bound to this tenant/ticket/stage
+//             and cannot be lifted onto a forged grant. It is a secret VALUE, unlike
+//             McpServerSpec.authEnvVar's env-var NAME -- the customer's CI has no credential
+//             of ours to name, so there is nothing to reference. It must never be logged:
+//             see src/runner/pack-bundle.ts, which keeps it out of every error string, and
+//             note the residual exposure in docs/runbooks/purge-packs-from-public-runner.md
+//             (a workflow_dispatch input is visible to anyone with read access to the run).
+//   - `tokenExpiresAt` when the token dies. Checked runner-side BEFORE the fetch so an
+//             expired token fails with its own message instead of an opaque 401.
+export interface PackBundleGrant {
+  url: string;
+  sha256: string;
+  token?: string;
+  tokenExpiresAt?: string; // ISO 8601
+}
+
 // The tenant-supplied recipe for bringing the customer site up in the dedicated heavy gate
 // stage (src/runner/serve-and-gate.ts): install -> build -> start -> wait-for-ready. Because
 // `startCommand` is an arbitrary shell command, this rides ONLY in the SIGNED grant
@@ -406,6 +441,15 @@ export type ExecutionGrant = {
   // tampered/added spec fails verifyGrant, and a gate id absent here never
   // runs even if it's registered runner-side. See AGENTS.md and issues #106, #129.
   gateSpecs?: GateSpec[];
+  // Where to fetch the deterministic PACK gates, and the sha256 that proves the bytes are
+  // ours -- see PackBundleGrant. Present on a `gate` grant whose signed gateSpecs name a
+  // pack gate id, resolved server-side from PackConfig.packBundle at issuance. Signed like
+  // every other field, so neither the URL, the digest, nor the token can be swapped.
+  //
+  // Absent is NOT permission to skip: if a signed spec names a gate the runner cannot
+  // instantiate and no bundle is here to supply it, the gate stage fails closed rather than
+  // reporting green over a gate that never ran (run-gate-stage.ts).
+  packBundle?: PackBundleGrant;
   // The per-tenant MCP-server access every agent stage (planner/architect/build/fix/qa/
   // accept) runs with -- resolved server-side from the tenant's config (never from
   // ticket/tracker input). Part of the signed payload like every other field;

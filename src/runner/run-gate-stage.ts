@@ -11,13 +11,21 @@
 // gate stage.
 
 import type { VCSHost } from '../contracts/adapters.ts';
-import type { CheckResult, CheckStatus, ExecutionGrant, GateSpec, StatusTelemetry } from '../contracts/types.ts';
+import type {
+  CheckResult,
+  CheckStatus,
+  ExecutionGrant,
+  GateSpec,
+  PackBundleGrant,
+  StatusTelemetry,
+} from '../contracts/types.ts';
 import { verifyGrant, type GrantEnvironment, type KeyInput } from '../control-plane/grant-verify.ts';
 import { createCommandGate } from '../gates/command/command-gate.ts';
 import type { GateRegistry } from '../gates/registry.ts';
 import { describeStack, detectStackAt, type StackProfile } from '../gates/stack-profile.ts';
-import type { GateContext, GateResult } from '../gates/types.ts';
-import { registerPackGatesForSpecs } from './gate-registry.ts';
+import type { Gate, GateContext, GateResult } from '../gates/types.ts';
+import { registerGatesForSpecs } from './gate-registry.ts';
+import { loadPackBundleGates, PackBundleError } from './pack-bundle.ts';
 import { digestFor, grantId, rejectedTelemetry } from './prepare-stage.ts';
 
 // Runner-side PR targeting for the gate run: which PR/diff to run the
@@ -104,6 +112,13 @@ export interface RunGateStageDeps {
   environment?: GrantEnvironment;
   /** Clock override for tests; defaults to the current time. */
   now?: Date;
+  /**
+   * Fetches + checksum-verifies + loads the deterministic PACK gates named by the grant's
+   * signed `packBundle` (./pack-bundle.ts). Injectable for tests; defaults to the real
+   * network path. It is called ONLY when a signed generic spec names a gate the runner's own
+   * bundle cannot instantiate -- a grant with no pack gates never touches the network.
+   */
+  loadPackGates?: (spec: PackBundleGrant) => Promise<Gate[]>;
 }
 
 // GateStatus has a `skip` a CheckStatus has no room for; the closest honest
@@ -183,6 +198,95 @@ function grantPRNumber(grant: ExecutionGrant): number | undefined {
   return match ? Number(match[1]) : undefined;
 }
 
+/** The id of the synthetic check a pack-bundle failure publishes. Stable, because a human
+ *  reads it on the PR and the fix loop classifies on it. */
+export const PACK_BUNDLE_GATE_ID = 'pack-bundle';
+
+// Which bundle failures a bare re-run could plausibly clear, and which are settled facts.
+//
+// The distinction decides what the control plane DOES with the failure, so it is not
+// cosmetic. `infra` buys exactly one gate-only retry and then an honest INFRA block
+// (fix-loop.ts isInfraUnjudgedOnly) -- right for a host that 502'd or a token that aged out,
+// since a re-issued grant carries a freshly minted one. Everything else is left reason-less
+// (`content`), which makes it a non-revertable finding worth ZERO fix rounds and sends it
+// straight to a human -- right for a checksum mismatch, a malformed bundle, or a missing
+// credential, none of which any number of AI fix rounds can address.
+const TRANSIENT_BUNDLE_FAILURES: ReadonlySet<string> = new Set([
+  'unreachable',
+  'http-status',
+  'token-expired',
+  // A release host that redirects nowhere, in a loop, or off https is misconfigured or mid-
+  // incident: the same infra lane, and equally beyond any fix round.
+  'bad-redirect',
+]);
+
+// Makes sure every gate id this call is about to run has an executable Gate behind it,
+// fetching the private pack bundle if that is what's missing. Returns `undefined` when
+// everything resolved, or a GateResult describing the failure when the stage must fail.
+//
+// The deterministic pack gates (SEO crawl/changed-file, docs coverage, the security regex
+// review) ride in the grant as ordinary `{kind:'generic'}` specs, but the runner no longer
+// carries their code: it is licensed IP and runner-dist/ is published to a PUBLIC repo (see
+// ./pack-bundle.ts). So an id the runner's own registry cannot resolve is fetched from the
+// private bundle the SIGNED grant points at, checksum-verified against the SIGNED digest,
+// and only then registered -- and only for ids the signed gateSpecs already named.
+//
+// WHY A REAL CHECK AND NOT rejectedTelemetry. rejectedTelemetry carries `checks: []`, and on
+// the MULTI-SITE heavy path (serve-and-gate.ts runPerSiteHeavyGates) one grant is split across
+// several runGateStage calls whose checks are concatenated. A bundle failure on the url-bound
+// call would contribute nothing while the deterministic call contributed passes -- so the
+// aggregate is `fail` carrying only PASSING checks. Control-plane side that is the worst shape
+// there is: `failedWithoutChecks` is false, `isInfraUnjudgedOnly` is false (it requires a
+// failed check), and `maxFixRoundsFor([], cap)` returns the FULL budget -- so the pipeline
+// spends every fix round on a contentless prompt, each followed by a whole heavy re-run, then
+// blocks the subtask with "fix loop exhausted": a reason that is a lie about a gate that never
+// ran. That is the trap action-entry.ts's crashTelemetry was written to escape, and this is
+// the same remedy -- publish a real, honestly-classified check.
+async function resolvePackGates(
+  grant: ExecutionGrant,
+  deps: RunGateStageDeps,
+  genericSpecs: Extract<GateSpec, { kind: 'generic' }>[],
+  enabledIds: string[],
+): Promise<GateResult | undefined> {
+  const unresolved = (): string[] => enabledIds.filter((id) => !deps.registry.get(id));
+  if (unresolved().length === 0) return undefined;
+
+  const failure = (finding: string, transient = false): GateResult => ({
+    id: PACK_BUNDLE_GATE_ID,
+    status: 'unjudged',
+    ...(transient ? { unjudgedReason: 'infra' as const } : {}),
+    findings: [finding],
+  });
+
+  if (!grant.packBundle) {
+    return failure(
+      `gate stage cannot run: the grant's signed gateSpecs name ${unresolved().join(', ')}, which the runner ` +
+        'cannot execute and which no signed packBundle was provided to supply',
+    );
+  }
+
+  let gates: Gate[];
+  try {
+    gates = await (deps.loadPackGates ?? loadPackBundleGates)(grant.packBundle);
+  } catch (err) {
+    // The message is built by pack-bundle.ts and is credential-free by construction; it is
+    // reproduced verbatim into the check's findings, which is what reaches an operator.
+    const code = err instanceof PackBundleError ? err.code : 'error';
+    const message = err instanceof Error ? err.message : String(err);
+    return failure(`pack bundle ${code}: ${message}`, TRANSIENT_BUNDLE_FAILURES.has(code));
+  }
+
+  // Register only what the SIGNED specs named. A bundle that ships extra gates cannot
+  // introduce one the tenant isn't entitled to.
+  registerGatesForSpecs(deps.registry, gates, genericSpecs.map((spec) => spec.id));
+
+  const stillMissing = unresolved();
+  if (stillMissing.length > 0) {
+    return failure(`gate stage cannot run: the pack bundle did not supply ${stillMissing.join(', ')}`);
+  }
+  return undefined;
+}
+
 // Verify the grant, run exactly the gates named by its signed `gateSpecs`, and report the
 // resulting checks as StatusTelemetry -- only results/checks cross back, never source or
 // diffs (AGENTS.md, "split plane").
@@ -251,13 +355,6 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
     ...(stackProfiles.length > 0 ? { stackProfiles } : {}),
   };
 
-  // Deterministic pack gates (SEO crawl/changed-file, docs, security regex) ride in the grant
-  // as ordinary `{kind:'generic'}` specs (packs/registry.ts enabledGateSpecs). The runner's
-  // static registry holds only the always-on generic gates, so register the pack gate for any
-  // grant-named id here -- only then does its spec resolve to an executable Gate. Their signed
-  // config (e.g. `seo-site-crawl`) already reached `config` above via the generic loop.
-  registerPackGatesForSpecs(deps.registry, genericSpecs.map((spec) => spec.id));
-
   // Command gates aren't in the runner's static bundle -- they are declared per tenant and
   // arrive as signed `{kind:'command'}` specs. Build a createCommandGate instance for each
   // and register it (dynamically named) so the registry runs it exactly like a generic gate,
@@ -276,6 +373,32 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
   // split). It never widens: an id absent from the signed specs still can't run.
   const runnable = (id: string): boolean => !deps.onlyGateIds || deps.onlyGateIds.has(id);
   const enabledIds = [...genericSpecs.map((spec) => spec.id), ...commandSpecs.map((spec) => spec.id)].filter(runnable);
+
+  // Resolve every enabled id to an executable Gate BEFORE running anything, fetching the
+  // private pack bundle when that is what an id is waiting on.
+  //
+  // An unresolved id cannot reach a green stage either way -- the `missing` check below is the
+  // backstop that fails the stage for any enabled id that produced no result. This runs first
+  // because the backstop can only say "NOT RUN"; only here do we still know WHY (bundle
+  // unreachable, digest mismatch, token expired), and that reason is what decides whether the
+  // control plane retries or sends it to a human. So the value added here is the diagnosis and
+  // the fetch, not the refusal.
+  const packBundleFailure = await resolvePackGates(grant, deps, genericSpecs, enabledIds);
+  if (packBundleFailure) {
+    // Say it in the job log too. The check's findings are what an operator reads on the PR, but
+    // a stage that resolved nothing must not be silent in the Actions log either -- the same
+    // reason the per-gate lines further down exist.
+    for (const finding of packBundleFailure.findings ?? []) {
+      process.stdout.write(`[gate] ${PACK_BUNDLE_GATE_ID}: ${finding}\n`);
+    }
+    return {
+      grantId: grantId(grant),
+      result: 'fail',
+      checks: toChecks([packBundleFailure], deps.checkNameSuffix),
+      logDigest: digestFor(grant.repoId, grant.ticketId, grant.stage, PACK_BUNDLE_GATE_ID),
+    };
+  }
+
   const genericReport = await deps.registry.run(enabledIds, ctx);
 
   // When `onlyGateIds` restricts the call, drop the `skip` results the registry emits for every

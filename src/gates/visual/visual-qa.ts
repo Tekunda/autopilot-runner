@@ -32,7 +32,7 @@
 // closed and escalates to a human. `warn` would map to a pass; a green check on a gate that never
 // judged is worse than no gate.
 
-import { asGateNotes, createContentReader, selectPages, type ContentFormat } from '../../packs/seo/content.ts';
+import { asGateNotes, createContentReader, selectPages, type ContentFormat } from '../content/reader.ts';
 import type { Gate, GateContext, GateResult } from '../types.ts';
 import { createPlaywrightBrowser, type ScreenshotBrowser } from './browser.ts';
 import {
