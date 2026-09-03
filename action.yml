@@ -26,6 +26,19 @@ inputs:
     description: 'For a `gate` stage: `fast` (default, deterministic gates against the PR checkout) or `heavy` (the dedicated stage that builds+serves the site and runs the SEO crawl / Visual-QA gates against it -- provisions a browser). Set by the control plane per the gates the grant carries.'
     required: false
     default: 'fast'
+  salesforce-auth-url:
+    description: >-
+      The tenant's Salesforce sfdx auth URL, for the one gate that must execute IN an org:
+      salesforce-deploy-validate, a check-only deploy of the PR's own metadata that also runs
+      the org's local Apex tests against it. An INPUT rather than a job-level env var on
+      purpose: a job-level secret is inherited by every stage this action runs -- including
+      `build` and `fix`, where a coding model runs with tool access on the branch's tree, and
+      including the `salesforce-lwc-jest` gate, which executes TEST CODE AUTHORED BY THE PR
+      UNDER GATE. A composite action's inputs are not exported to its `run:` steps, so this
+      reaches exactly one step (`Run gates`) and no other stage ever holds it.
+      Optional; absent, that gate reports a skip naming the variable and never passes.
+    required: false
+    default: ''
 
 outputs:
   telemetry:
@@ -275,6 +288,156 @@ runs:
         echo "$bin" >> "$GITHUB_PATH"
         echo "osv-scanner ${OSV_SCANNER_VERSION} provisioned (${asset}, checksum verified)"
 
+    # --- Salesforce toolchain ------------------------------------------------------------
+    # The Salesforce gates are ALWAYS signed (they cannot be selected server-side, which
+    # cannot see a checkout -- see src/gates/salesforce/index.ts), so the decision of whether
+    # to spend minutes provisioning a toolchain has to be made HERE, against the checkout.
+    # An sfdx-project.json is the same evidence detectStack uses; a repo without one gets none
+    # of these steps and none of their cost, and its Salesforce gates skip benignly.
+    #
+    # ROOT ONLY, because that is exactly what stack-profile.ts's detectSalesforce reads
+    # (`reader.readFile('sfdx-project.json')`). Matching a nested `*/sfdx-project.json` here
+    # would install a JDK and provision a toolchain for a repo whose gates then all return a
+    # benign `no-config` -- minutes of budget burned on every PR with nothing to show for it and
+    # no signal that it happened. The two checks must name the same file or one of them is lying.
+    # Runs in the customer checkout (a composite step's default working-directory), NOT in
+    # ${{ github.action_path }} like the node steps below.
+    - name: Detect a Salesforce checkout
+      id: sf-detect
+      if: steps.parse-grant.outputs.stage == 'gate'
+      shell: bash
+      run: |
+        if [ -f sfdx-project.json ]; then
+          echo "salesforce=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "salesforce=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    # The cache key is DERIVED FROM THE PINS (src/gates/salesforce/manifest.ts) rather than
+    # typed here: a hand-written key is a second copy of the version numbers, and it goes stale
+    # silently. Bumping a pin changes this key, so the old entry is simply not found instead of
+    # being restored and then failing its digest check for reasons invisible from this file.
+    - name: Salesforce toolchain cache key
+      id: sf-key
+      if: steps.parse-grant.outputs.stage == 'gate' && steps.sf-detect.outputs.salesforce == 'true'
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: echo "key=$(node src/gates/salesforce/provision-cli.ts --cache-key)" >> "$GITHUB_OUTPUT"
+
+    # A cache HIT does not skip provisioning, it only saves the download. provision-cli.ts
+    # re-verifies every tarball's SHA-256 on the warm path exactly as on the cold one -- the
+    # warm path is the one that runs every time, so a step that verified only on a miss would
+    # verify nothing in steady state. There is deliberately no `restore-keys` fallback: a
+    # partial match would restore a DIFFERENT toolchain than the pins name.
+    - name: Restore Salesforce toolchain
+      if: steps.parse-grant.outputs.stage == 'gate' && steps.sf-detect.outputs.salesforce == 'true'
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ${{ runner.temp }}/autopilot-sf-tools
+        key: ${{ steps.sf-key.outputs.key }}-${{ runner.os }}
+
+    # Code Analyzer's `pmd` and `sfge` engines need a JVM (>= 11; both engines' own
+    # MINIMUM_JAVA_VERSION). Without one they do not fail -- Code Analyzer reports the engines
+    # it COULD run -- which is why the gate probes for java itself and skips rather than
+    # passing. Installing it here is what makes that probe succeed instead of permanently
+    # skipping the entire Apex static analysis. Python for the `flow` engine (>= 3.10) is
+    # already present on GitHub's ubuntu images, so it is not installed here; if it is ever
+    # absent the flow gate skips with a reason naming it, never passes.
+    - name: Set up Java for Apex static analysis
+      if: steps.parse-grant.outputs.stage == 'gate' && steps.sf-detect.outputs.salesforce == 'true'
+      uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+      with:
+        distribution: temurin
+        java-version: '21'
+
+    # Downloads each pinned tool to a FILE, verifies its SHA-256 against manifest.ts, and only
+    # then installs from it -- never `curl | sh`, which executes bytes before it has finished
+    # reading them and so cannot verify them even in principle. Exits 0 even on failure BY
+    # DESIGN: a failed provisioning must not kill the job, because every Salesforce gate then
+    # reports its own honest skip naming what was missing, which is strictly more useful than a
+    # dead stage with no gate report at all. The step exports AUTOPILOT_SF_BIN and friends via
+    # GITHUB_ENV for the "Run gates" step below.
+    - name: Provision Salesforce toolchain
+      if: steps.parse-grant.outputs.stage == 'gate' && steps.sf-detect.outputs.salesforce == 'true'
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: node src/gates/salesforce/provision-cli.ts "${{ runner.temp }}/autopilot-sf-tools"
+
+    # THE PRODUCER FOR `salesforce-lwc-jest`. That gate runs the tenant's OWN
+    # `node_modules/.bin/sfdx-lwc-jest` and deliberately never fetches one (an `npx
+    # sfdx-lwc-jest` would resolve a name over the network and execute unpinned, unverified
+    # bytes inside a security gate). Without this step nothing in the pipeline ever creates that
+    # binary: the only other `npm ci` above runs in ${{ github.action_path }} -- the runner's own
+    # dependencies, not the customer's -- and `actions/checkout` above would in any case
+    # `git clean -ffdx` away anything a tenant installed before the action ran. The gate would
+    # then skip on every LWC PR forever, which the ledger classes suspicious and alarms on.
+    #
+    # `--ignore-scripts` IS LOAD-BEARING, NOT TIDINESS. npm lifecycle scripts (preinstall,
+    # postinstall, prepare) are arbitrary code, and in a gate stage they are code the PR UNDER
+    # GATE authored -- a dependency it added, or a `postinstall` in its own package.json. This
+    # step runs before the gate step, so it does not hold SFDX_AUTH_URL, but it does inherit the
+    # job environment (ACTIONS_RUNTIME_TOKEN and friends) and it writes to the checkout the
+    # later gates read. Allowing install-time execution here would re-open, one step earlier,
+    # exactly the code-execution path scrubbedSubprocessEnv closes for the test run itself.
+    #
+    # WHAT IT COSTS A LEGITIMATE TENANT: a repo whose LWC setup genuinely needs a postinstall
+    # (a native rebuild, a patch-package step) gets an install that is complete enough for
+    # `sfdx-lwc-jest` to exist -- npm links bin entries regardless of scripts -- but may fail at
+    # RUN time. That surfaces as a `fail` from the gate with jest's own output, not as a silent
+    # pass, and salesforce-lwc-jest.blocking:false is the tenant's escape hatch while they move
+    # the work out of a lifecycle script. A loud, diagnosable failure is the right trade against
+    # running PR-authored install scripts on every gated PR.
+    #
+    # Gated three ways so no NON-Salesforce tenant pays for it: gate stage, an sfdx project, and
+    # an npm lockfile. `npm ci` REQUIRES a lockfile and refuses one that disagrees with
+    # package.json, which is the property we want -- an unresolvable tree must not become a
+    # half-installed one. Yarn and pnpm LWC repos are deliberately NOT handled here; they fall
+    # through to the gate's honest skip, which names this step.
+    #
+    # Exits 0 whatever happens, on purpose and for the same reason provision-cli.ts does: a
+    # failed install must leave the gate to report its own honest skip naming what is missing,
+    # not kill a stage that still has a dozen other gates to run.
+    # A Salesforce tenant DOES pay, and without this cache it pays on every gate stage of every
+    # subtask -- including pure-Apex diffs, where the gate then skips with `no-matching-files`
+    # having installed a full LWC toolchain for nothing. Keyed on the lockfile hash, so it is
+    # exact: a different resolved tree is a different key rather than a stale restore, and no
+    # `restore-keys` fallback for the same reason (a partial match would seed node_modules with
+    # a tree the lockfile does not describe, which is precisely what `npm ci` refuses to do).
+    # This mirrors the osv-scanner step above, which caches for the same reason.
+    #
+    # Restoring node_modules is safe where restoring a package MANAGER cache would not be: the
+    # install below is `--ignore-scripts`, so nothing in a restored tree executes at install
+    # time, and the only consumer is sfdx-lwc-jest, which the gate resolves and runs under an
+    # explicitly scrubbed environment (subprocess-env.ts) whatever produced the tree.
+    - name: Restore LWC test dependencies
+      if: >-
+        steps.parse-grant.outputs.stage == 'gate'
+        && steps.sf-detect.outputs.salesforce == 'true'
+        && hashFiles('package-lock.json') != ''
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: node_modules
+        key: autopilot-lwc-node-modules-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+    - name: Install LWC test dependencies
+      if: >-
+        steps.parse-grant.outputs.stage == 'gate'
+        && steps.sf-detect.outputs.salesforce == 'true'
+        && hashFiles('package-lock.json') != ''
+      shell: bash
+      run: |
+        # A cache hit already put the tree in place; `npm ci` would delete and rebuild it, which
+        # is the whole cost this cache exists to avoid. Re-running it only when the runner the
+        # gate actually spawns is absent keeps the check on the thing that matters -- the binary
+        # -- rather than on the cache step's own outcome.
+        if [ -x node_modules/.bin/sfdx-lwc-jest ]; then
+          echo "LWC test dependencies restored from cache"
+        elif npm ci --ignore-scripts --no-audit --no-fund; then
+          echo "LWC test dependencies installed (lifecycle scripts skipped)"
+        else
+          echo "::warning::npm ci failed in the customer checkout; salesforce-lwc-jest will report a skip naming its missing runner"
+        fi
+
     # Runs only for a `gate` stage grant: verifies the grant, builds a GateContext from the
     # checked-out tree above, and runs exactly the gates named in the grant's signed
     # `gateSpecs` -- never a gate outside that set, even if it's registered runner-side (see
@@ -300,6 +463,15 @@ runs:
         # or the raw API key, so an OAuth tenant's Visual-QA runs on their subscription instead of
         # failing closed for lack of a standalone ANTHROPIC_API_KEY.
         INPUT_CODING-EXECUTOR-CONFIG: ${{ inputs.coding-executor-config }}
+        # The Salesforce org credential, present ONLY on this step. src/gates/salesforce/org.ts
+        # never reads its VALUE -- it resolves the variable's NAME and lets a child `sh -c`
+        # expand it into `sf org login sfdx-url --sfdx-url-stdin`, so the secret never enters
+        # the runner's Node process and never reaches argv (world-readable at
+        # /proc/<pid>/cmdline). Scoping it here is the OTHER half of that defence: the gate
+        # stage runs subprocesses over PR-authored code (sfdx-lwc-jest runs the branch's own
+        # test files; ESLint and PMD parse them), and those subprocesses get an explicitly
+        # SCRUBBED environment (gates/salesforce/subprocess-env.ts) rather than an inherited one.
+        SFDX_AUTH_URL: ${{ inputs.salesforce-auth-url }}
       run: node src/runner/action-entry.ts
 
     # Upload the per-gate results+findings the "Run gates" step wrote (the StatusTelemetry

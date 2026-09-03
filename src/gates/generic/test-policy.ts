@@ -35,12 +35,25 @@
 //   - The dirs exist but this diff touched none of them (a docs-only PR) -> `skip` +
 //     `no-matching-files`. Honest for one PR, and the non-benign reason keeps it out of the
 //     promotion coverage record.
+//
+// THE SAME DEFECT, ONE LANGUAGE OVER: an sfdx repo has no `src/` and no `.ts`, so the stock
+// defaults produced that blocking `unjudged` on EVERY PR for a Salesforce tenant -- correct by
+// the rules above, useless as a product, because the tenant did nothing wrong and the remedy
+// ("point test-policy at this repo's real source roots") is knowledge the runner already has.
+// So when the tenant configured NOTHING, the defaults are derived from `ctx.stackProfiles`
+// (gates/stack-profile.ts) instead: a `salesforce` profile ADDS its sfdx packageDirectories and
+// `.cls`/`.trigger` to the Node defaults. Adding, never replacing -- a Salesforce org with an
+// LWC front end is genuinely both ecosystems, and replacing would silently drop policing of the
+// half that is still TypeScript. A tenant that DID configure the gate is honoured verbatim, as
+// before: stack detection is a fact about the checkout, not a licence to widen a scope an
+// operator deliberately narrowed.
 
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
 
 import { readGateConfig } from './config.ts';
 import type { Gate, GateContext, GateResult } from '../types.ts';
+import type { StackProfile } from '../stack-profile.ts';
 
 export interface TestPolicyGateConfig {
   sourceDirs: string[];
@@ -56,6 +69,41 @@ export const DEFAULT_TEST_POLICY_CONFIG: TestPolicyGateConfig = {
   exemptSuffixes: ['.d.ts', '/index.ts', '/types.ts'],
 };
 
+// The two Apex source extensions, and the only ones. An LWC bundle's `.js`/`.html` lives under
+// the same packageDirectory but belongs to the node half of a polyglot repo, which contributes
+// its own defaults.
+const APEX_SOURCE_EXTENSIONS = ['.cls', '.trigger'] as const;
+
+// Every `.cls` and every LWC bundle carries a metadata sidecar. An API-version bump or a
+// visibility change in one is not a code change, and a gate that demands an Apex test class for
+// it fails PRs whose policy is satisfied -- which is how a gate gets configured off entirely.
+const SALESFORCE_EXEMPT_SUFFIXES = ['.cls-meta.xml', '.js-meta.xml'] as const;
+
+function withoutDuplicates(values: readonly string[]): string[] {
+  return [...new Set(values)];
+}
+
+// The defaults BEFORE tenant config, derived from what the checkout actually is.
+//
+// `stackProfiles` is optional on GateContext and absent means "not detected" (an older caller,
+// a hand-built test context) -- never "nothing here" -- so absence falls back to the historic
+// Node defaults rather than to a wider or narrower guess. This reads the field only: a gate
+// re-running its own filesystem detector would both duplicate the once-per-stage detection and
+// disagree with the stack the rest of the run reported.
+export function stackDefaultTestPolicyConfig(stackProfiles?: readonly StackProfile[]): TestPolicyGateConfig {
+  const salesforceRoots = (stackProfiles ?? [])
+    .filter((profile) => profile.ecosystem === 'salesforce')
+    .flatMap((profile) => profile.sourceRoots);
+  if (salesforceRoots.length === 0) return DEFAULT_TEST_POLICY_CONFIG;
+
+  return {
+    sourceDirs: withoutDuplicates([...DEFAULT_TEST_POLICY_CONFIG.sourceDirs, ...salesforceRoots.map(asDirPrefix)]),
+    sourceExtensions: withoutDuplicates([...DEFAULT_TEST_POLICY_CONFIG.sourceExtensions, ...APEX_SOURCE_EXTENSIONS]),
+    testMarkers: DEFAULT_TEST_POLICY_CONFIG.testMarkers,
+    exemptSuffixes: withoutDuplicates([...DEFAULT_TEST_POLICY_CONFIG.exemptSuffixes, ...SALESFORCE_EXEMPT_SUFFIXES]),
+  };
+}
+
 // Tenant-editable config rides the signed spec, so a wrong-shape value falls back to the
 // default rather than throwing the gate (same discipline as risk.ts). An EMPTY array falls
 // back too: an empty sourceDirs or sourceExtensions silently disarms the gate completely,
@@ -66,25 +114,64 @@ function normalizeStringArray(value: unknown, fallback: string[]): string[] {
     : fallback;
 }
 
-export function effectiveTestPolicyConfig(specConfig?: Record<string, unknown>): TestPolicyGateConfig {
-  const config = readGateConfig(
-    specConfig === undefined ? {} : { 'test-policy': specConfig },
-    'test-policy',
-    DEFAULT_TEST_POLICY_CONFIG,
-  );
+// The stack supplies the defaults ONLY when the tenant supplied no `test-policy` config at all.
+// Tenant config wins WHOLE, not key by key: an operator who named this repo's source roots and
+// silently got `force-app/` bolted on beside them would be policing a scope nobody approved,
+// and would have no way to say "only these". Detection informs the default; it never edits a
+// decision someone already made.
+export function effectiveTestPolicyConfig(
+  specConfig?: Record<string, unknown>,
+  stackProfiles?: readonly StackProfile[],
+): TestPolicyGateConfig {
+  const defaults = specConfig === undefined ? stackDefaultTestPolicyConfig(stackProfiles) : DEFAULT_TEST_POLICY_CONFIG;
+  const config = readGateConfig(specConfig === undefined ? {} : { 'test-policy': specConfig }, 'test-policy', defaults);
   return {
-    sourceDirs: normalizeStringArray(config.sourceDirs, DEFAULT_TEST_POLICY_CONFIG.sourceDirs),
-    sourceExtensions: normalizeStringArray(config.sourceExtensions, DEFAULT_TEST_POLICY_CONFIG.sourceExtensions),
-    testMarkers: normalizeStringArray(config.testMarkers, DEFAULT_TEST_POLICY_CONFIG.testMarkers),
+    sourceDirs: normalizeStringArray(config.sourceDirs, defaults.sourceDirs),
+    sourceExtensions: normalizeStringArray(config.sourceExtensions, defaults.sourceExtensions),
+    testMarkers: normalizeStringArray(config.testMarkers, defaults.testMarkers),
     // exemptSuffixes is the one list an empty array legitimately means: "exempt nothing".
     exemptSuffixes: Array.isArray(config.exemptSuffixes) && config.exemptSuffixes.every((v) => typeof v === 'string')
       ? (config.exemptSuffixes as string[])
-      : DEFAULT_TEST_POLICY_CONFIG.exemptSuffixes,
+      : defaults.exemptSuffixes,
   };
 }
 
+// --- Apex ---
+//
+// Apex has no sibling-path test convention to splice a marker into: `Foo.test.cls` is not a
+// thing any org deploys. A test is an ordinary class marked `@isTest`, named for the class it
+// covers, and it is matched HERE BY BASENAME ANYWHERE IN THE DIFF for two reasons:
+//   - An Apex class name is globally unique within an org (there are no packages or folders in
+//     the runtime namespace), so a basename carries no path ambiguity to resolve.
+//   - A TRIGGER lives in `triggers/` while its test class must be a class, in `classes/`. A
+//     sibling-path model cannot express that at all -- it would demand
+//     `triggers/OrderTriggerTest.cls`, a file the platform will not accept -- so it would fail
+//     every trigger PR whose test exists.
+// This is keyed off the file extension, not off which config path produced it: the naming
+// convention is a fact about the language, so a tenant that configures `.cls` by hand gets the
+// same (correct) model rather than the marker splice.
+function isApexSource(file: string): boolean {
+  return APEX_SOURCE_EXTENSIONS.some((ext) => file.endsWith(ext));
+}
+
+function apexCompanionsFor(file: string): string[] {
+  const ext = APEX_SOURCE_EXTENSIONS.find((candidate) => file.endsWith(candidate))!;
+  const base = path.posix.basename(file).slice(0, -ext.length);
+  // Always `.cls`: a test is a class even when the thing under test is a trigger.
+  return [`${base}Test.cls`, `${base}Tests.cls`, `${base}_Test.cls`, `Test${base}.cls`];
+}
+
+// The same four shapes read backwards, so a changed `OrderServiceTest.cls` is recognised as a
+// test and does not itself demand a test of its own -- the substring `testMarkers` match below
+// never fires for Apex, and without this every test class in the diff would be reported as an
+// uncovered source file.
+function isApexTestFile(file: string): boolean {
+  const name = path.posix.basename(file);
+  return /^(?:Test.+|.+(?:_Test|Tests|Test))\.cls$/.test(name);
+}
+
 function isTestFile(file: string, testMarkers: string[]): boolean {
-  return testMarkers.some((marker) => file.includes(marker));
+  return isApexTestFile(file) || testMarkers.some((marker) => file.includes(marker));
 }
 
 function isExempt(file: string, exemptSuffixes: string[]): boolean {
@@ -142,8 +229,12 @@ export function createTestPolicyGate(): Gate {
   return {
     id: 'test-policy',
     async run(ctx: GateContext): Promise<GateResult> {
-      const config = effectiveTestPolicyConfig(ctx.config['test-policy'] as Record<string, unknown> | undefined);
+      const config = effectiveTestPolicyConfig(
+        ctx.config['test-policy'] as Record<string, unknown> | undefined,
+        ctx.stackProfiles,
+      );
       const changed = new Set(ctx.changedFiles);
+      const changedNames = new Set(ctx.changedFiles.map((file) => path.posix.basename(file)));
 
       // Exemption is part of scope, not a step inside the loop: a diff of nothing but exempt
       // files (`src/index.ts`, `src/types.ts`) asserts exactly as much as a diff of no source
@@ -198,6 +289,20 @@ export function createTestPolicyGate(): Gate {
 
       const findings: string[] = [];
       for (const file of inScope) {
+        // Apex is matched by basename over the whole diff; everything else keeps the sibling
+        // splice verbatim. An Apex source change with no test class in the diff still FAILS --
+        // the naming model is different, the policy is not weaker.
+        if (isApexSource(file)) {
+          const companions = apexCompanionsFor(file);
+          if (!companions.some((name) => changedNames.has(name))) {
+            findings.push(
+              `"${file}" changed without a matching test file (expected an @isTest class named one of: ` +
+                `${companions.join(', ')}, anywhere in the diff)`,
+            );
+          }
+          continue;
+        }
+
         const companions = companionsFor(file, config.sourceExtensions, config.testMarkers);
         if (companions.length > 0 && !companions.some((c) => changed.has(c))) {
           findings.push(

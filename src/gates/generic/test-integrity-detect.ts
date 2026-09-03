@@ -6,18 +6,28 @@
 // exists to catch.
 //
 // SCOPE, stated so the gate cannot quietly claim more than it does: the patterns below are
-// JavaScript/TypeScript test-runner spellings (Playwright, Jest, Vitest, node:test, mocha).
-// `isScannableTestFile` is the ONLY authority on what this detector can judge, and
-// structure.ts reports files it selected but could not judge separately from files it
-// scanned -- because "scanned a .py file and found nothing" would be exactly the
-// examined-nothing-and-reported-green defect this whole change removes, one level down.
-// Adding a language means adding its patterns AND its extension here, together.
+// JavaScript/TypeScript test-runner spellings (Playwright, Jest, Vitest, node:test, mocha)
+// and, since the Salesforce runtime profile, APEX (`.cls`/`.trigger` -- see the Apex section
+// at the bottom of this file). `isScannableTestFile` is the ONLY authority on what this
+// detector can judge, and structure.ts reports files it selected but could not judge
+// separately from files it scanned -- because "scanned a .py file and found nothing" would be
+// exactly the examined-nothing-and-reported-green defect this whole change removes, one level
+// down. Adding a language means adding its patterns AND its extension here, together, and in
+// that order: widening structure.ts's selection first would select files nothing can judge.
 //
 // The rules are ported from Tekunda/Website's scripts/code-structure-check.sh, which enforced
 // them on the pipeline this replaced. No filesystem, no git: structure.ts feeds it file
 // contents so this stays unit-testable and deterministic.
 
-export type TestIntegrityKind = 'hard-disable' | 'empty-content-skip';
+// `hard-disable` / `empty-content-skip` are the JS/TS kinds. `no-assertion` and
+// `org-data-dependency` are Apex's analogues of a disabled test -- Apex has no `skip`, so the
+// two ways an Apex suite reports green while asserting nothing are a test method that asserts
+// nothing at all, and one that reads the org's existing data instead of its own fixture.
+export type TestIntegrityKind =
+  | 'hard-disable'
+  | 'empty-content-skip'
+  | 'no-assertion'
+  | 'org-data-dependency';
 
 export interface TestIntegrityViolation {
   file: string;
@@ -31,8 +41,18 @@ export interface TestIntegrityViolation {
 // outside this set is NOT scanned and must never be counted as one that was.
 const SCANNABLE_EXTENSIONS: readonly string[] = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'];
 
+// Apex. Separate from the JS list because the two are judged by DIFFERENT pattern sets
+// (detectTestIntegrityViolations dispatches on it), not because Apex is second-class.
+// `.cls-meta.xml` deliberately does NOT match `.cls` -- a metadata sidecar carries no code to
+// judge, and selecting it would make every metadata-only edit look like a scanned test file.
+const APEX_EXTENSIONS: readonly string[] = ['.cls', '.trigger'];
+
+function isApexFile(file: string): boolean {
+  return APEX_EXTENSIONS.some((ext) => file.endsWith(ext));
+}
+
 export function isScannableTestFile(file: string): boolean {
-  return SCANNABLE_EXTENSIONS.some((ext) => file.endsWith(ext));
+  return SCANNABLE_EXTENSIONS.some((ext) => file.endsWith(ext)) || isApexFile(file);
 }
 
 // A test that is disabled OUTRIGHT, with no condition to ever re-enable it:
@@ -292,7 +312,192 @@ function firstArgument(text: string, inString: boolean[], offset: number): strin
   return text;
 }
 
+// ---------------------------------------------------------------------------
+// Apex
+// ---------------------------------------------------------------------------
+
+// APEX HAS NO `skip`. There is no `@Ignore`, no `xit`, no `.only` -- so the JS pattern lists
+// above judge nothing at all in a `.cls`, and pointing them at one would be the
+// scanned-it-and-found-nothing false green this file exists to prevent. The two ways an Apex
+// suite reports green while asserting nothing are:
+//
+//   1. `no-assertion` -- an `@IsTest` method whose body contains no assertion of any kind. It
+//      executes, it counts toward the org's code-coverage requirement (which is what most
+//      Apex suites are actually written to satisfy), and it can never fail. This is the
+//      dominant false-green shape in Apex precisely BECAUSE coverage, not assertion, is what
+//      the platform enforces at deploy time.
+//
+//      This check also subsumes the `Test.startTest()`/`stopTest()` analogue: a method with no
+//      assertion after `stopTest()` but one before it is judged by whether it asserts AT ALL.
+//      A positional rule ("assert must follow stopTest") was deliberately NOT written: asserting
+//      state captured before `stopTest()` is legitimate Apex, and this gate is blocking by
+//      default. A gate that reds correct code gets switched off, and then it enforces nothing.
+//
+//   2. `org-data-dependency` -- `@IsTest(SeeAllData=true)`. The test reads whatever records the
+//      org happens to contain instead of building its own fixture, so it asserts about data no
+//      one committed. It passes or fails on org state, which makes a green run evidence of
+//      nothing. Salesforce's own guidance has said not to use it since API v24.
+//
+// What is deliberately NOT flagged: `@TestSetup` methods (they exist to build fixtures and
+// correctly assert nothing) and plain helper methods inside an `@IsTest` class. Only methods
+// Apex itself recognises as tests -- `@IsTest`-annotated, or the legacy `testMethod` modifier
+// -- are judged, which is why the annotation is matched rather than the enclosing class.
+const APEX_TEST_ANNOTATION = /@\s*IsTest\b\s*(?:\(([^)]*)\))?/gi;
+const APEX_LEGACY_TEST_MODIFIER = /\btestMethod\b/gi;
+const APEX_SEE_ALL_DATA = /\bSeeAllData\s*=\s*true\b/i;
+const APEX_TYPE_DECLARATION = /\b(?:class|interface|enum)\b/i;
+
+// Permissive ON PURPOSE. A false negative here costs one finding; a false positive reds a
+// correct PR on a blocking gate (structure.ts's `enforceTestIntegrity` defaults to enforcing),
+// and a gate that reds correct code gets switched off, after which it enforces nothing. So an
+// assertion delegated to a helper (`TestHelper.assertOrderValid(o)`) counts, as does any
+// `System.assert*`, any `assertEquals`, the modern `Assert` class (`Assert.areEqual`,
+// `Assert.isTrue`, `Assert.fail`), and MOCK VERIFICATION -- the fflib/ApexMocks idiom
+// `((IOrders) mocks.verify(mockOrders)).insertOrders(...)` asserts and fails properly while
+// containing no token spelled "assert" at all. A method with none of these anywhere in its body
+// genuinely asserts nothing.
+const APEX_ASSERTION_PATTERNS: readonly RegExp[] = [
+  // `assertX(` bare or after a dot: System.assertEquals(, assertEquals(, assertOrderValid(.
+  /\bassert\w*\s*\(/i,
+  // A custom assertion facade whose CLASS is named Assert*: Assert.areEqual(, Asserts.that(.
+  /\bassert\w*\s*\.\s*\w+\s*\(/i,
+  // Mock verification (ApexMocks/fflib, Stub API) and expectation-style helpers.
+  /\bverif\w*\s*\(/i,
+  /\bexpect\w*\s*\(/i,
+];
+
+// Apex only recognises a STATIC, VOID, ZERO-ARGUMENT method as a test. `@IsTest` on anything
+// else is the common trick for keeping a data-factory method out of the coverage figure --
+// `@IsTest public static Account buildAccount(Account a)` is ordinary, correct Apex, and
+// flagging it for "asserting nothing" is a false positive on a blocking gate. Checking the
+// signature costs nothing: apexBodyAfter already has it in hand.
+const APEX_TEST_SIGNATURE = /\bvoid\s+[A-Za-z_]\w*\s*\(\s*\)\s*$/;
+
+// The `{ ... }` body that follows a signature, brace-matched over the comment-blanked code with
+// the string mask consulted -- a brace inside an Apex string literal must not shift the depth,
+// the same lesson testSkipArguments learned about parens. Returns the enclosing type instead
+// when the annotation sits on a `class`/`interface`/`enum`, and `none` for an abstract or
+// interface method (`;`, no body) or an unterminated one.
+type ApexBody = { kind: 'body'; start: number; end: number } | { kind: 'type' } | { kind: 'none' };
+
+function apexBodyAfter(code: string, inString: boolean[], from: number): ApexBody {
+  let open = -1;
+  for (let i = from; i < code.length; i += 1) {
+    if (inString[i]) continue;
+    const ch = code[i];
+    // A `;` before any `{` is a declaration with no body (interface/abstract method).
+    if (ch === ';') return { kind: 'none' };
+    if (ch === '{') {
+      open = i;
+      break;
+    }
+  }
+  if (open === -1) return { kind: 'none' };
+  // Everything between the annotation and the `{` is the signature. If it declares a type, the
+  // annotation was class-level and there is no single method body to judge here.
+  if (APEX_TYPE_DECLARATION.test(code.slice(from, open))) return { kind: 'type' };
+
+  let depth = 0;
+  for (let i = open; i < code.length; i += 1) {
+    if (inString[i]) continue;
+    if (code[i] === '{') depth += 1;
+    else if (code[i] === '}') {
+      depth -= 1;
+      // An unterminated body is DROPPED rather than throwing: a gate that throws is recorded
+      // as a failing check no edit clears, which wedges the fix loop (testSkipArguments again).
+      if (depth === 0) return { kind: 'body', start: open, end: i };
+    }
+  }
+  return { kind: 'none' };
+}
+
+// The identifier immediately before the parameter list, for a finding a human can jump to.
+// Best-effort: an unparseable signature yields "a test method", never an exception.
+function apexMethodName(signature: string): string {
+  const match = /([A-Za-z_]\w*)\s*\([^)]*\)\s*$/.exec(signature.trim());
+  return match?.[1] !== undefined ? `${match[1]}()` : 'a test method';
+}
+
+function apexBodyAsserts(body: string): boolean {
+  return APEX_ASSERTION_PATTERNS.some((pattern) => pattern.test(body));
+}
+
+function detectApexViolations(file: string, source: string): TestIntegrityViolation[] {
+  // `allowTemplates: false` -- Apex has no template literals, so a backtick is an ordinary
+  // character and must not open a mask that swallows the rest of the file.
+  const { code, inString } = scanSource(source, false);
+  const violations: TestIntegrityViolation[] = [];
+
+  // (2) SeeAllData=true, at class or method level -- one finding per file, the fix is the same
+  // edit either way.
+  const seeAllData = new RegExp(APEX_TEST_ANNOTATION.source, 'gi');
+  let annotation: RegExpExecArray | null;
+  while ((annotation = seeAllData.exec(code)) !== null) {
+    if (inString[annotation.index]) continue;
+    if (annotation[1] === undefined || !APEX_SEE_ALL_DATA.test(annotation[1])) continue;
+    violations.push({
+      file,
+      kind: 'org-data-dependency',
+      line: lineOf(code, annotation.index),
+      detail:
+        '`@IsTest(SeeAllData=true)` makes this test read whatever records the org already ' +
+        'contains instead of building its own fixture, so a green run is evidence about org ' +
+        'state rather than about this code. Build the data the test needs inside the test.',
+    });
+    break;
+  }
+
+  // (1) A test method that asserts nothing. Both spellings Apex recognises as a test are
+  // collected, then deduped by body position so a method carrying BOTH `@IsTest` and the
+  // legacy `testMethod` modifier is judged once.
+  const starts: number[] = [];
+  for (const pattern of [APEX_TEST_ANNOTATION, APEX_LEGACY_TEST_MODIFIER]) {
+    const scan = new RegExp(pattern.source, 'gi');
+    let hit: RegExpExecArray | null;
+    while ((hit = scan.exec(code)) !== null) {
+      if (!inString[hit.index]) starts.push(hit.index + hit[0].length);
+    }
+  }
+
+  const judged = new Set<number>();
+  for (const start of starts.sort((a, b) => a - b)) {
+    const body = apexBodyAfter(code, inString, start);
+    // A class-level annotation names no single body; its methods are found by their own
+    // annotations. A bodiless declaration has nothing to judge.
+    if (body.kind !== 'body' || judged.has(body.start)) continue;
+    judged.add(body.start);
+    const signature = code.slice(start, body.start);
+    // Not a `void name()` -- so Apex does not recognise it as a test, whatever the annotation
+    // says. `@IsTest` on a data factory is the ordinary way to keep it out of the coverage
+    // figure, and flagging it for asserting nothing would be a false positive on a gate that
+    // blocks by default.
+    if (!APEX_TEST_SIGNATURE.test(signature)) continue;
+    if (apexBodyAsserts(code.slice(body.start, body.end + 1))) continue;
+    violations.push({
+      file,
+      kind: 'no-assertion',
+      line: lineOf(code, body.start),
+      detail:
+        `${apexMethodName(signature)} is an @IsTest method that asserts ` +
+        'nothing, so it can never fail -- it only earns code coverage. Add a `System.assert*`/' +
+        '`Assert.*` call for the behaviour it exercises, or delete it.',
+    });
+    break; // One finding per file per kind: the fix is the same edit either way.
+  }
+
+  return violations;
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
 export function detectTestIntegrityViolations(file: string, source: string): TestIntegrityViolation[] {
+  // Dispatch on the file's language, never on content sniffing: the JS pattern lists judge
+  // nothing in a `.cls` and the Apex ones judge nothing in a `.ts`, so running the wrong set
+  // returns a clean scan of a file that was never actually examined.
+  if (isApexFile(file)) return detectApexViolations(file, source);
+
   const { code, inString } = scanSource(source);
   const violations: TestIntegrityViolation[] = [];
 

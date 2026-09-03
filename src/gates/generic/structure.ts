@@ -55,12 +55,34 @@ export interface StructureGateConfig {
   maxTestFileBytes: number;
 }
 
+// Apex is in the defaults because the judge was taught it first (test-integrity-detect.ts's
+// Apex section); widening selection ahead of judgment is what `unjudgeable-language` exists to
+// report, and the order is fixed for that reason.
+//
+// `'Test'` is capital-T deliberately. Apex has no `.test.` infix -- the universal convention is
+// a PascalCase `Test` prefix or suffix (`OrderTest.cls`, `TestOrder.cls`, `Order_Test.cls`), and
+// `isTestFile` matches markers as SUBSTRINGS, so one marker covers all three spellings. The
+// case-sensitivity is the safety: it does not match the lowercase word "test" buried in an
+// ordinary identifier, so `LatestOrder.cls` and `ContestEntry.cls` are not selected.
+//
+// That marker also now selects JS/TS files it did not before -- `src/TestHelper.ts` is the
+// shape. That is harmless rather than a regression, because widening SELECTION can only cause a
+// file to be READ and JUDGED: the judge reports a violation on a real defect and nothing
+// otherwise, so a non-test helper is scanned and cleanly passes. What widening selection cannot
+// do is bank a false pass -- a selected file the detector has no patterns for is reported as
+// `unjudgeable-language`, never counted as scanned. That is the guarantee that makes this safe.
+//
+// `.cls-meta.xml` does not match `.cls` (the extension test is `endsWith`), so a metadata
+// sidecar is never selected: it carries no code to judge, and selecting it would make every
+// metadata-only edit look like a scanned test file. `classes/` is deliberately NOT in
+// `testFileDirs` -- Apex tests live beside ordinary classes in the same package directory, so
+// that entry would select every class in the repo and inflate the counts this gate reports.
 export const DEFAULT_STRUCTURE_CONFIG: StructureGateConfig = {
   forbiddenPathPrefixes: ['dist/', 'build/', 'node_modules/', '.git/', '.env'],
   maxChangedFiles: 100,
-  testFileMarkers: ['.test.', '.spec.', '_test.', 'test_'],
+  testFileMarkers: ['.test.', '.spec.', '_test.', 'test_', 'Test'],
   testFileDirs: ['tests/', '__tests__/', 'e2e/', 'spec/'],
-  testFileExtensions: ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'],
+  testFileExtensions: ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.cls', '.trigger'],
   enforceTestIntegrity: true,
   maxTestFileBytes: 2_000_000,
 };

@@ -59,6 +59,8 @@ export const DEFAULT_ASSERTION_DELTA_CONFIG: AssertionDeltaConfig = {
     'require.',
     't.Error',
     't.Fatal',
+    'System.assert',
+    'Assert.',
   ],
   skipMarkers: [
     '.skip',
@@ -75,8 +77,21 @@ export const DEFAULT_ASSERTION_DELTA_CONFIG: AssertionDeltaConfig = {
     '@Ignore',
     '@pytest.mark.skip',
     't.Skip(',
+    // Apex has no skip annotation/call; a test reading org data via SeeAllData=true instead of
+    // its own fixture asserts about state nobody committed -- the nearest analogue to a skip.
+    'SeeAllData=true',
   ],
-  testDeclarationKeywords: ['it(', 'test(', 'describe(', 'def test_', 'func Test', '@Test'],
+  testDeclarationKeywords: [
+    'it(',
+    'test(',
+    'describe(',
+    'def test_',
+    'func Test',
+    '@Test',
+    '@IsTest',
+    '@isTest',
+    'testMethod',
+  ],
 };
 
 function normalizeStringArray(value: unknown, fallback: string[]): string[] {

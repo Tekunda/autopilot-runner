@@ -1,8 +1,18 @@
 // Registers Autopilot's always-on generic gates (owned by Autopilot, not
 // licensed) into a GateRegistry. Packs plug in licensed gates the same way
-// later (issue #78) — this only wires up the five generic ones. See #77.
+// later (issue #78). See #77.
+//
+// THE SALESFORCE GATES RIDE HERE TOO, and the reason is worth stating where someone will trip
+// over it: gate selection happens control-plane side (packs/registry.ts enabledGateSpecs),
+// which cannot see the customer's checkout, so nothing server-side can know a repo is
+// Salesforce. Those gates are therefore always signed and decide at RUN time, from
+// ctx.stackProfiles, whether they apply -- returning a benign `skip`/`no-config` on every
+// non-Salesforce repo. gates/salesforce/index.ts carries the full argument, including the
+// entitlement-gated Pack alternative that was evaluated and rejected (it would have required
+// hand configuration, which is precisely the bar this had to clear).
 
 import type { GateRegistry } from '../registry.ts';
+import { salesforceGates } from '../salesforce/index.ts';
 import type { Gate } from '../types.ts';
 import { createAssertionDeltaGate } from './assertion-delta.ts';
 import { createCveGate } from './cve.ts';
@@ -23,6 +33,7 @@ export function genericGates(): Gate[] {
     createRiskGate(),
     createTestPolicyGate(),
     createAssertionDeltaGate(),
+    ...salesforceGates(),
   ];
 }
 
