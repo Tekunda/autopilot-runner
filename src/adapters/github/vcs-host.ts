@@ -959,6 +959,39 @@ export class GitHubVCSHost implements VCSHost {
 
   // GitHub's `head` filter is `owner:branch`; the owner is the repo's own owner for
   // every branch Autopilot pushes (we never fork).
+  //
+  // The owner here comes from the tenant's CONFIGURED repoId, which is spelled however the
+  // tenant-store entry spelled it (`tekunda/website`) and may differ in case from the repo's
+  // canonical `full_name` (`Tekunda/Website`) -- see sameRepoId in contracts/types.ts. The
+  // `/repos/{repoId}` PATH is case-insensitive, but this filter is matched against the stored
+  // head LABEL, which is a different matcher, so it needed its own evidence before anything
+  // could rely on it. VERIFIED 2026-09-03 against live repos, in the exact percent-encoded wire
+  // form this method builds (`:` -> %3A, `/` -> %2F). Pinned against a MERGED head branch with
+  // `state=all` so the commands keep reproducing -- an open-PR example stops matching the moment
+  // that PR merges, which would quietly turn this evidence into three zeros:
+  //   B=autopilot/pipeline-validation-help-center-article-pages-em-build-76186c4f
+  //   gh api "repos/Tekunda/Website/pulls?state=all&head=Tekunda%3A$B" -q length  -> 4
+  //   gh api "repos/Tekunda/Website/pulls?state=all&head=tekunda%3A$B" -q length  -> 4
+  //   gh api "repos/Tekunda/Website/pulls?state=all&head=TEKUNDA%3A$B" -q length  -> 4
+  //   gh api "repos/Tekunda/Website/pulls?state=all&head=octocat%3A$B" -q length  -> 0
+  // The octocat line is the CONTROL, and it is what makes the other three mean anything: a real
+  // but unrelated owner returns 0, so the filter is genuinely being matched rather than ignored.
+  // (A filter GitHub silently dropped would return 4 for every spelling too, including octocat.)
+  //
+  // So the OWNER half is matched case-insensitively and a mis-cased repoId still finds its PR:
+  // no canonicalization is needed, and none is done (resolving `full_name` per call would buy
+  // nothing and add a metadata request that can fail on a path that must not fail open).
+  // The BRANCH half is NOT case-insensitive -- the same query with the branch upper-cased
+  // returned 0 -- but branch names are minted by this pipeline and round-trip verbatim, so
+  // they never cross the config seam that the owner does.
+  //
+  // IF THIS EVER FLIPS: the test in vcs-host.test.ts pins OUR assumption via a stub, so it keeps
+  // passing no matter what GitHub does -- a server-side change here is SILENT and destructive
+  // (mis-cased tenant -> `undefined` -> openPrOn says no PR -> the reset lanes delete the branch
+  // -> GitHub closes the open PR with it). Re-running the commands above is the only detection.
+  // The real hedge is not more code on this path: it is normalizing repoId against the repo's
+  // `full_name` ONCE at tenant registration, so no lookup ever crosses the casing seam. That is
+  // a separate task; until it exists, treat the four lines above as the load-bearing evidence.
   async findOpenPR(repoId: string, headBranch: string): Promise<{ url: string; number: number } | undefined> {
     const owner = repoId.split('/')[0];
     const head = encodeURIComponent(`${owner}:${headBranch}`);
