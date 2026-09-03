@@ -1497,11 +1497,17 @@ export interface TicketState {
    * Absent means no report is owed, which is the state every automatic resume leaves behind.
    */
   resumeAwaitingOutcome?: { by: 'reply' | 'board-move'; intent: string };
-  // Consecutive times the watchdog has nudged a stalled QA/fixer stage back to
-  // life without the stage making progress. Bounds the stall re-arm loop
-  // (watchdog.ts MAX_STALL_RECOVERIES) so a genuinely dead runner is escalated
-  // to a human instead of being re-armed forever. Counted per STAGE: it is reset
-  // once the ticket's status moves to a different stage (see stallStage below).
+  // Times the watchdog has nudged a stalled QA/fixer stage back to life without
+  // the stage making progress. Not literally "consecutive": the watchdog only
+  // observes status at its own tick boundaries, so a ticket that round-trips
+  // `reviewing -> fixing -> reviewing` entirely between two watchdog passes
+  // keeps its streak across the round trip, and reviewing's next stall counts
+  // on top of it. The escalation this bounds is still honest about what it
+  // names -- reviewing really did reach that count -- which is the property
+  // that matters. Bounds the stall re-arm loop (watchdog.ts MAX_STALL_RECOVERIES)
+  // so a genuinely dead runner is escalated to a human instead of being
+  // re-armed forever. Counted per STAGE: it is reset once the ticket's status
+  // moves to a different stage (see stallStage below).
   stallRecoveries?: number;
   // The stage the streak above was counted in -- stamped on every nudge, and read
   // only together with the count. A stall streak is a claim about ONE stage, and
@@ -1510,7 +1516,11 @@ export interface TicketState {
   // this stamp the count rides across the advance and the new stage's FIRST stall
   // escalates on a number that stage never reached -- a message the board shows a
   // customer that is false, and a force-block on a ticket that is making progress.
-  // Absent means no streak is running (the count is absent too).
+  // Absent means no streak is running (the count is absent too) -- except for one
+  // sweep right after this field was introduced: rows persisted earlier with
+  // stallRecoveries set and no stallStage read as `undefined !== status` on their
+  // first pass and have their streak dropped once. Benign one-time rollout grace,
+  // not a wedge.
   stallStage?: TicketStatus;
   // A dispatched ticket-level CI stage (architect/enrich/plan/accept, or a repair build)
   // awaiting completion. When set, the next drive CHECKS it (non-blocking) instead of
