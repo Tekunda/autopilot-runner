@@ -228,13 +228,20 @@ export interface GitHubVCSHostConfig extends GitHubClientConfig {
 export class GitHubVCSHost implements VCSHost {
   private readonly client: GitHubClient;
   // The same host, for confirmMergeCommit's post-merge reads only: one attempt, short timeout.
-  // See MERGE_VERIFY_TIMEOUT_MS. It inherits everything else from the same config, which means the
-  // two configurations differ: an INJECTED breaker is shared with the main client, while the
-  // default (nothing injected, which is every production path -- registry.ts, runner/adapters.ts)
-  // gives this client its own, exactly as every other GitHub client in the process already has.
-  // That cannot mask an outage: under sustained degradation the main breaker still trips on the
-  // PUT and the poll reads, which vastly outnumber these, and in an outage merges do not succeed
-  // so this path is barely entered at all -- and it fails open by design when it is.
+  // See MERGE_VERIFY_TIMEOUT_MS. Everything else comes from the same config, so a token provider
+  // injected once is reused rather than duplicated.
+  //
+  // The BREAKER is the one place the two configurations genuinely differ, and it is worth stating
+  // because tests inject one while production does not: an injected breaker is shared with the
+  // main client, whereas the default (nothing injected -- adapters/registry.ts,
+  // runner/adapters.ts) gives this client its OWN, exactly as every other GitHub client in the
+  // process already has. Its own is the wanted behaviour, not an oversight. These reads are
+  // deliberately impatient, and a 5s timeout that the 30s client would never have seen is not
+  // evidence GitHub is out: sharing the counter would let a verification read -- whose failure
+  // costs nothing, it degrades to "unverified" -- open the breaker in front of the merges and
+  // writes that do matter. Nor can having its own mask a real outage: the main breaker still trips
+  // on the PUT and the poll reads, which vastly outnumber these, and in an outage merges do not
+  // succeed, so this path is barely entered at all.
   private readonly verifyClient: GitHubClient;
   // The GitHub App this host authenticates as, when the caller knows it. Only listOpenCheckRuns
   // uses it, and only to refuse to run at all without it: that lane retires check-runs found by
@@ -259,7 +266,7 @@ export class GitHubVCSHost implements VCSHost {
     this.client = new GitHubClient(config);
     this.verifyClient = new GitHubClient({
       ...config,
-      timeoutMs: Math.min(config.timeoutMs ?? MERGE_VERIFY_TIMEOUT_MS, MERGE_VERIFY_TIMEOUT_MS),
+      timeoutMs: config.timeoutMs === undefined ? MERGE_VERIFY_TIMEOUT_MS : Math.min(config.timeoutMs, MERGE_VERIFY_TIMEOUT_MS),
       maxRetries: 0,
     });
     const parsed = config.appId === undefined ? Number.NaN : Number(config.appId);
