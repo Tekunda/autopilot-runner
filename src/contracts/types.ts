@@ -1177,6 +1177,29 @@ export interface TicketState {
   description?: string;
   status: TicketStatus;
   subtasks: SubtaskState[];
+  // The WRITE-AHEAD record of this ticket's subtask fan-out -- the DispatchIntent story (above)
+  // for the one family that cannot carry a per-lane intent.
+  //
+  // A decomposed drive launches its subtasks through `Promise.allSettled` and persists what they
+  // launched ONCE, afterwards, so every subtask shares that single write: a crash between a
+  // `dispatchStage` inside the fan-out and that write loses EVERY marker the tick would have
+  // recorded, not one. Worse, five of the pipeline's re-dispatches hand the runner
+  // `adoptSince: now()` (subtask-pipeline.ts), which floors adoption at THIS instant and so
+  // positively refuses the orphan the crash left running -- the duplicate is guaranteed, not
+  // merely possible, and a fan-out's worth of model sessions is billed twice.
+  //
+  // Which subtask launched what is deliberately NOT recorded, because it cannot be known before
+  // the fan-out (a drive decides its stage from a probe it has not made yet) and does not need to
+  // be: this is a GENERATION instant, and the CI host's own run listing is the ground truth about
+  // what it launched. Re-dispatching under the same instant makes the adapter adopt whatever run
+  // is already there (DispatchStageOptions.adoptSince) and start one only where there is nothing
+  // to adopt -- both halves of the crash, one path.
+  //
+  // Written before the fan-out and cleared by the write that records what it launched, so its
+  // presence at the top of a tick IS the crash signature. Only useful while the adapter can still
+  // adopt against it (TOKENLESS_ADOPTION_WINDOW_MS); past that the pipeline falls back to `now()`,
+  // because a stale floor would let a re-dispatch adopt the very run it just cancelled.
+  subtaskDispatchIntentAt?: string;
   // Set once a PO has approved this decomposed ticket's plan under the plan-review gate
   // (gates.requirePlanApproval). While false/absent and the gate is on, the ticket holds
   // after decomposition and drives no subtask build. Ignored when the gate is off.
