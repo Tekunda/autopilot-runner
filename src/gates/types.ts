@@ -74,6 +74,10 @@ export interface GateContext {
 // skip makes the control plane assert a config fault that is not there, on every such PR.
 export type SkipReason =
   | 'no-baseurl'
+  // The diff maps to no RENDERABLE ROUTE this gate could point a browser at. Strictly about
+  // routes, not files -- a file matcher that selects nothing is `no-matching-files` below.
+  // `structure` and `test-policy` used to borrow this one for their file matchers, which left
+  // the vocabulary with one name for two different questions.
   | 'no-matching-route'
   // The diff DID select files for this gate, but they are all in a language/format the gate's
   // checker has no patterns for, so it asserted nothing on this PR. Diff-scoped, NOT a config
@@ -81,6 +85,21 @@ export type SkipReason =
   // so it still stays out of the coverage record and still raises `gate_never_fired` for a gate
   // that NEVER produces a verdict.
   | 'unjudgeable-language'
+  // The gate's file matcher selected NOTHING out of the files it was pointed at -- this PR's diff
+  // for the diff-scoped gates, the configured content tree for the whole-tree sweep
+  // (`seo-monitor`) -- so no test file, locale file, content page or scannable source file was
+  // ever opened and the gate asserted nothing. Diff-scoped,
+  // exactly like `no-matching-route` -- the next diff may well select files -- and it exists
+  // because the alternative every one of those gates used to take was `status:'pass'`: a gate that
+  // looked at zero files and banked a green check. A PR touching only `README.md` would collect
+  // passes from `assertion-delta`, `security-review`, `i18n-completeness`, `internal-links`,
+  // `cover-title`, `external-links`, `cannibalization` and `docs-api-coverage` without one of them
+  // having judged a single line. The coverage record then reads eight enforcing gates where there
+  // were none. Non-benign for the same reason `no-matching-route` is: a gate whose matcher never
+  // matches on ANY promotion is a misconfigured matcher (wrong `contentDir`, wrong
+  // `testFileExtensions`), and only the perpetual case alarms -- a gate with real verdicts behind
+  // it is excused (see gate-verdict-ledger's SKIP_CLASSES).
+  | 'no-matching-files'
   | 'no-config'
   | 'invalid-config'
   | 'disabled'

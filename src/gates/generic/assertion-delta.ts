@@ -95,7 +95,18 @@ export function createAssertionDeltaGate(): Gate {
     async run(ctx: GateContext): Promise<GateResult> {
       const config = effectiveAssertionDeltaConfig(ctx.config['assertion-delta'] as Record<string, unknown> | undefined);
       const testFiles = ctx.changedFiles.filter((file) => isTestFile(file, config));
-      if (testFiles.length === 0) return { id: 'assertion-delta', status: 'pass' };
+      // No test file in the diff means this gate READ NOTHING, which is not the same as "no
+      // assertion was weakened". It used to return `pass` here, so every PR that touched no test
+      // banked a green assertion-delta check and the coverage record counted a gate that had
+      // judged zero lines.
+      if (testFiles.length === 0) {
+        return {
+          id: 'assertion-delta',
+          status: 'skip',
+          skipReason: 'no-matching-files',
+          findings: ['no changed file matched this gate\'s test-file patterns, so no assertion delta was judged'],
+        };
+      }
 
       try {
         const base = await resolveBaseSha(ctx.baseRef, ctx.workspaceRoot);
@@ -115,6 +126,10 @@ export function createAssertionDeltaGate(): Gate {
         return {
           id: 'assertion-delta',
           status: 'skip',
+          // The gate HAD files to judge and could not read them -- a transient tooling fault, not
+          // "nothing to do". Reasoned so the ledger classifies it suspicious instead of letting an
+          // unlabelled skip default into silence.
+          skipReason: 'infra',
           findings: [`assertion-delta could not read the diff: ${err instanceof Error ? err.message : String(err)}`],
         };
       }

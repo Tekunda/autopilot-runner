@@ -264,9 +264,27 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
   // fail (the gate judged and reported a defect it's non-blocking about), but NEVER a gate that
   // reached no verdict at all. A green stage on a gate that never ran is worse than no gate
   // (post-mortem TEK-3691), so nonBlockingIds cannot rescue it.
-  const ok = results.every((result) =>
-    result.status === 'unjudged' ? false : result.status !== 'fail' || nonBlockingIds.has(result.id),
-  );
+  // A REPORT MISSING A GATE MUST NOT BE GREEN. `[].every(...)` is `true`, so a stage that
+  // produced nothing at all resolved `result: 'pass'` with `checks: []` -- and the same hole is
+  // there per-gate: the registry only iterates gates it HAS, so a signed spec id that resolves
+  // to no registered gate is never run, never reported, and never noticed. That is the live
+  // shape whenever the control plane is ahead of the deployed runner (a new pack gate issued
+  // before the runner that can execute it has shipped), which is exactly when it matters.
+  // gate-catalog-completeness.test.ts guards it at build time for THIS repo's catalog; this
+  // guards it at run time, for the deployed pair.
+  //
+  // Checked per id rather than on `results.length === 0`, because a total wipeout is the rare
+  // case: one unresolvable id among five that ran leaves a green stage over a gate nobody knows
+  // did not run.
+  const missing = enabledIds.filter((id) => !results.some((result) => result.id === id));
+  for (const id of missing) {
+    process.stdout.write(`[gate] ${id}: NOT RUN -- no registered gate resolved this signed spec id\n`);
+  }
+  const ok =
+    missing.length === 0 &&
+    results.every((result) =>
+      result.status === 'unjudged' ? false : result.status !== 'fail' || nonBlockingIds.has(result.id),
+    );
 
   // Make the run's log self-describing: a legitimate gate failure must be legible in
   // Actions logs, not byte-identical to a crash (the 75-file diff that failed `risk`

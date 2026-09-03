@@ -179,6 +179,102 @@ runs:
         npm install playwright@1.62.1 --no-save
         npx playwright install --with-deps chromium
 
+    # EVERY gate stage (fast and heavy): provision the dependency scanner the `cve` gate needs for
+    # the tree shapes npm/Yarn cannot read -- Python, Go, Rust, Ruby, Java, PHP, and JavaScript's
+    # own Yarn Berry and pnpm. Before this step existed, `npm audit`/`yarn audit` were the only
+    # tools the gate had, so on every one of those repos the CVE audit the product page promises
+    # "on every diff" quietly ran on no diff at all (see src/gates/generic/cve.ts,
+    # planDependencyAudit).
+    #
+    # PINNED BY VERSION AND BY CHECKSUM, and deliberately NOT `curl | sh`: the release asset is
+    # downloaded to a FILE, verified against the SHA-256 that osv-scanner_SHA256SUMS publishes for
+    # that exact release, and only then made executable and put on PATH. Nothing from the network
+    # is ever piped into a shell.
+    #
+    # The two failure modes are handled differently ON PURPOSE:
+    #   - INTEGRITY (checksum mismatch): a supply-chain event. Fails the step loudly. A binary
+    #     that is not the pinned one must never run inside a security gate.
+    #   - AVAILABILITY (download failed, unsupported arch): the runner simply has no scanner. Warn
+    #     and continue, and let the GATE decide what that means. It reports a merge-blocking
+    #     `unjudged` (`tooling-missing`) for any tree it cannot audit without the scanner, and
+    #     nothing at all for a tree with no dependency manifest -- that case is decided from the
+    #     manifests, before the tool is needed. It is deliberately NOT a skip: a skip is excused by
+    #     the gate's own history, so a tenant that audited once would go on reporting a benign
+    #     skip forever while nothing was audited (see cve.ts's InconclusiveCause).
+    #
+    # Bumping the version means bumping BOTH digests, from the release's own
+    # osv-scanner_SHA256SUMS.
+    - name: Provision dependency scanner (osv-scanner)
+      if: steps.parse-grant.outputs.stage == 'gate'
+      shell: bash
+      env:
+        # https://github.com/google/osv-scanner/releases/tag/v2.5.1
+        OSV_SCANNER_VERSION: v2.5.1
+        OSV_SCANNER_SHA256_LINUX_AMD64: f9f25499a2c8cc367b3af45df2ea7eeca7fbccceab9c35079968f4b3652194be
+        OSV_SCANNER_SHA256_LINUX_ARM64: 3d0f5aa5a6baa8eb32bcef247388e149ef6030a6634ccae6fa0d62681fb27a6d
+      run: |
+        set -uo pipefail
+        case "$(uname -s)/$(uname -m)" in
+          Linux/x86_64)  asset=osv-scanner_linux_amd64; want="$OSV_SCANNER_SHA256_LINUX_AMD64" ;;
+          Linux/aarch64) asset=osv-scanner_linux_arm64; want="$OSV_SCANNER_SHA256_LINUX_ARM64" ;;
+          *)
+            echo "::warning::osv-scanner is not pinned for $(uname -s)/$(uname -m); the cve gate will report unjudged(tooling-missing) on repos it cannot audit without it"
+            exit 0
+            ;;
+        esac
+        # Cached by version AND asset in the runner's tool cache when there is one: the binary is
+        # ~55 MB and this step runs for every gate stage of every subtask, so a warm or
+        # self-hosted runner should pay for it once. A cache HIT is re-verified against the pinned
+        # digest below rather than trusted -- anything else on the runner can write there.
+        cache="${RUNNER_TOOL_CACHE:-${RUNNER_TEMP:-/tmp}}/autopilot-osv-scanner/${OSV_SCANNER_VERSION}"
+        dest="$cache/$asset"
+        mkdir -p "$cache"
+        url="https://github.com/google/osv-scanner/releases/download/${OSV_SCANNER_VERSION}/${asset}"
+        if [ ! -f "$dest" ]; then
+          # A PRIVATE temp file per job, never a fixed "$dest.download". Two gate stages sharing a
+          # self-hosted runner would otherwise write the same path concurrently: one gets a spliced
+          # file, fails the digest check, and the step raises `::error::` asserting a supply-chain
+          # event that did not happen -- while `rm` of the shared path poisons the other job. A
+          # cancelled run leaving a stale partial behind had the same shape, one step worse: it was
+          # `mv`d over a good cached binary unconditionally.
+          tmp="$(mktemp "${cache}/.download.XXXXXX")" || exit 0
+          # --max-time is per attempt and generous on purpose. A missing scanner is now a BLOCKING
+          # unjudged, so a slow 55 MB fetch that timed out would wedge a tenant's PRs on a network
+          # blip; retries plus a real budget keep that to genuine provisioning faults.
+          if ! curl -fsSL --retry 5 --retry-all-errors --max-time 900 -o "$tmp" "$url"; then
+            rm -f "$tmp"
+            echo "::warning::osv-scanner ${OSV_SCANNER_VERSION} could not be downloaded; the cve gate will report unjudged(tooling-missing) on repos it cannot audit without it"
+            exit 0
+          fi
+          if ! echo "${want}  ${tmp}" | sha256sum -c - >/dev/null 2>&1; then
+            rm -f "$tmp"
+            echo "::error::osv-scanner ${OSV_SCANNER_VERSION} ${asset} does not match its pinned SHA-256; refusing to install it"
+            exit 1
+          fi
+          # Only a VERIFIED file is ever published to the cache path, so a concurrent reader can
+          # never observe a partial or unverified binary there.
+          mv -f "$tmp" "$dest"
+        elif ! echo "${want}  ${dest}" | sha256sum -c - >/dev/null 2>&1; then
+          # A cache entry that no longer matches is removed rather than run. Self-healing: the next
+          # gate stage re-downloads it.
+          rm -f "$dest"
+          echo "::error::cached osv-scanner ${OSV_SCANNER_VERSION} ${asset} does not match its pinned SHA-256; refusing to run it"
+          exit 1
+        fi
+        # PATH gets a directory holding ONLY the verified binary, under the name the gate spawns,
+        # so nothing else in the cache tree is reachable through it. Read-and-execute only: this
+        # directory is PREPENDED to PATH for the rest of the job, and a writable entry there is a
+        # shadowing opportunity for anything the PR's own build later runs in a heavy stage.
+        bin="${RUNNER_TEMP:-/tmp}/autopilot-tools"
+        mkdir -p "$bin"
+        # Unlock-install-relock, so re-running this step in a job that already provisioned (the
+        # dir is left read-only below) is idempotent rather than a permission failure.
+        chmod u+w "$bin" 2>/dev/null || true
+        install -m 555 "$dest" "$bin/osv-scanner"
+        chmod 555 "$bin"
+        echo "$bin" >> "$GITHUB_PATH"
+        echo "osv-scanner ${OSV_SCANNER_VERSION} provisioned (${asset}, checksum verified)"
+
     # Runs only for a `gate` stage grant: verifies the grant, builds a GateContext from the
     # checked-out tree above, and runs exactly the gates named in the grant's signed
     # `gateSpecs` -- never a gate outside that set, even if it's registered runner-side (see
