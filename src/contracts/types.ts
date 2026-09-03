@@ -849,6 +849,49 @@ export interface InFlightStage {
   checkRunId?: number;
 }
 
+// The WRITE-AHEAD record of a stage dispatch: persisted BEFORE the paid `workflow_dispatch`
+// that launches it, and replaced by the `inFlight` marker the moment that launch is recorded.
+//
+// It exists for exactly one window. dispatchStage spends the customer's Actions minutes and
+// model budget the instant the CI host picks the run up; everything that REMEMBERS the launch
+// (the notify, the progress publish, the store write that sets `inFlight`) happens after it
+// returns. A crash in between -- a container killed mid rolling-deploy, an OOM, a lost CAS race
+// on the state file -- leaves the launch REAL and the record ABSENT, so the next tick sees no
+// `inFlight`, falls through, and bills a SECOND run on the customer's key. The grant ledger sees
+// that duplicate and, by design, does not stop it (grant-ledger.ts's header: detection only).
+//
+// So the intent is written first and outlives the crash: a tick that finds one with no `inFlight`
+// must ADOPT the run it may already have launched (correlating it by the same run-name facts
+// checkStage uses) rather than dispatch again -- and where no run can be found it BLOCKS rather
+// than re-dispatching on a guess. Never two sources of truth: the intent is cleared in the same
+// write that sets `inFlight`, so at most one of the two is ever set for a given stage.
+export interface DispatchIntent {
+  // The stage about to be launched. An intent for a DIFFERENT stage than the one now being
+  // dispatched belongs to a generation the ticket has already left; it is dropped, not adopted.
+  stage: Stage;
+  // The ticket this intent was written for, so a record that was copied/merged from elsewhere
+  // (a restored backup, a mis-keyed write) can be recognized as foreign instead of adopted.
+  ticketId: string;
+  // The grant this dispatch was about to spend -- grantLedgerId(grant), i.e. the signed `jti`,
+  // falling back to the sig digest on a legacy grant. AUDIT only, never the adoption key: every
+  // tick re-issues a fresh grant with a fresh jti, so the run that survived the crash was
+  // launched under a jti no later tick will ever hold again. What correlates the run is the
+  // run-name (stage + shortId), exactly as it does for an `inFlight` marker with no runId yet.
+  jti: string;
+  // The pinned revision the dispatch was about to judge (grant.headSha), when the stage pins
+  // one. An intent whose sha no longer matches belongs to a superseded revision: its run judges
+  // a tree this tick is no longer asking about, so it is dropped rather than adopted.
+  sha?: string;
+  // When the intent was written, ISO-8601 and from the control plane's own clock -- always just
+  // BEFORE the dispatch it guards. Doubles as the run-correlation lower bound (the run's
+  // created_at can only be later) and as the anchor for the adoption window.
+  dispatchedAt: string;
+  // The grant's own expiry (ISO-8601). Past it the grant can no longer be spent, so an intent
+  // that survived this long belongs to nothing that is still runnable -- it is dropped, which is
+  // what keeps an abandoned intent from outliving the ticket that wrote it.
+  expiresAt: string;
+}
+
 // What a replan preserves about an old subtask it discarded, until the NEW plan exists and
 // can be compared against it. `id` is positional and can be reused by a later plan, so the
 // tracker-owned id identifies the exact old child page that may need retiring.
@@ -1270,6 +1313,11 @@ export interface TicketState {
   // dispatching; cleared when it completes. Makes the ticket-level judgment/accept paths
   // per-tick state machines (see InFlightStage).
   inFlight?: InFlightStage;
+  // The write-ahead record of a ticket-level dispatch that is ABOUT to be launched, covering the
+  // crash window between spending the customer's money and recording that it was spent. Set only
+  // between those two points; the write that sets `inFlight` clears it in the same operation, so
+  // the two are never both live for one stage. See DispatchIntent.
+  dispatchIntent?: DispatchIntent;
   // The deployment of this ticket's promoted change, once its promotion PR has
   // merged. A ticket is complete when its deployment is observed, not when its PR
   // merges (see deploy-watch.ts): while this is `pending`, the ticket stays in
