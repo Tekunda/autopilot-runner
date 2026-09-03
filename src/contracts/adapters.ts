@@ -250,6 +250,7 @@ export interface TaskBackend {
   // clearing the hold is just: answer + move the ticket back to the ready status. Optional.
   // Returns whether the questions were actually rendered on the ticket, so the caller can fall
   // back to putting them in a comment (the durable, backend-agnostic surface) when it couldn't.
+  // Best-effort, never throws.
   writeHoldNotice?(ticketId: string, holdText: string): Promise<boolean>;
   // Remove the hold notice from the ticket once the hold is RESOLVED (the control plane lifts the
   // block on resume), so a stale "answer these" callout doesn't linger -- and so its raw remove/
