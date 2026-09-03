@@ -35,6 +35,29 @@ export interface TaskReply {
   body: string;
 }
 
+/**
+ * What markup a tracker surface renders from the body it is handed. THREE, because the three
+ * parsers behind these writes disagree about the same string:
+ *
+ *  - `markdown` -- GitHub-flavoured markdown AND the raw-HTML subset GitHub allowlists. A finding
+ *    that NAMES `<details>` opens a real disclosure here and `[click](https://evil/)` is a live
+ *    link, so caller text MUST be escaped (comment-render's escapeLabel) before it lands.
+ *  - `rich` -- `**bold**` and `` `code` `` are honoured, nothing else is (Notion's callout and
+ *    pipeline-log blocks). No HTML, so nothing needs escaping -- and escaping anyway is what puts
+ *    the characters `&#91;` in front of a reader.
+ *  - `plain` -- characters, verbatim (a Notion page comment's rich_text carries no annotations;
+ *    a Jira comment is one ADF text node). Neither markup nor entities mean anything here.
+ */
+export type NoticeDialect = 'markdown' | 'rich' | 'plain';
+
+/** The dialect of each surface the notice layer writes to. See TaskBackend.noticeDialects. */
+export interface NoticeDialects {
+  /** `comment()` / `escalate()`. */
+  readonly comment: NoticeDialect;
+  /** `writeStatusCallout()` / `writeHoldNotice()`. */
+  readonly callout: NoticeDialect;
+}
+
 // What a ticket's blocked-by relation says, split into the two answers the caller has to tell
 // apart. `blockers` is the dependencies still standing -- store keys, so the caller can look each
 // one up. `dropped` is the ones the tracker no longer holds any work for, because a human deleted
@@ -52,6 +75,19 @@ export interface TicketBlockers {
 }
 
 export interface TaskBackend {
+  /**
+   * How THIS backend's two notice surfaces parse a body -- read by the notice layer
+   * (control-plane/tracker-comment.ts) to pick the escaper, and DECLARED at the composition root
+   * (adapters/registry.ts) rather than here, per provider, so the whole matrix is one table a
+   * reader can compare. It had to be: the defect this exists to prevent was one escaper feeding
+   * two sinks with opposite rules, described in two files that never mentioned each other, which
+   * put `&#91;blocker&#93;` and a literal `**Blocked**` in front of a Notion reader for months.
+   *
+   * Absent means `markdown` on both -- the escaping direction that cannot leak markup, so a
+   * hand-built backend (a test double) is safe by default rather than injectable by default.
+   * Every backend the registry builds carries an explicit entry.
+   */
+  readonly noticeDialects?: NoticeDialects;
   listReady(): Promise<TicketState[]>;
   get(ticketId: string): Promise<TicketState>;
   setStatus(ticketId: string, status: TicketStatus): Promise<void>;
