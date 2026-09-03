@@ -29,6 +29,19 @@ import { digestFor, grantId, rejectedTelemetry } from './prepare-stage.ts';
 // `branch`/`baseRef`/`changedFiles` stay unbound -- the grant asserts nothing
 // about them, and mismatching them needs Actions-write on the customer's own
 // repo, which already outranks anything a gate report can do.
+/**
+ * The workspace file gate mode writes its per-gate checks and findings to, for action.yml to
+ * upload as the `gate-report` artifact -- the only channel a dispatched run's structured result
+ * can travel back on, since GitHub exposes no API for its step outputs.
+ *
+ * Here rather than at the write site because there are TWO writers: action-entry's ordinary path
+ * and its crash handler, which writes a degraded report so a runner that threw still says
+ * something. A rename that reached only one of them would leave the other uploading an artifact
+ * the adapter does not download. Sibling of FIX_REPORT_FILE (fix-verdict.ts) and
+ * JUDGMENT_REPORT_FILE (judgment-report.ts), each owned by its own stage's module.
+ */
+export const GATE_REPORT_FILE = 'gate-report.json';
+
 export interface GateTarget {
   prNumber: number;
   branch: string;

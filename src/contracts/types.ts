@@ -1577,9 +1577,14 @@ export interface TicketState {
   // externalQaFixAttempts so a flake never eats the content fix-loop budget; capped at 1, then
   // the drive falls through to a terminal fail that names the real cause. Reset on a real verdict.
   qaNoVerdictRetries?: number;
-  // How many consecutive `fix` dispatches the model PROVIDER refused before any model ran (a
+  // How many consecutive dispatches the model PROVIDER refused before any model ran (a
   // rate/usage limit on the agent credential -- classified runner-side, see
-  // runner/provider-rejection.ts). Kept SEPARATE from externalQaFixAttempts for the same reason
+  // runner/provider-rejection.ts). Counts the `fix` autofix AND the `accept` QA run that gates the
+  // same PR, on one counter rather than two, because it is one fact about one credential: whether
+  // the provider is refusing this ticket's dispatches right now. The observed incident interleaved
+  // them -- external-pr-1534 was refused once as QA and three times as autofix inside 52 minutes
+  // -- so a per-lane counter would have granted each lane its own free retry and still billed the
+  // PR for the rest. Kept SEPARATE from externalQaFixAttempts for the same reason
   // qaNoVerdictRetries is: a request that never reached a model repaired nothing, so charging it
   // to the content fix-loop budget spends repair rounds on attempts nobody made and then reports
   // the PR as unfixable.

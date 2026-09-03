@@ -737,3 +737,35 @@ runs:
         name: fix-report
         path: fix-report.json
         if-no-files-found: ignore
+
+    # The same channel for a JUDGMENT stage (architect, accept, lensed review), which had none.
+    # Its only artifact was the AGENT-written plan.json, uploaded by a step with no always() --
+    # so a run the model provider REFUSED, where no agent ever executed and no plan was written,
+    # reported nothing but a `failure` conclusion, and the control plane charged it to the PR's
+    # content repair budget (Tekunda/Website external-pr-1534, run 33694525003).
+    #
+    # always() is the entire point: the runs this exists for are the failing ones.
+    #
+    # COST, stated honestly rather than as "free": a SUCCESSFUL judgment run writes a ~192-byte
+    # report too (empty checks), and always() uploads that as well -- so every judgment run in the
+    # pipeline (the architect, each review lens, the accept) pays one upload step. The DOWNLOAD is
+    # genuinely free on the green path, because ci-runner.ts only fetches inside the non-success
+    # early return.
+    #
+    # The stage condition mirrors src/runner/prepare-stage.ts's CODING_STAGES negated -- the same
+    # predicate action-entry.ts writes the file on -- rather than stage-kind, which collapses
+    # architect/accept/lensed-review into one bucket and would need a second, driftable list.
+    #
+    # if-no-files-found: ignore, because one reachable case legitimately writes nothing: a grant
+    # prepare REJECTED (resolved == 'true') skips the finalize step that writes the file. The
+    # control plane treats a missing report as today's behaviour -- job-name checks -- so a skip
+    # here degrades rather than fails.
+    - name: Upload judgment report
+      if: >-
+        always() && steps.parse-grant.outputs.stage != 'build' &&
+        steps.parse-grant.outputs.stage != 'fix'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: judgment-report
+        path: judgment-report.json
+        if-no-files-found: ignore

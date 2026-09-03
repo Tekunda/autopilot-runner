@@ -27,12 +27,13 @@ import { GrantLedger } from '../control-plane/grant-ledger.ts';
 import { parseVerifyKeys, verifyGrant, type GrantEnvironment } from '../control-plane/grant-verify.ts';
 import { finalizeCodingStage, finalizeJudgmentStage, type ActionOutcome } from './finalize-stage.ts';
 import { FIX_REPORT_FILE } from './fix-verdict.ts';
+import { JUDGMENT_REPORT_FILE } from './judgment-report.ts';
 import { classifyProviderRejection } from './provider-rejection.ts';
 import { createRunnerGateRegistry } from './gate-registry.ts';
 import { CODING_STAGES, computeChangedFiles, DEFAULT_BASE_REF, prepareStage, rejectedTelemetry, type PreparedStage } from './prepare-stage.ts';
 import { isDirectlyExecuted } from './entrypoint.ts';
 import { claimRejection, resolveClaimSha, tryClaimGrant, type ClaimEmitter } from './replay-claim.ts';
-import { runGateStage, type GateTarget } from './run-gate-stage.ts';
+import { GATE_REPORT_FILE, runGateStage, type GateTarget } from './run-gate-stage.ts';
 import { runHeavyGateStage } from './serve-and-gate.ts';
 
 export class ActionInputError extends Error {}
@@ -230,6 +231,35 @@ export type ActionResult =
   | { mode: 'prepare'; prepared: PreparedStage }
   | { mode: 'finalize'; telemetry: StatusTelemetry }
   | { mode: 'gate'; telemetry: StatusTelemetry };
+
+// Which artifact this run reports itself on, or undefined for one that reports on none.
+//
+// THREE channels, one predicate. GitHub exposes no API for a dispatched run's step outputs, so
+// each of these files is the only way its stage's structured result reaches the control plane:
+//
+//   gate-report.json      the per-gate checks and findings; job names alone cannot say WHICH gate
+//                         failed or why (src/adapters/github-actions/ci-runner.ts).
+//   fix-report.json       the fix round's own verdict on itself -- disputed findings, encoding
+//                         evasions -- plus, since #431, a provider rejection.
+//   judgment-report.json  the same for architect / accept / lensed review, which had NO channel
+//                         at all: their only artifact was the AGENT-written plan.json, so a run
+//                         the provider refused before any agent ran reported nothing but a
+//                         `failure` conclusion, and the control plane billed it as a spent round.
+//
+// Written as one function rather than three inline conditions because that is what makes the
+// FOURTH case visible: a `build` reports on none of them (its result travels back as the PR it
+// opened), and spelling that as the silent absence of a branch is how the judgment gap survived.
+//
+// WRITING is broader than READING, deliberately: `enrich` and `plan` are judgment stages too and
+// get a report, but ci-runner.ts fetches it only for architect/accept/lensed-review. Keyed on the
+// stage KIND rather than on the adapter's current appetite, so a lane wired up later needs no
+// change here -- and so this predicate never has to know which consumers exist.
+export function reportFileFor(inputs: ActionInputs, result: ActionResult): string | undefined {
+  if (result.mode === 'gate' && (inputs.mode === 'gate' || inputs.mode === 'heavy-gate')) return GATE_REPORT_FILE;
+  if (result.mode !== 'finalize' || inputs.mode !== 'finalize') return undefined;
+  if (inputs.grant.stage === 'fix') return FIX_REPORT_FILE;
+  return CODING_STAGES.has(inputs.grant.stage) ? undefined : JUDGMENT_REPORT_FILE;
+}
 
 // Resolved telemetry, if this result has any yet -- a prepare handing off to the vendor
 // Action step (kind: 'coding') doesn't, since the stage hasn't run yet.
@@ -444,7 +474,10 @@ export function workspaceRoot(env: NodeJS.ProcessEnv = process.env): string {
   return env.GITHUB_WORKSPACE ?? '.';
 }
 
-async function main(): Promise<void> {
+// Exported for the artifact-channel test: the report WRITES live here, not in runActionEntry, so
+// a test that stopped at runActionEntry would assert on telemetry that production then drops on
+// the floor -- which is the exact shape of "the guard is green and the artifact never arrives".
+export async function main(): Promise<void> {
   let inputs: ActionInputs;
   try {
     inputs = parseInputs();
@@ -486,27 +519,18 @@ async function main(): Promise<void> {
     const message = err instanceof Error ? err.message : String(err);
     process.stderr.write(`autopilot thin runner: ${message}\n`);
     if (inputs.mode === 'gate' || inputs.mode === 'heavy-gate') {
-      writeFileSync(`${workspaceRoot()}/gate-report.json`, JSON.stringify(crashTelemetry(inputs.grant, err)));
+      writeFileSync(`${workspaceRoot()}/${GATE_REPORT_FILE}`, JSON.stringify(crashTelemetry(inputs.grant, err)));
     }
     process.exitCode = 1;
     return;
   }
 
-  // Gate mode's structured record of what the gates actually said (per-gate checks incl.
-  // findings), written into the checked-out tree for upload as an artifact. GitHub exposes
-  // no API for step outputs of a dispatched run, so this file is the only channel that
-  // carries the real gate results back -- the same one the architect's plan.json uses.
-  if ((inputs.mode === 'gate' || inputs.mode === 'heavy-gate') && result.mode === 'gate') {
-    writeFileSync(`${workspaceRoot()}/gate-report.json`, JSON.stringify(result.telemetry));
-  }
-
-  // Same artifact channel, for the `fix` stage's own verdict on the round it just ran (disputed
-  // findings, encoding evasions). A dispatched run's step outputs are unreadable through the API,
-  // so this file is the only way that verdict reaches the control plane -- without it a disputed
-  // or evaded round is indistinguishable from an ordinary one and just gets re-gated. Written
-  // AFTER action.yml's commit-and-push step, so it is never committed to the customer's branch.
-  if (inputs.mode === 'finalize' && inputs.grant.stage === 'fix' && result.mode === 'finalize') {
-    writeFileSync(`${workspaceRoot()}/${FIX_REPORT_FILE}`, JSON.stringify(result.telemetry));
+  // GitHub exposes no API for a dispatched run's step outputs, so a file in the checked-out tree,
+  // uploaded as an artifact, is the ONLY channel a stage's structured result can travel back on.
+  // Which file that is, for this run, is one decision made in one place (reportFileFor).
+  const reportFile = reportFileFor(inputs, result);
+  if (reportFile !== undefined) {
+    writeFileSync(`${workspaceRoot()}/${reportFile}`, JSON.stringify(resolvedTelemetry(result)));
   }
 
   reportResult(result);

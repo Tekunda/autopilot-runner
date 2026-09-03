@@ -161,10 +161,13 @@ export function finalizeJudgmentStage(
   return {
     grantId: grantId(grant),
     result: outcome.conclusion === 'success' ? 'pass' : 'error',
-    // A judgment stage's telemetry does not ride an artifact back to the control plane (only
-    // gate-report.json and fix-report.json do), so this check is a LOG-side record for the
-    // operator reading the run, not a routing signal. Carried anyway: the reason belongs with the
-    // run that produced it, and a judgment stage that gains an artifact channel later inherits it.
+    // LOAD-BEARING, and it did not start that way. When #431 wrote this line a judgment stage had
+    // no artifact to report itself on, so the check was a log-side record for whoever read the
+    // run -- carried on the reasoning that the reason belongs with the run that produced it, and
+    // that a judgment stage gaining a channel later would inherit it. It has one now
+    // (judgment-report.json), so this IS the routing signal: it is what the accept, architect and
+    // lensed-review lanes read to tell a refused dispatch from a judge that ran and failed, and
+    // draining this array leaves all three billing outages to the repair budget again.
     checks: deps.providerRejection ? [providerRejectedCheck(deps.providerRejection)] : [],
     logDigest: digestFor(grant.repoId, grant.ticketId, grant.stage, outcome.conclusion),
   };
