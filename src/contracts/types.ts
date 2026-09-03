@@ -1500,9 +1500,18 @@ export interface TicketState {
   // Consecutive times the watchdog has nudged a stalled QA/fixer stage back to
   // life without the stage making progress. Bounds the stall re-arm loop
   // (watchdog.ts MAX_STALL_RECOVERIES) so a genuinely dead runner is escalated
-  // to a human instead of being re-armed forever. Reset once the stage advances
-  // (a real stage transition off reviewing/fixing).
+  // to a human instead of being re-armed forever. Counted per STAGE: it is reset
+  // once the ticket's status moves to a different stage (see stallStage below).
   stallRecoveries?: number;
+  // The stage the streak above was counted in -- stamped on every nudge, and read
+  // only together with the count. A stall streak is a claim about ONE stage, and
+  // three of the statuses a stalled ticket can hold are stallable, so `building ->
+  // reviewing` is a real stage advance that leaves the status stallable: without
+  // this stamp the count rides across the advance and the new stage's FIRST stall
+  // escalates on a number that stage never reached -- a message the board shows a
+  // customer that is false, and a force-block on a ticket that is making progress.
+  // Absent means no streak is running (the count is absent too).
+  stallStage?: TicketStatus;
   // A dispatched ticket-level CI stage (architect/enrich/plan/accept, or a repair build)
   // awaiting completion. When set, the next drive CHECKS it (non-blocking) instead of
   // dispatching; cleared when it completes. Makes the ticket-level judgment/accept paths
