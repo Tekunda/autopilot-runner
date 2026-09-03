@@ -76,6 +76,14 @@ export const DEFAULT_ASSERTION_DELTA_CONFIG: AssertionDeltaConfig = {
     '@Disabled',
     '@Ignore',
     '@pytest.mark.skip',
+    // The rest of Python's disable vocabulary, kept in step with generic/python-test-scan.ts's
+    // PYTHON_HARD_DISABLE_PATTERNS. `@pytest.mark.skip` alone was this file's (and the repo's)
+    // only Python awareness; the three below are the spellings `.skip` does NOT already
+    // substring-match, so a PR that swaps a skip for an xfail or an expectedFailure no longer
+    // reads as an unchanged skip count.
+    '@pytest.mark.xfail',
+    '@unittest.expectedFailure',
+    'unittest.SkipTest',
     't.Skip(',
     // Apex has no skip annotation/call; a test reading org data via SeeAllData=true instead of
     // its own fixture asserts about state nobody committed -- the nearest analogue to a skip.

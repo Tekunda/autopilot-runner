@@ -37,11 +37,15 @@ import type { Gate, GateContext, GateResult } from '../types.ts';
 export interface StructureGateConfig {
   forbiddenPathPrefixes: string[];
   maxChangedFiles: number;
-  // How a changed file is recognized as a TEST file, for the false-green ban. Cross-framework
-  // and not TS-bound: a path substring marker OR a directory segment, gated by a known source
-  // extension so `tests/fixtures/data.json` is not mistaken for a spec. Selection is separate
-  // from what the detector can JUDGE (isScannableTestFile) -- a selected file in an
-  // unsupported language is reported as such, never counted as scanned.
+  // How a changed file is recognized as a TEST file, for the false-green ban. Cross-framework and
+  // not TS-bound: a MARKER or a directory segment, gated by a known source extension so
+  // `tests/fixtures/data.json` is not mistaken for a spec. Selection is separate from what the
+  // detector can JUDGE (isScannableTestFile) -- a selected file in an unsupported language is
+  // reported as such, never counted as scanned.
+  //
+  // A marker is NOT simply a path substring: see `matchesTestMarker` below for the four shapes and
+  // where each one has to appear. Describing it as a substring here is what told a config author
+  // that `src/test/` was legal, when for a while it selected nothing at all.
   testFileMarkers: string[];
   testFileDirs: string[];
   testFileExtensions: string[];
@@ -78,11 +82,35 @@ export interface StructureGateConfig {
 // `testFileDirs` -- Apex tests live beside ordinary classes in the same package directory, so
 // that entry would select every class in the repo and inflate the counts this gate reports.
 export const DEFAULT_STRUCTURE_CONFIG: StructureGateConfig = {
-  forbiddenPathPrefixes: ['dist/', 'build/', 'node_modules/', '.git/', '.env'],
+  // `.venv/` joins the build-output prefixes for a stronger reason than `dist/`: a committed
+  // `.venv/bin/python` or `.venv/bin/ruff` is an attempt to SUPPLY THE TOOLCHAIN a Python gate
+  // runs. (The gates themselves no longer read a venv from the checkout -- gates/python/
+  // toolchain.ts builds one outside it precisely so that shim cannot work -- but a PR that commits
+  // one is still a finding worth surfacing.)
+  //
+  // `__pycache__/` is deliberately NOT here: these are `startsWith` prefixes, and `__pycache__` is
+  // always nested (`pkg/__pycache__/x.pyc`), so the entry would match essentially nothing. A rule
+  // that cannot fire is decoration, and this file's whole subject is checks that assert nothing.
+  forbiddenPathPrefixes: ['dist/', 'build/', 'node_modules/', '.git/', '.env', '.venv/'],
   maxChangedFiles: 100,
-  testFileMarkers: ['.test.', '.spec.', '_test.', 'test_', 'Test'],
+  // Apex needs BOTH `Test.` and `Test`, and the pair is not redundant -- each names one of the two
+  // spellings the convention allows, through the shape that actually matches it (see
+  // matchesTestMarker): `Test.` is the SUFFIX branch and selects `OrderTest.cls` / `Order_Test.cls`,
+  // while bare `Test` is the PREFIX branch and selects `TestOrder.cls`. `Test` alone -- which is
+  // what arrived from the Salesforce profile, written when markers were plain substrings -- now
+  // matches only the prefix spelling, so `OrderTest.cls` would have stopped being selected
+  // silently, the way every other regression in this family went. Neither shape matches
+  // `Contest.cls`: the prefix arm fails, and the suffix arm is case-sensitive.
+  testFileMarkers: ['.test.', '.spec.', '_test.', 'test_', 'Test.', 'Test'],
   testFileDirs: ['tests/', '__tests__/', 'e2e/', 'spec/'],
-  testFileExtensions: ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.cls', '.trigger'],
+  // `.py`, `.cls` and `.trigger` are here ONLY because test-integrity-detect.ts can judge those
+  // languages (generic/python-test-scan.ts and the Apex patterns). The order matters and is not
+  // interchangeable: widening selection first would have produced a loud, permanently-skipping
+  // `unjudgeable-language` gate, while judging first and selecting second is what actually turns
+  // test-integrity enforcement ON for those repos. Without `.py` the false-green ban was silently
+  // inert on 100% of a Python tenant's tests -- a real latent bug, not a gap
+  // (docs/runbooks/invoices-wizard-tenant.md §4).
+  testFileExtensions: ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.cls', '.trigger'],
   enforceTestIntegrity: true,
   maxTestFileBytes: 2_000_000,
 };
@@ -129,9 +157,74 @@ export function effectiveStructureConfig(specConfig?: Record<string, unknown>): 
 export function isTestFile(file: string, config: StructureGateConfig): boolean {
   if (!config.testFileExtensions.some((ext) => file.endsWith(ext))) return false;
   return (
-    config.testFileMarkers.some((marker) => file.includes(marker)) ||
+    config.testFileMarkers.some((marker) => matchesTestMarker(file, marker)) ||
     config.testFileDirs.some((dir) => file.includes(dir))
   );
+}
+
+// Where in a filename a marker has to appear. FOUR shapes, because the marker vocabulary across the
+// gates that share this helper genuinely has four, and collapsing any two of them has already
+// broken a default THREE times on this branch -- every time with the same signature: files stop
+// being SELECTED, so no gate reports `unjudgeable-language` or anything else, and the suite stays
+// green. That signature is why the shapes are enumerated here and pinned case-by-case in
+// test-file-selection.test.ts's MARKER_CASES rather than per gate.
+//
+//   PATH-NAMING (`src/test/`, `tests/`, `tests/test_`)  -> plain substring, anywhere in the path,
+//       and checked FIRST. `basename` never contains `/`, so every basename arm below is
+//       unsatisfiable for such a marker: without this branch `src/test/` selects nothing at all,
+//       while `/test/` works only by accident of its leading slash. It matters because
+//       `test-policy` has NO `testFileDirs` -- `testMarkers` is its only path-scoping knob -- and
+//       because assertion-delta ships `Test.`/`Tests.`/`Spec.` for JVM tenants whose tests live in
+//       `src/test/java/`, which appears in no `testFileDirs` default.
+//
+//   SEPARATOR-LED (`.test.`, `.spec.`, `_test.`)  -> plain substring, anywhere in the path.
+//       Unambiguous on its own, and the historical JS/TS behaviour, so it is left exactly alone.
+//
+//   ALPHANUMERIC-LED, `.`-TERMINATED (`Test.`, `Tests.`, `Spec.`)  -> a SUFFIX before the
+//       extension, matched inside the basename. This is the JVM/.NET/Apex convention --
+//       `CalculatorTest.java`, `UserServiceTests.cs`, `UserSpec.kt`, `FooTest.cls` -- and it is why
+//       assertion-delta's `testFileExtensions` carries `.java`, `.kt`, `.cs`, `.swift`, `.rb`,
+//       `.go`, `.php` at all. It is also the shape test-policy's `templatesFromMarkers` already
+//       assumes when it turns a `.`-terminated marker into a companion TEMPLATE, so treating it as
+//       a prefix here made this file and that one contradict each other: the companion
+//       `FooTest.cls` that test-policy DEMANDS was then policed as a source file.
+//
+//   ALPHANUMERIC-LED, NOT `.`-terminated (`test_`)  -> a filename PREFIX. Python's convention, and
+//       the reason this function exists: a plain `includes('test_')` selects
+//       `invoice_wizard/latest_run.py` (l-a-`test_`-run) and `contest_form.py` as test files.
+//       "Alphanumeric" here means ASCII: `/^[A-Za-z0-9]/` does not match `тест_` or `é`, so a
+//       non-ASCII marker takes the separator-led branch and gets substring semantics -- which
+//       re-creates the `latest_run.py` misclassification in that alphabet. No tenant names test
+//       files this way, but the character class is the whole point of this line, so it is stated.
+//
+// TWO REGRESSIONS GOT HERE THE SAME WAY, and both were silent -- the files simply stopped being
+// SELECTED, so no gate reported `unjudgeable-language` or anything else and a full suite stayed
+// green:
+//   - `\w` instead of `[A-Za-z0-9]` sent `_test.` down the alphanumeric branch, and `structure`
+//     stopped scanning `*_test.ts`/`*_test.js` for a TypeScript tenant entirely. The three-shape
+//     rule below happens to absorb that particular marker (`_test.` ends in `.`, so it takes the
+//     suffix branch either way), so the guard is pinned by a separator-led marker with NO trailing
+//     dot instead -- `['src/foo_spec.rb', '_spec', true]` in test-file-selection.test.ts.
+//   - a prefix-only reading of the alphanumeric branch killed `Test.`/`Tests.`/`Spec.`, leaving them
+//     matching only a file literally NAMED `Test.java`. `testFileDirs` does not rescue those:
+//     Maven and Gradle use `src/test/`, not `tests/`.
+//   - routing a `/`-containing marker to a basename arm made it unsatisfiable, so `src/test/`
+//     selected nothing. Plain `includes` had handled it before the shape rules existed.
+//
+// Shared with test-policy.ts and assertion-delta.ts, which select on the same markers -- three
+// gates disagreeing about what a test file is would be worse than any one rule alone.
+export function matchesTestMarker(file: string, marker: string): boolean {
+  // A marker naming a PATH is a path substring, and this line has to come FIRST. `basename` never
+  // contains `/`, so both basename arms below are unsatisfiable for such a marker: `src/test/` and
+  // `tests/test_` would select NOTHING, silently, while `/test/` matched only because its leading
+  // slash sent it down the separator-led branch. Plain `includes` handled all of them before the
+  // shape rules existed, so this is a restoration, not a new case.
+  if (marker.includes('/')) return file.includes(marker);
+  if (!/^[A-Za-z0-9]/.test(marker)) return file.includes(marker);
+  const basename = file.slice(file.lastIndexOf('/') + 1);
+  // Case-sensitive, deliberately: `Contest.java` does not contain `Test.`, while `LatestTest.java`
+  // does and should.
+  return marker.endsWith('.') ? basename.includes(marker) : basename.startsWith(marker);
 }
 
 type ReadOutcome = { ok: true; source: string } | { ok: false };

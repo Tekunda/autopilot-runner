@@ -5,41 +5,42 @@
 // "this bad input is rejected" case turned off is a linter that cannot fail on the thing it
 // exists to catch.
 //
-// SCOPE, stated so the gate cannot quietly claim more than it does: the patterns below are
-// JavaScript/TypeScript test-runner spellings (Playwright, Jest, Vitest, node:test, mocha)
-// and, since the Salesforce runtime profile, APEX (`.cls`/`.trigger` -- see the Apex section
-// at the bottom of this file). `isScannableTestFile` is the ONLY authority on what this
-// detector can judge, and structure.ts reports files it selected but could not judge
-// separately from files it scanned -- because "scanned a .py file and found nothing" would be
-// exactly the examined-nothing-and-reported-green defect this whole change removes, one level
-// down. Adding a language means adding its patterns AND its extension here, together, and in
-// that order: widening structure.ts's selection first would select files nothing can judge.
+// SCOPE, stated so the gate cannot quietly claim more than it does: this file covers
+// JavaScript/TypeScript test-runner spellings (Playwright, Jest, Vitest, node:test, mocha),
+// PYTHON's (pytest, unittest -- ./python-test-scan.ts), and APEX (`.cls`/`.trigger`, the section
+// at the bottom of this file). `isScannableTestFile` is the ONLY authority on what this detector
+// can judge, and structure.ts reports files it selected but could not judge separately from files
+// it scanned -- because "scanned a .rb file and found nothing" would be exactly the
+// examined-nothing-and-reported-green defect this whole change removes, one level down.
+// Adding a language means adding its patterns AND its extension here, TOGETHER and IN THAT ORDER:
+// widening `structure`'s selection first would produce a loud, permanently-skipping gate
+// (`unjudgeable-language`), which is honest but useless.
 //
-// The rules are ported from Tekunda/Website's scripts/code-structure-check.sh, which enforced
-// them on the pipeline this replaced. No filesystem, no git: structure.ts feeds it file
-// contents so this stays unit-testable and deterministic.
+// The JS/TS rules are ported from Tekunda/Website's scripts/code-structure-check.sh, which
+// enforced them on the pipeline this replaced. The Python rules are the pytest/unittest analogues
+// of the same three ideas -- a test disabled outright, a test that asserts nothing, and a skip
+// conditioned on the absence of the content the test exists to assert -- and they are kept
+// consistent with assertion-delta-detect.ts's `skipMarkers` (`@pytest.mark.skip`) and
+// `testDeclarationKeywords` (`def test_`), which were the repo's only Python awareness before
+// this. No filesystem, no git: structure.ts feeds it file contents so this stays unit-testable
+// and deterministic.
+//
+// One structural difference the Python half must respect: JS disables are CALL EXPRESSIONS on one
+// line, so a per-line regex sees them whole. Python's are DECORATORS and BODIES -- `@pytest.mark.skip`
+// sits above the `def`, and "asserts nothing" is a property of a whole function. So the Python
+// pass is a small line-oriented walk over `def test_...` blocks (./python-test-scan.ts) rather
+// than a pattern list, and only the decorator spellings are regexes.
 
-// `hard-disable` / `empty-content-skip` are the JS/TS kinds. `no-assertion` and
-// `org-data-dependency` are Apex's analogues of a disabled test -- Apex has no `skip`, so the
-// two ways an Apex suite reports green while asserting nothing are a test method that asserts
-// nothing at all, and one that reads the org's existing data instead of its own fixture.
-export type TestIntegrityKind =
-  | 'hard-disable'
-  | 'empty-content-skip'
-  | 'no-assertion'
-  | 'org-data-dependency';
+import { detectPythonTestIntegrityViolations } from './python-test-scan.ts';
+import type { TestIntegrityViolation } from './test-integrity-types.ts';
 
-export interface TestIntegrityViolation {
-  file: string;
-  kind: TestIntegrityKind;
-  // 1-based line of the offending call, for a finding a human (or the fix loop) can jump to.
-  line: number;
-  detail: string;
-}
+// The reported vocabulary lives in ./test-integrity-types.ts -- a leaf both this file and the
+// Python scanner depend on, because the routing below makes any shared type here a cycle.
+export type { TestIntegrityKind, TestIntegrityViolation } from './test-integrity-types.ts';
 
-// The languages whose disable spellings the patterns below actually cover. A test file
-// outside this set is NOT scanned and must never be counted as one that was.
-const SCANNABLE_EXTENSIONS: readonly string[] = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'];
+// The languages whose disable spellings this detector actually covers. A test file outside this
+// set is NOT scanned and must never be counted as one that was.
+const SCANNABLE_EXTENSIONS: readonly string[] = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py'];
 
 // Apex. Separate from the JS list because the two are judged by DIFFERENT pattern sets
 // (detectTestIntegrityViolations dispatches on it), not because Apex is second-class.
@@ -53,6 +54,12 @@ function isApexFile(file: string): boolean {
 
 export function isScannableTestFile(file: string): boolean {
   return SCANNABLE_EXTENSIONS.some((ext) => file.endsWith(ext)) || isApexFile(file);
+}
+
+const PYTHON_EXTENSIONS: readonly string[] = ['.py'];
+
+export function isPythonTestFile(file: string): boolean {
+  return PYTHON_EXTENSIONS.some((ext) => file.endsWith(ext));
 }
 
 // A test that is disabled OUTRIGHT, with no condition to ever re-enable it:
@@ -493,9 +500,14 @@ function detectApexViolations(file: string, source: string): TestIntegrityViolat
 // ---------------------------------------------------------------------------
 
 export function detectTestIntegrityViolations(file: string, source: string): TestIntegrityViolation[] {
-  // Dispatch on the file's language, never on content sniffing: the JS pattern lists judge
-  // nothing in a `.cls` and the Apex ones judge nothing in a `.ts`, so running the wrong set
-  // returns a clean scan of a file that was never actually examined.
+  // Dispatch on the file's LANGUAGE, never on content sniffing: each pattern set judges nothing
+  // in another language's file, so running the wrong one returns a clean scan of a file that was
+  // never actually examined. Python and Apex are different GRAMMARS, not different pattern lists
+  // -- Python's disables are decorators and its "asserts nothing" is a property of a function
+  // body; Apex has no `skip` at all -- neither of which the JS comment/string scanner below
+  // models. Routed on the file's own extension, which `isScannableTestFile` has already vouched
+  // for.
+  if (isPythonTestFile(file)) return detectPythonTestIntegrityViolations(file, source);
   if (isApexFile(file)) return detectApexViolations(file, source);
 
   const { code, inString } = scanSource(source);

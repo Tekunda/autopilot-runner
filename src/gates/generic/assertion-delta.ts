@@ -19,13 +19,20 @@ import {
   type AssertionDeltaConfig,
 } from './assertion-delta-detect.ts';
 import { readGateConfig } from './config.ts';
+import { matchesTestMarker } from './structure.ts';
 import { resolveBaseSha, unifiedDiffForFiles } from '../git.ts';
 import type { Gate, GateContext, GateResult } from '../types.ts';
 
 export interface AssertionDeltaGateConfig extends AssertionDeltaConfig {
   // How a changed file is recognized as a TEST file (cross-framework, not Playwright/TS-bound):
-  // a path substring marker, or a directory segment, gated by a known source extension so a
+  // a MARKER or a directory segment, gated by a known source extension so a
   // `tests/fixtures/data.json` is not mistaken for a spec.
+  //
+  // A marker is NOT simply a path substring -- `structure.ts`'s `matchesTestMarker`, which this
+  // gate shares, gives it four shapes depending on where it has to appear. The defaults below rely
+  // on two of them: `Test.`/`Tests.`/`Spec.` are SUFFIX markers for the JVM/.NET convention (which
+  // is why `testFileExtensions` carries `.java`, `.kt`, `.cs`, `.swift`, `.rb`, `.go`, `.php`),
+  // while `test_` is a filename PREFIX.
   testFileMarkers: string[];
   testFileDirs: string[];
   testFileExtensions: string[];
@@ -81,10 +88,17 @@ export function effectiveAssertionDeltaConfig(specConfig?: Record<string, unknow
   };
 }
 
-function isTestFile(file: string, config: AssertionDeltaGateConfig): boolean {
+// `matchesTestMarker` is imported from structure.ts rather than re-spelled here, and that is the
+// whole point: THREE gates select test files off the same marker list (`structure`, `test-policy`,
+// this one), and structure.ts's own note says two gates disagreeing about what a test file is would
+// be worse than either rule alone. Until this change only two of the three agreed -- this one still
+// substring-matched, so with `.py` in the extension list `invoice_wizard/latest_run.py`
+// (l-a-`test_`-run) and `contest_form.py` were classified as TEST files and their assertion counts
+// policed as if they were suites.
+export function isAssertionDeltaTestFile(file: string, config: AssertionDeltaGateConfig): boolean {
   if (!config.testFileExtensions.some((ext) => file.endsWith(ext))) return false;
   return (
-    config.testFileMarkers.some((marker) => file.includes(marker)) ||
+    config.testFileMarkers.some((marker) => matchesTestMarker(file, marker)) ||
     config.testFileDirs.some((dir) => file.includes(dir))
   );
 }
@@ -94,7 +108,7 @@ export function createAssertionDeltaGate(): Gate {
     id: 'assertion-delta',
     async run(ctx: GateContext): Promise<GateResult> {
       const config = effectiveAssertionDeltaConfig(ctx.config['assertion-delta'] as Record<string, unknown> | undefined);
-      const testFiles = ctx.changedFiles.filter((file) => isTestFile(file, config));
+      const testFiles = ctx.changedFiles.filter((file) => isAssertionDeltaTestFile(file, config));
       // No test file in the diff means this gate READ NOTHING, which is not the same as "no
       // assertion was weakened". It used to return `pass` here, so every PR that touched no test
       // banked a green assertion-delta check and the coverage record counted a gate that had

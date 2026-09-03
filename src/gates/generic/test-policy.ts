@@ -36,6 +36,49 @@
 //     `no-matching-files`. Honest for one PR, and the non-benign reason keeps it out of the
 //     promotion coverage record.
 //
+// THE SECOND DEFECT, FIXED HERE: THE COMPANION MODEL WAS A MARKER SPLICE.
+//
+// `companionsFor` used to build the expected test path by splicing a marker in before the
+// extension -- `src/foo/bar.ts` -> `src/foo/bar.test.ts` -- and that is the ONLY shape it could
+// express. It works for JS/TS, where the test sits next to the source, and it is structurally
+// incapable of expressing the near-universal Python layout, where it does not:
+//
+//     invoice_wizard/collectors/gmail.py   ->   tests/test_gmail.py
+//
+// The test moves to a DIFFERENT DIRECTORY and takes a PREFIX, not a suffix. No value of
+// `sourceDirs`, `sourceExtensions`, `testMarkers` or `exemptSuffixes` could name it, which is why
+// docs/runbooks/invoices-wizard-tenant.md §4 lists this gate as a hard blocker for the live Python
+// tenant and why docs/language-support-extension-points.md §3 says the model itself has to change.
+// `blocking:false` was NOT an available workaround: an `unjudged` gate always blocks
+// (run-gate-stage's `ok` predicate), so the tenant needed BOTH a `sourceDirs` that exists AND
+// `blocking:false` just to stop the gate wedging every PR -- two coupled config edits to buy a
+// gate that then asserted nothing.
+//
+// So the marker splice is replaced by a COMPANION TEMPLATE -- a pattern pair rather than a splice.
+// A template is a path with four placeholders, all derived from the source file and the source
+// root it matched:
+//
+//     {root}  the matched sourceDir, with its trailing slash ('' for a '.' root)
+//     {dir}   the path between the root and the file, with a trailing slash, or '' at the root
+//     {name}  the basename without its extension
+//     {ext}   expanded over every configured sourceExtension (see below)
+//
+//     TS  '{root}{dir}{name}.test{ext}'   src/a/b.ts  -> src/a/b.test.ts     (the old behaviour,
+//                                                                             exactly)
+//     PY  'tests/{dir}test_{name}{ext}'   pkg/c/d.py  -> tests/c/test_d.py
+//     PY  'tests/test_{name}{ext}'        pkg/c/d.py  -> tests/test_d.py     (the live tenant's)
+//
+// Backwards compatibility is not a promise about the config format, it is a derivation: when a
+// tenant supplies `testMarkers` and no `companionTemplates`, the SUFFIX markers (the ones ending
+// in '.', which is all the splice model could ever mean) are turned back into templates. A tenant
+// that never heard of this change gets byte-identical behaviour.
+//
+// THE THIRD THING THIS FILE LEARNED: STACK-DRIVEN DEFAULTS. `sourceDirs: ['src/']` is a fact about
+// a TypeScript repo, and it is the value that produced the blocking `unjudged` on the Python
+// tenant. When `ctx.stackProfiles` reports a Python tree, the defaults come from the DETECTOR --
+// the profile's own `sourceRoots` and `testRoots` -- so a `pyproject.toml` repo is gated correctly
+// with no tenant config at all. Explicit tenant config still wins, key by key.
+//
 // THE SAME DEFECT, ONE LANGUAGE OVER: an sfdx repo has no `src/` and no `.ts`, so the stock
 // defaults produced that blocking `unjudged` on EVERY PR for a Salesforce tenant -- correct by
 // the rules above, useless as a product, because the tenant did nothing wrong and the remedy
@@ -52,14 +95,18 @@ import { stat } from 'node:fs/promises';
 import path from 'node:path';
 
 import { readGateConfig } from './config.ts';
-import type { Gate, GateContext, GateResult } from '../types.ts';
+import { matchesTestMarker } from './structure.ts';
 import type { StackProfile } from '../stack-profile.ts';
+import type { Gate, GateContext, GateResult } from '../types.ts';
 
 export interface TestPolicyGateConfig {
   sourceDirs: string[];
   sourceExtensions: string[];
   testMarkers: string[];
   exemptSuffixes: string[];
+  // The expected test path(s) for a source file, as templates over {root}/{dir}/{name}/{ext}.
+  // See the header. A source file passes when ANY of its expanded companions is in the diff.
+  companionTemplates: string[];
 }
 
 export const DEFAULT_TEST_POLICY_CONFIG: TestPolicyGateConfig = {
@@ -67,8 +114,64 @@ export const DEFAULT_TEST_POLICY_CONFIG: TestPolicyGateConfig = {
   sourceExtensions: ['.ts'],
   testMarkers: ['.test.', '.spec.'],
   exemptSuffixes: ['.d.ts', '/index.ts', '/types.ts'],
+  companionTemplates: ['{root}{dir}{name}.test{ext}', '{root}{dir}{name}.spec{ext}'],
 };
 
+// ---------------------------------------------------------------------------
+// Stack-driven defaults
+// ---------------------------------------------------------------------------
+
+// Python's defaults, built from what the DETECTOR found rather than from a convention this file
+// asserts. `sourceRoots` is `src/` for a src-layout project and the top-level `__init__.py`
+// packages otherwise (stack-profile.ts pythonSourceRoots), which is `invoice_wizard` on the live
+// tenant. `testRoots` is `tests`/`test` when present.
+//
+// EMPTY sourceRoots is the branch that matters: it means "no conventional root is present" (a flat
+// repo of `foo.py` + `tests/test_foo.py`), NOT "this repo has no sources". Falling back to the
+// TypeScript `['src/']` there would recreate the exact blocking `unjudged` this change removes, so
+// it falls back to `'.'` -- the whole checkout -- which always exists and cannot wedge.
+export function pythonTestPolicyDefaults(profile: StackProfile): TestPolicyGateConfig {
+  const testRoots = profile.testRoots.length > 0 ? [...profile.testRoots] : ['tests'];
+  // A TEST ROOT IS NOT A SOURCE ROOT, even when the detector reports it as one. `pythonSourceRoots`
+  // returns every top-level directory holding an `__init__.py`, and `tests/__init__.py` is
+  // completely ordinary -- so `tests` would arrive here as a source root, and then every helper in
+  // it (`conftest.py` is exempt, but `design_oracle.py`, `pdf_fixture.py`, `node_harness.py` are
+  // not) would demand a `tests/test_design_oracle.py`. Excluding the detected test roots is not
+  // second-guessing the detector: it reported both facts, and this gate is the consumer that has to
+  // decide which one wins for "things that need a test".
+  const detectedTestRoots = new Set(profile.testRoots);
+  const sources = profile.sourceRoots.filter((root) => !detectedTestRoots.has(root));
+  const sourceDirs = sources.length > 0 ? sources : ['.'];
+  const companionTemplates = [
+    // The relocating companions: the test lives under a test root, named `test_<module>.py`,
+    // either flat or mirroring the source's sub-path.
+    ...testRoots.flatMap((root) => [`${root}/test_{name}{ext}`, `${root}/{dir}test_{name}{ext}`]),
+    // ...and the colocated ones, for a package that keeps its tests inside itself.
+    '{root}{dir}test_{name}{ext}',
+    '{root}{dir}{name}_test{ext}',
+  ];
+  return {
+    sourceDirs,
+    sourceExtensions: ['.py'],
+    // `test_` is a filename PREFIX, matched as one (structure.ts matchesTestMarker) -- a plain
+    // substring match would classify `latest_run.py` as a test file.
+    testMarkers: ['test_', '_test.'],
+    // The Python files that are not "a module that should have a test": package markers, the
+    // pytest fixture module, entry points, and generated version stamps.
+    exemptSuffixes: ['__init__.py', 'conftest.py', 'setup.py', '__main__.py', '_version.py'],
+    companionTemplates,
+  };
+}
+
+// The defaults for THIS checkout. Ecosystems are UNIONED, never ranked: a repo that is genuinely
+// both (a Python service with an LWC or Next.js front end) must police both trees, and
+// `stackProfiles` is explicitly not a ranking. Unioning can only ever widen what the gate looks at
+// and what it ACCEPTS as a companion -- it can never invent a requirement, which is the same
+// argument the multi-extension companion rule already rests on.
+//
+// Absent/unknown profiles -> the TypeScript default, unchanged. Every gate must behave correctly
+// when `stackProfiles` is absent (gates/types.ts), and for this gate "absent" means "nothing was
+// detected, so do exactly what you did before".
 // The two Apex source extensions, and the only ones. An LWC bundle's `.js`/`.html` lives under
 // the same packageDirectory but belongs to the node half of a polyglot repo, which contributes
 // its own defaults.
@@ -79,30 +182,69 @@ const APEX_SOURCE_EXTENSIONS = ['.cls', '.trigger'] as const;
 // it fails PRs whose policy is satisfied -- which is how a gate gets configured off entirely.
 const SALESFORCE_EXEMPT_SUFFIXES = ['.cls-meta.xml', '.js-meta.xml'] as const;
 
-function withoutDuplicates(values: readonly string[]): string[] {
-  return [...new Set(values)];
-}
-
 // The defaults BEFORE tenant config, derived from what the checkout actually is.
 //
-// `stackProfiles` is optional on GateContext and absent means "not detected" (an older caller,
-// a hand-built test context) -- never "nothing here" -- so absence falls back to the historic
-// Node defaults rather than to a wider or narrower guess. This reads the field only: a gate
-// re-running its own filesystem detector would both duplicate the once-per-stage detection and
-// disagree with the stack the rest of the run reported.
+// `stackProfiles` is optional on GateContext and absent means "not detected" (an older caller, a
+// hand-built test context) -- never "nothing here" -- so absence falls back to the historic Node
+// defaults rather than to a wider or narrower guess. This reads the field only: a gate re-running
+// its own filesystem detector would both duplicate the once-per-stage detection and disagree with
+// the stack the rest of the run reported.
+//
+// Ecosystems are UNIONED, never ranked. A repo that is genuinely two things -- a Salesforce org
+// with an LWC front end, a Python service with a TypeScript dashboard -- must have both halves
+// policed, and replacing rather than adding would silently drop one of them. Unioning can only
+// widen what the gate LOOKS AT and what it ACCEPTS as a companion; it never invents a requirement.
 export function stackDefaultTestPolicyConfig(stackProfiles?: readonly StackProfile[]): TestPolicyGateConfig {
-  const salesforceRoots = (stackProfiles ?? [])
-    .filter((profile) => profile.ecosystem === 'salesforce')
-    .flatMap((profile) => profile.sourceRoots);
-  if (salesforceRoots.length === 0) return DEFAULT_TEST_POLICY_CONFIG;
+  const contributions = [
+    DEFAULT_TEST_POLICY_CONFIG,
+    pythonContribution(stackProfiles),
+    salesforceContribution(stackProfiles),
+  ].filter((c): c is TestPolicyGateConfig => c !== undefined);
+  // Only the Node baseline: nothing else was detected, so there is nothing to add to it.
+  if (contributions.length === 1) return DEFAULT_TEST_POLICY_CONFIG;
 
+  const union = (pick: (c: TestPolicyGateConfig) => string[]): string[] => [...new Set(contributions.flatMap(pick))];
   return {
-    sourceDirs: withoutDuplicates([...DEFAULT_TEST_POLICY_CONFIG.sourceDirs, ...salesforceRoots.map(asDirPrefix)]),
-    sourceExtensions: withoutDuplicates([...DEFAULT_TEST_POLICY_CONFIG.sourceExtensions, ...APEX_SOURCE_EXTENSIONS]),
-    testMarkers: DEFAULT_TEST_POLICY_CONFIG.testMarkers,
-    exemptSuffixes: withoutDuplicates([...DEFAULT_TEST_POLICY_CONFIG.exemptSuffixes, ...SALESFORCE_EXEMPT_SUFFIXES]),
+    sourceDirs: union((c) => c.sourceDirs),
+    sourceExtensions: union((c) => c.sourceExtensions),
+    testMarkers: union((c) => c.testMarkers),
+    exemptSuffixes: union((c) => c.exemptSuffixes),
+    companionTemplates: union((c) => c.companionTemplates),
   };
 }
+
+function pythonContribution(stackProfiles?: readonly StackProfile[]): TestPolicyGateConfig | undefined {
+  const python = stackProfiles?.find((profile) => profile.ecosystem === 'python');
+  if (!python) return undefined;
+  const py = pythonTestPolicyDefaults(python);
+  // Python's `'.'` fallback means "no conventional root here, so police the whole checkout" --
+  // honest on a Python-ONLY repo, and wrong the moment another ecosystem contributed a REAL root:
+  // `asDirPrefix('.')` is `''`, so it would put every file in the repo in scope and make every one
+  // of them demand a companion. Unioning may widen what the gate LOOKS AT; it may not invent
+  // requirements.
+  const alone = !(stackProfiles ?? []).some((p) => p.ecosystem === 'node' || p.ecosystem === 'salesforce');
+  return alone ? py : { ...py, sourceDirs: py.sourceDirs.filter((dir) => dir !== '.') };
+}
+
+function salesforceContribution(stackProfiles?: readonly StackProfile[]): TestPolicyGateConfig | undefined {
+  const roots = (stackProfiles ?? [])
+    .filter((profile) => profile.ecosystem === 'salesforce')
+    .flatMap((profile) => profile.sourceRoots);
+  if (roots.length === 0) return undefined;
+  return {
+    sourceDirs: roots.map(asDirPrefix),
+    sourceExtensions: [...APEX_SOURCE_EXTENSIONS],
+    testMarkers: [],
+    exemptSuffixes: [...SALESFORCE_EXEMPT_SUFFIXES],
+    // Apex companions are matched by BASENAME over the whole diff (apexCompanionsFor), never by
+    // template, so this ecosystem contributes none.
+    companionTemplates: [],
+  };
+}
+
+// The name this file used for the same thing before the Salesforce profile landed beside the
+// Python one. Kept so neither branch's callers and tests had to churn.
+export const stackTestPolicyDefaults = stackDefaultTestPolicyConfig;
 
 // Tenant-editable config rides the signed spec, so a wrong-shape value falls back to the
 // default rather than throwing the gate (same discipline as risk.ts). An EMPTY array falls
@@ -114,25 +256,76 @@ function normalizeStringArray(value: unknown, fallback: string[]): string[] {
     : fallback;
 }
 
-// The stack supplies the defaults ONLY when the tenant supplied no `test-policy` config at all.
-// Tenant config wins WHOLE, not key by key: an operator who named this repo's source roots and
-// silently got `force-app/` bolted on beside them would be policing a scope nobody approved,
-// and would have no way to say "only these". Detection informs the default; it never edits a
-// decision someone already made.
+// Turns the SUFFIX markers of the old splice model back into templates, so a tenant that
+// configured `testMarkers: ['.it.']` and nothing else keeps working byte-for-byte. Only markers
+// ending in '.' are converted, because a splice is all the old model could express -- a PREFIX
+// marker like `test_` had no meaning there (splicing it gives `gmailtest.py`), which is exactly
+// the structural gap this change closes.
+function templatesFromMarkers(markers: readonly string[]): string[] {
+  return markers.filter((marker) => marker.endsWith('.')).map((marker) => `{root}{dir}{name}${marker.slice(0, -1)}{ext}`);
+}
+
+// The keys that define this gate's SCOPE. Setting any one of them is the operator saying "I have
+// decided what this gate looks at", and the stack-derived defaults then stand down entirely.
+const SCOPE_KEYS = ['sourceDirs', 'sourceExtensions', 'testMarkers', 'exemptSuffixes', 'companionTemplates'] as const;
+
+// The stack supplies the defaults ONLY when the tenant scoped nothing. Tenant scope wins WHOLE, not
+// key by key: an operator who named this repo's source roots and silently got `force-app/` or
+// `invoice_wizard/` bolted on beside them would be policing a scope nobody approved, and would have
+// no way to say "only these". Detection informs the default; it never edits a decision someone made.
+//
+// Keyed on the SCOPE keys, not on `specConfig` being present at all. `gateConfig['test-policy']`
+// also carries `blocking`, which this gate never reads -- so a tenant who set only
+// `{blocking: false}` would otherwise discard every stack-derived default and land back on
+// `sourceDirs: ['src/']`, which is the blocking `unjudged` wedge at the top of this file, on a repo
+// that has no `src/`. Setting an unrelated key must not silently re-scope the gate.
+function tenantScopedThisGate(specConfig?: Record<string, unknown>): boolean {
+  return specConfig !== undefined && SCOPE_KEYS.some((key) => specConfig[key] !== undefined);
+}
+
+
 export function effectiveTestPolicyConfig(
   specConfig?: Record<string, unknown>,
   stackProfiles?: readonly StackProfile[],
 ): TestPolicyGateConfig {
-  const defaults = specConfig === undefined ? stackDefaultTestPolicyConfig(stackProfiles) : DEFAULT_TEST_POLICY_CONFIG;
+  const defaults = tenantScopedThisGate(specConfig)
+    ? DEFAULT_TEST_POLICY_CONFIG
+    : stackDefaultTestPolicyConfig(stackProfiles);
   const config = readGateConfig(specConfig === undefined ? {} : { 'test-policy': specConfig }, 'test-policy', defaults);
+  const testMarkers = normalizeStringArray(config.testMarkers, defaults.testMarkers);
+  // A tenant who set `testMarkers` but no `companionTemplates` is speaking the OLD vocabulary;
+  // derive their templates from it.
+  //
+  // Read off the RAW spec, not the merged config: `readGateConfig` layers the spec over the
+  // defaults, so `config.companionTemplates` is always populated and a merged read could never
+  // tell "the tenant chose these" from "these are the defaults" -- which would make the whole
+  // marker-derivation path dead code and silently break a pre-existing `testMarkers` tenant.
+  const declaredTemplates = specConfig?.companionTemplates;
+  // A tenant who EXPLICITLY set `testMarkers` gets exactly the templates those markers mean -- not
+  // a union with the base. Unioning was a silent WIDENING dressed up as compatibility: a tenant on
+  // `testMarkers: ['.it.']` would suddenly also accept `foo.test.ts` and `foo.spec.ts` as
+  // companions, i.e. the gate would start passing PRs it used to fail. Compatibility means the same
+  // verdicts, not more permissive ones.
+  //
+  // The base is still the fallback when the markers yield nothing -- every configured marker is a
+  // PREFIX (`test_`), which the splice model could never express. Falling back beats emitting an
+  // empty template list, which would silently disarm the gate for every in-scope file.
+  const fromMarkers = templatesFromMarkers(testMarkers);
+  const tenantSetMarkers =
+    Array.isArray(specConfig?.testMarkers) && (specConfig.testMarkers as unknown[]).length > 0;
+  const derived =
+    tenantSetMarkers && fromMarkers.length > 0
+      ? fromMarkers
+      : [...new Set([...fromMarkers, ...defaults.companionTemplates])];
   return {
     sourceDirs: normalizeStringArray(config.sourceDirs, defaults.sourceDirs),
     sourceExtensions: normalizeStringArray(config.sourceExtensions, defaults.sourceExtensions),
-    testMarkers: normalizeStringArray(config.testMarkers, defaults.testMarkers),
+    testMarkers,
     // exemptSuffixes is the one list an empty array legitimately means: "exempt nothing".
     exemptSuffixes: Array.isArray(config.exemptSuffixes) && config.exemptSuffixes.every((v) => typeof v === 'string')
       ? (config.exemptSuffixes as string[])
       : defaults.exemptSuffixes,
+    companionTemplates: normalizeStringArray(declaredTemplates, derived),
   };
 }
 
@@ -170,8 +363,12 @@ function isApexTestFile(file: string): boolean {
   return /^(?:Test.+|.+(?:_Test|Tests|Test))\.cls$/.test(name);
 }
 
-function isTestFile(file: string, testMarkers: string[]): boolean {
-  return isApexTestFile(file) || testMarkers.some((marker) => file.includes(marker));
+// Exported so the cross-gate invariant suite can drive THIS selector rather than a
+// re-implementation of it -- a proxy would still pass if this gate stopped calling
+// `matchesTestMarker`, which is the exact drift that suite exists to catch.
+export function isTestPolicyTestFile(file: string, testMarkers: string[]): boolean {
+  return isApexTestFile(file) || testMarkers.some((marker) => matchesTestMarker(file, marker));
+
 }
 
 function isExempt(file: string, exemptSuffixes: string[]): boolean {
@@ -181,8 +378,15 @@ function isExempt(file: string, exemptSuffixes: string[]): boolean {
 // A directory prefix always ends at a path separator. Without this, `sourceDirs: ['source']`
 // matches `sourcemaps/a.ts` -- the gate would then police files in a directory the tenant
 // never named, and (worse) report a scope it does not have.
+//
+// `.` / `./` / `` are the WHOLE CHECKOUT and resolve to the empty prefix. That root exists in
+// every repo, which is the point: it is what a flat Python project (`foo.py` at the root, tests in
+// `tests/`) falls back to instead of the TypeScript `src/`, whose absence produces the blocking
+// `unjudged` at the top of this file.
 function asDirPrefix(dir: string): string {
-  return dir.endsWith('/') ? dir : `${dir}/`;
+  const trimmed = dir.replace(/^\.\/+/, '');
+  if (trimmed === '' || trimmed === '.') return '';
+  return trimmed.endsWith('/') ? trimmed : `${trimmed}/`;
 }
 
 function isInScope(file: string, config: TestPolicyGateConfig): boolean {
@@ -192,7 +396,9 @@ function isInScope(file: string, config: TestPolicyGateConfig): boolean {
   );
 }
 
-// For `src/foo/bar.ts` with marker '.test.' -> `src/foo/bar.test.ts`.
+// Expands the companion templates for one source file. `src/foo/bar.ts` with
+// '{root}{dir}{name}.test{ext}' -> `src/foo/bar.test.ts`; `invoice_wizard/collectors/gmail.py`
+// with 'tests/test_{name}{ext}' -> `tests/test_gmail.py`.
 //
 // The companion may carry ANY configured source extension, not only the changed file's own:
 // a test harness is routinely written in a different language from the thing it tests (a
@@ -200,13 +406,37 @@ function isInScope(file: string, config: TestPolicyGateConfig): boolean {
 // single-extension default this is exactly the old same-extension behaviour; it only widens
 // for a tenant that configures more than one extension, and widening can only ever ACCEPT a
 // test that exists, never invent a requirement.
-function companionsFor(file: string, extensions: string[], markers: string[]): string[] {
-  const ext = extensions.find((candidate) => file.endsWith(candidate));
-  if (!ext) return [];
-  const base = file.slice(0, -ext.length);
-  return markers.flatMap((marker) =>
-    extensions.map((candidate) => `${base}${marker.slice(0, -1)}${candidate}`),
-  );
+//
+// A file that matches no configured extension, or no configured source root, yields NO companions
+// -- and the caller treats "no companions" as "nothing to demand", never as "the test is missing".
+export function companionsFor(file: string, config: TestPolicyGateConfig): string[] {
+  const ext = config.sourceExtensions.find((candidate) => file.endsWith(candidate));
+  if (ext === undefined) return [];
+  // The LONGEST matching root wins, so `sourceDirs: ['.', 'pkg']` resolves `pkg/a.py` against
+  // `pkg/` (giving `{dir}` = '') rather than against the whole checkout (`{dir}` = 'pkg/'). A
+  // shorter root would silently change every relocating companion's shape.
+  const root = config.sourceDirs
+    .map(asDirPrefix)
+    .filter((prefix) => file.startsWith(prefix))
+    .sort((a, b) => b.length - a.length)[0];
+  if (root === undefined) return [];
+  const rest = file.slice(root.length);
+  const slash = rest.lastIndexOf('/');
+  const dir = slash === -1 ? '' : rest.slice(0, slash + 1);
+  const name = rest.slice(slash + 1, rest.length - ext.length);
+  return [
+    ...new Set(
+      config.companionTemplates.flatMap((template) =>
+        config.sourceExtensions.map((candidate) =>
+          template
+            .replaceAll('{root}', root)
+            .replaceAll('{dir}', dir)
+            .replaceAll('{name}', name)
+            .replaceAll('{ext}', candidate),
+        ),
+      ),
+    ),
+  ];
 }
 
 // A source root is a REPO-RELATIVE directory. An absolute path or one that climbs out of the
@@ -242,7 +472,7 @@ export function createTestPolicyGate(): Gate {
       // examined-nothing-and-said-pass ambiguity in miniature.
       const inScope = ctx.changedFiles.filter(
         (file) =>
-          !isTestFile(file, config.testMarkers) &&
+          !isTestPolicyTestFile(file, config.testMarkers) &&
           isInScope(file, config) &&
           !isExempt(file, config.exemptSuffixes),
       );
@@ -289,8 +519,8 @@ export function createTestPolicyGate(): Gate {
 
       const findings: string[] = [];
       for (const file of inScope) {
-        // Apex is matched by basename over the whole diff; everything else keeps the sibling
-        // splice verbatim. An Apex source change with no test class in the diff still FAILS --
+        // Apex is matched by BASENAME over the whole diff; every other language goes through the
+        // companion templates. An Apex source change with no test class in the diff still FAILS --
         // the naming model is different, the policy is not weaker.
         if (isApexSource(file)) {
           const companions = apexCompanionsFor(file);
@@ -303,7 +533,7 @@ export function createTestPolicyGate(): Gate {
           continue;
         }
 
-        const companions = companionsFor(file, config.sourceExtensions, config.testMarkers);
+        const companions = companionsFor(file, config);
         if (companions.length > 0 && !companions.some((c) => changed.has(c))) {
           findings.push(
             `"${file}" changed without a matching test file (expected one of: ${companions.join(', ')})`,
