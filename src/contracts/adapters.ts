@@ -376,6 +376,25 @@ export interface VCSHost {
   // Optional: a host that cannot compare refs simply doesn't implement it, and callers that need
   // proof get none (the safe direction).
   compareRefs?(repoId: string, base: string, head: string): Promise<{ aheadBy: number; behindBy: number } | undefined>;
+  // The repository-relative paths a three-dot comparison of `base`...`head` changed -- the same
+  // changed-file list GateContext.changedFiles carries runner-side, but readable from the CONTROL
+  // PLANE, which never has a checkout. The assembled review round reads it once per round to
+  // classify the diff's risk and scale the number of review lenses to it (control-plane/
+  // review-round.ts, gates/generic/risk-level.ts).
+  //
+  // Honest about ignorance, like compareRefs and for the same reason: `undefined` means the
+  // comparison could not be made (a deleted ref, a transient API error, a host that cannot list
+  // files) and NOTHING may be concluded from it -- the caller must fall back to its most
+  // conservative behaviour (every lens), never to "the diff is empty, so it must be trivial".
+  // `truncated` says the host capped the listing (GitHub's compare endpoint stops at 300 files):
+  // the paths returned are real, but there are more, so a size-based verdict computed from them
+  // is a LOWER bound -- a truncated listing is by construction a large diff.
+  // Optional: a host without it makes the risk classification inert, which fails safe.
+  listChangedFiles?(
+    repoId: string,
+    base: string,
+    head: string,
+  ): Promise<{ files: string[]; truncated: boolean } | undefined>;
   // Post a top-level comment on a PR. Used by the autofixer to ACKNOWLEDGE review feedback it
   // addressed -- resolving inline threads covers inline comments, but a top-level PR comment or
   // a review summary with no inline comments has no thread to resolve, so a reply is the only

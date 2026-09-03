@@ -32,6 +32,19 @@ export type TicketStatus =
 // aggregation ever sees more than one lens's output).
 export type ReviewLens = 'primary' | 'adversarial' | 'security';
 
+// How much review a diff has EARNED, classified deterministically from the changed-file list
+// alone (gates/generic/risk-level.ts, shared verbatim with the `risk` gate so the two can never
+// tell a tenant two different stories about the same diff):
+//   'none'   -- nothing changed, or the change is entirely generated/binary artifacts.
+//   'low'    -- prose and assets only (docs, markdown, images): no executable surface at all.
+//   'medium' -- ordinary source/config change within the size threshold.
+//   'high'   -- touches a high-risk path (CI workflows/actions) or is large enough that the
+//               `risk` gate itself would flag it.
+// Only 'none'/'low' ever REDUCE the lens set; 'high' additionally raises the primary reviewer's
+// strictness. A diff that could not be read is classified by nobody -- the caller runs every
+// lens instead (see VCSHost.listChangedFiles).
+export type DiffRiskLevel = 'none' | 'low' | 'medium' | 'high';
+
 export interface GatePolicy {
   requireHumanApproval: boolean;
   requiredChecks: string[];
@@ -1139,6 +1152,21 @@ export interface ReviewRoundState {
   // A refusal the adapter could not evidence never counts here at all -- checkStage's own
   // run-not-found/timeout escalation is what ends that one.
   foreignResultTicks?: number;
+  // The lens set this round actually DISPATCHED, pinned at round start alongside the sha.
+  //
+  // It must be persisted, not recomputed: the set is derived from the diff (see riskLevel), the
+  // diff moves whenever the base or the integration branch does, and a later tick that
+  // recomputed a SMALLER set would wait forever on a lens it no longer expects -- or, worse,
+  // aggregate a round while a dispatched lens's verdict is still outstanding. Pinning the sha
+  // and pinning the lens set are the same guarantee at two scopes. Absent on rounds persisted
+  // before this field (and on any round whose diff could not be read): fall back to the
+  // configured set, which is the conservative direction.
+  lenses?: ReviewLens[];
+  // Why that set: the diff's risk level and the human-readable justification behind it, carried
+  // so the aggregate check can SAY why a docs-only PR got one reviewer instead of leaving a
+  // customer to infer it. Recorded even when every lens ran.
+  riskLevel?: DiffRiskLevel;
+  riskReasons?: string[];
 }
 
 export interface TicketState {

@@ -225,6 +225,10 @@ export interface GitHubVCSHostConfig extends GitHubClientConfig {
   now?: () => number;
 }
 
+// The hard cap GitHub puts on the `files` array of one compare response. A full page means
+// there are more files than were returned, not that the diff is exactly this size.
+const COMPARE_FILE_PAGE_LIMIT = 300;
+
 export class GitHubVCSHost implements VCSHost {
   private readonly client: GitHubClient;
   // The same host, for confirmMergeCommit's post-merge reads only: one attempt, short timeout.
@@ -1193,6 +1197,27 @@ export class GitHubVCSHost implements VCSHost {
     );
     if (typeof cmp?.ahead_by !== 'number' || typeof cmp.behind_by !== 'number') return undefined;
     return { aheadBy: cmp.ahead_by, behindBy: cmp.behind_by };
+  }
+
+  // Same three-dot compare compareRefs reads, for its file list rather than its counts.
+  // Honest about ignorance for the same reason: a 404 (requestOptional) or a response carrying
+  // no `files` array resolves `undefined` -- "I could not ask" -- and never an empty list a
+  // caller could read as "nothing changed, so this diff is trivial".
+  async listChangedFiles(
+    repoId: string,
+    base: string,
+    head: string,
+  ): Promise<{ files: string[]; truncated: boolean } | undefined> {
+    const cmp = await this.client.requestOptional<{ files?: { filename?: string }[] }>(
+      'GET',
+      `/repos/${repoId}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`,
+    );
+    if (!Array.isArray(cmp?.files)) return undefined;
+    const files = cmp.files.map((f) => f?.filename).filter((n): n is string => typeof n === 'string' && n.length > 0);
+    // GitHub's compare endpoint returns AT MOST 300 files in one response, so a full page is
+    // the practical signal that the listing was capped: the paths are real but incomplete, and
+    // any size-derived reading of them is a lower bound.
+    return { files, truncated: cmp.files.length >= COMPARE_FILE_PAGE_LIMIT };
   }
 
   async replyToPr(repoId: string, prNumber: number, body: string): Promise<void> {

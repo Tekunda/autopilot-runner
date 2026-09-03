@@ -29,8 +29,9 @@ import { apiCoverageGate } from '../packs/docs/api-coverage-gate.ts';
 import { changelogFreshnessGate } from '../packs/docs/changelog-freshness-gate.ts';
 import { createSecurityReviewGate } from '../packs/security/review-gate.ts';
 import { cannibalizationGate } from '../packs/seo/cannibalization.ts';
-import { coverTitleGate } from '../packs/seo/cover-title.ts';
+import { coverImageGate } from '../packs/seo/cover-image.ts';
 import { externalLinksGate } from '../packs/seo/external-links.ts';
+import { coverTitleGate, metaLengthsGate } from '../packs/seo/meta-lengths.ts';
 import { seoMonitorGate } from '../packs/seo/seo-monitor.ts';
 import { siteCrawlGate } from '../packs/seo/site-crawl.ts';
 
@@ -40,6 +41,13 @@ import { siteCrawlGate } from '../packs/seo/site-crawl.ts';
 const PACK_GATE_CATALOG: ReadonlyMap<string, Gate> = new Map(
   [
     cannibalizationGate,
+    coverImageGate,
+    metaLengthsGate,
+    // DEPRECATED id, registered on purpose: a grant issued before `cover-title` was renamed to
+    // `meta-lengths` carries the old id inside a SIGNED gateSpec that nothing may rewrite, and a
+    // spec whose id resolves to no gate here is silently skipped -- a paid gate that stops
+    // running without saying so. It resolves to the same implementation. Remove it only once no
+    // unexpired grant can still name it.
     coverTitleGate,
     externalLinksGate,
     seoMonitorGate,
