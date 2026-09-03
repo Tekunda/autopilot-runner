@@ -1946,25 +1946,8 @@ export function isExternalPrTicket(ticketId: string): boolean {
   return ticketId.startsWith(EXTERNAL_PR_PREFIX);
 }
 
-// Whether two "owner/repo" slugs name the SAME repository. The one place any comparison between
-// a CONFIGURED repoId and a HOST-supplied one is decided.
-//
-// A repoId reaches the plane verbatim from tenant config (the tenant-store entry), spelled
-// however whoever wrote that entry spelled it -- `tekunda/website`. Nothing normalizes it. GitHub
-// answers with the repository's own CANONICAL casing: `Tekunda/Website` in `head.repo.full_name`
-// (OpenPR.headRepo) and in the runner's GITHUB_REPOSITORY. A GitHub slug is case-insensitively
-// unique -- those two cannot be different repositories -- so `===` across that seam is not a
-// stricter check, it is a WRONG one, and it fails SILENTLY in both directions: the external-PR
-// sweep reads every same-repo PR as a fork and adopts nothing, and a legitimate grant reads as
-// executing in the wrong repository. Comparisons between two values that came from the SAME side
-// of the seam (two fakes' own keys in a test) need nothing from here and use `===`.
-//
-// A tenant's repoId is canonicalized once at registration (adapters/github/vcs-host.ts's
-// canonicalRepoId), so `this.config.repoId` IS the host's own spelling from then on -- but a
-// ticket's own repoId is stamped once at import and never re-stamped, so a ticket imported before
-// its tenant's repoId was canonicalized (or before this normalization existed at all) still
-// carries the OLD spelling. A stored ticket's repoId against the tenant's is therefore NOT
-// same-side any more and needs sameRepoId too (control-plane.ts's orphanScanRefs).
+// Whether two "owner/repo" slugs name the same repository: slugs cross the config/host seam
+// un-normalized, so compare case-insensitively (GitHub slugs are case-insensitively unique), never `===`.
 export function sameRepoId(a: string, b: string): boolean {
   return a.trim().toLowerCase() === b.trim().toLowerCase();
 }
