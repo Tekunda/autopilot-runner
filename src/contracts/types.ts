@@ -1936,6 +1936,23 @@ export function isExternalPrTicket(ticketId: string): boolean {
   return ticketId.startsWith(EXTERNAL_PR_PREFIX);
 }
 
+// Whether two "owner/repo" slugs name the SAME repository. The one place any comparison between
+// a CONFIGURED repoId and a HOST-supplied one is decided.
+//
+// A repoId reaches the plane verbatim from tenant config (the tenant-store entry), spelled
+// however whoever wrote that entry spelled it -- `tekunda/website`. Nothing normalizes it. GitHub
+// answers with the repository's own CANONICAL casing: `Tekunda/Website` in `head.repo.full_name`
+// (OpenPR.headRepo) and in the runner's GITHUB_REPOSITORY. A GitHub slug is case-insensitively
+// unique -- those two cannot be different repositories -- so `===` across that seam is not a
+// stricter check, it is a WRONG one, and it fails SILENTLY in both directions: the external-PR
+// sweep reads every same-repo PR as a fork and adopts nothing, and a legitimate grant reads as
+// executing in the wrong repository. Comparisons between two values that came from the SAME side
+// of the seam (a stored ticket's repoId against the tenant's, a fake's own key) need nothing from
+// here and use `===`.
+export function sameRepoId(a: string, b: string): boolean {
+  return a.trim().toLowerCase() === b.trim().toLowerCase();
+}
+
 // Clock slack between the control plane and the CI host: a dispatched run's `created_at` is
 // GitHub's clock, not ours, and the listing itself lags the dispatch by a beat. Every lower
 // bound on "was this run created for THIS generation" reaches back this far.

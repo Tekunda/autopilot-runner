@@ -15,6 +15,7 @@
 
 import { createHash, createPublicKey, verify as cryptoVerify, KeyObject } from 'node:crypto';
 
+import { sameRepoId } from '../contracts/types.ts';
 import type { ExecutionGrant } from '../contracts/types.ts';
 
 export interface VerifyResult {
@@ -80,13 +81,6 @@ export interface GrantEnvironment {
   repository?: string;
   /** The tenant this runner belongs to, when the workflow declares one. */
   tenantId?: string;
-}
-
-// GitHub repository slugs are case-insensitive and compare as such; anything stricter would reject
-// a legitimate grant over a capitalization difference between the control plane's stored repoId
-// and the runner's GITHUB_REPOSITORY.
-function sameRepo(a: string, b: string): boolean {
-  return a.trim().toLowerCase() === b.trim().toLowerCase();
 }
 
 // Split one or more concatenated PEM blocks into individual keys. The runner's `verify-key` input
@@ -167,7 +161,10 @@ function signatureFailureReason(bytes: Buffer, sig: string, keys: readonly KeyIn
 // of how long it has left). The compared values are the SIGNED ones, so a grant cannot be
 // re-pointed at another repo or tenant without breaking the signature.
 function bindingFailureReason(grant: ExecutionGrant, environment?: GrantEnvironment): string | undefined {
-  if (environment?.repository && !sameRepo(grant.repoId, environment.repository)) {
+  // Case-insensitively, via sameRepoId: the signed repoId carries the tenant config's spelling and
+  // GITHUB_REPOSITORY carries GitHub's, and anything stricter rejects a legitimate grant over a
+  // capitalization difference.
+  if (environment?.repository && !sameRepoId(grant.repoId, environment.repository)) {
     return `grant is scoped to repository "${grant.repoId}" but is executing in "${environment.repository}"`;
   }
   if (environment?.tenantId && grant.tenantId !== environment.tenantId) {
