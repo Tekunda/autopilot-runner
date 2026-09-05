@@ -16,6 +16,7 @@
 import { access, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 
+import { bodyFilePaths, isLocaleMap } from './json-locales.ts';
 import type {
   Frontmatter,
   Image,
@@ -65,15 +66,6 @@ export async function listJsonContentFiles(rootDir: string, contentDir: string):
 
   await walk(base);
   return results;
-}
-
-function isLocaleMap(value: unknown, baseLocale: string): value is Record<string, unknown> {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    !Array.isArray(value) &&
-    Object.prototype.hasOwnProperty.call(value, baseLocale)
-  );
 }
 
 // The base-locale block under `key` at the DOCUMENT ROOT, if the document has one.
@@ -241,21 +233,6 @@ function collectCopy(
   for (const child of Object.values(obj)) {
     collectCopy(child, baseLocale, text, hrefs);
   }
-}
-
-// The `bodyFile` each locale of a document declares, as repo-relative paths keyed by locale.
-// The file is resolved beside the page JSON (the `.html` sits next to the article `.json`).
-// Locales are returned in authored order.
-function bodyFilePaths(relativePath: string, parsed: unknown, baseLocale: string): Map<string, string> {
-  const out = new Map<string, string>();
-  const copy = (parsed as Record<string, unknown> | null)?.copy;
-  if (!isLocaleMap(copy, baseLocale)) return out;
-  for (const [locale, block] of Object.entries(copy)) {
-    const bodyFile = (block as Record<string, unknown> | null)?.bodyFile;
-    if (typeof bodyFile !== 'string' || bodyFile.length === 0) continue;
-    out.set(locale, path.join(path.dirname(relativePath), bodyFile));
-  }
-  return out;
 }
 
 // A missing file contributes nothing rather than throwing: a dangling `bodyFile` is the
@@ -528,28 +505,78 @@ export function parseJsonPage(
   return pageFromParsedJson(parsed, relativePath, baseLocale, '', []);
 }
 
+// The page as of A REVISION THE CALLER CAN READ: `raw` is the document's content in that
+// revision, and `fetchAt` answers with any other file's content in the SAME revision (undefined
+// when that revision did not contain it). What parseJsonPage cannot do -- it deliberately leaves
+// `bodyFile` unresolved rather than reach back to the working tree -- and what a gate comparing a
+// changed page against its base revision needs, because an article's body IS its fragment: a base
+// page assembled without it looks empty, so every link and phrase already in it would read as
+// newly introduced.
+//
+// loadJsonPage is this function over the CHECKOUT, deliberately: the two revisions a gate compares
+// have to be composed by one rule, or the difference between two compositions reads as a defect
+// the PR introduced.
+//
+// A fragment missing from the revision contributes nothing, exactly as readRelative tolerates a
+// dangling `bodyFile` on disk, and an unparseable document yields an empty page rather than a
+// throw -- the same leniency safeReadJson has always had. A revision that cannot be READ is not
+// this function's to invent: `fetchAt` throws, and the throw propagates to a caller that must not
+// fold "git could not answer" into "the file was not there".
+//
+// `strict` REVERSES that leniency, and exists for exactly one caller shape: a gate comparing a
+// page against its base revision to decide whether this change made it worse. Leniency is right
+// for the HEAD page (a malformed file is the build gate's finding, not a content gate's) and
+// dangerous for the BASE one, because an empty base is not a neutral answer -- for any gate whose
+// magnitude is a SHORTFALL it is the largest shortfall possible, so no head finding can ever
+// exceed it and every one of them silently drops to a warn. So in strict mode a document that
+// does not parse, or a base-locale `bodyFile` the revision does not contain, THROWS: the caller
+// must be able to tell "this revision has no page" from "this revision's page is empty".
+//
+// Only the BASE-LOCALE fragment is required, because only it feeds `body` -- the text every
+// comparison actually reads. Other locales' fragments feed `bodies` alone, so demanding them
+// would block a PR that adds a translation for a gap in a language nothing here grades.
+export async function fetchJsonPage(
+  relativePath: string,
+  raw: string,
+  baseLocale: string,
+  fetchAt: (fragmentPath: string) => Promise<string | undefined>,
+  strict = false,
+): Promise<Page> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    if (strict) throw new Error(`${relativePath} does not parse as JSON in this revision`);
+    return { relativePath, frontmatter: {}, body: '' };
+  }
+  // Every locale's body file, not just the base locale's: a defect authored into the Dutch
+  // fragment renders on the Dutch page. `body` below still joins the BASE-locale view alone,
+  // so every gate that reads it is unaffected; `bodies` is the additional per-file view.
+  // Deduped by PATH, not locale: two locales may point at one file (an untranslated body), and
+  // reporting the same file twice would read as two defects in it.
+  const bodyFiles = bodyFilePaths(relativePath, parsed, baseLocale);
+  const baseBodyFile = bodyFiles.get(baseLocale);
+  const fetchedBodies: PageBody[] = await Promise.all(
+    [...new Set(bodyFiles.values())].map(async (file) => {
+      const body = await fetchAt(file);
+      if (body === undefined && strict && file === baseBodyFile) {
+        throw new Error(`${relativePath} references a body fragment "${file}" absent from this revision`);
+      }
+      return { path: file, body: body ?? '' };
+    }),
+  );
+  const baseBodyHtml =
+    baseBodyFile === undefined ? '' : (fetchedBodies.find((b) => b.path === baseBodyFile)?.body ?? '');
+  return pageFromParsedJson(parsed, relativePath, baseLocale, baseBodyHtml, fetchedBodies);
+}
+
 export async function loadJsonPage(
   rootDir: string,
   relativePath: string,
   baseLocale: string = DEFAULT_BASE_LOCALE,
 ): Promise<Page> {
-  const parsed = await safeReadJson(path.resolve(rootDir, relativePath));
-  if (parsed === undefined) return { relativePath, frontmatter: {}, body: '' };
-
-  // Every locale's body file, not just the base locale's: a defect authored into the Dutch
-  // fragment renders on the Dutch page. `body` below still joins the BASE-locale view alone,
-  // so every gate that reads it is unaffected; `bodies` is the additional per-file view.
-  const bodyFiles = bodyFilePaths(relativePath, parsed, baseLocale);
-  // Deduped by PATH, not locale: two locales may point at one file (an untranslated body), and
-  // reporting the same file twice would read as two defects in it.
-  const fetchedBodies: PageBody[] = await Promise.all(
-    [...new Set(bodyFiles.values())].map(async (file) => ({ path: file, body: await readRelative(rootDir, file) })),
-  );
-  const baseBodyFile = bodyFiles.get(baseLocale);
-  const baseBodyHtml =
-    baseBodyFile === undefined ? '' : (fetchedBodies.find((b) => b.path === baseBodyFile)?.body ?? '');
-
-  return pageFromParsedJson(parsed, relativePath, baseLocale, baseBodyHtml, fetchedBodies);
+  const raw = await readRelative(rootDir, relativePath);
+  return fetchJsonPage(relativePath, raw, baseLocale, (file) => readRelative(rootDir, file));
 }
 
 const HREF_RE = /<a\b[^>]*\bhref=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
