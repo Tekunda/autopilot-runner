@@ -172,6 +172,13 @@ runs:
     # RUNNER-INFRA NOTE (see PR): the customer toolchain itself (yarn/pnpm and its own devDeps)
     # is assumed present after corepack; a repo whose start command needs a global CLI beyond
     # this may need an extra install line here.
+    #
+    # THIS BROWSER IS AUTOPILOT'S, AND ONLY AUTOPILOT'S. Playwright resolves a browser by BUILD
+    # REVISION, so the chromium installed here is the one THIS pinned version wants and is invisible
+    # to a tenant suite running the tenant's own Playwright. The `e2e` gate therefore provisions its
+    # own browsers, with the checkout's Playwright, after the heavy stage's install step has
+    # populated node_modules -- which is after every step in this file. Bumping the pin below does
+    # NOT change what a tenant's e2e suite launches. See src/gates/e2e/e2e-gate.ts.
     - name: Provision heavy gate stage
       if: steps.parse-grant.outputs.stage == 'gate' && inputs.gate-mode == 'heavy'
       shell: bash
