@@ -76,10 +76,17 @@ export function parseFrontmatter(raw: string): { frontmatter: Frontmatter; body:
   return { frontmatter, body };
 }
 
-export async function loadPage(rootDir: string, relativePath: string): Promise<Page> {
-  const raw = await readFile(path.resolve(rootDir, relativePath), 'utf8');
+// A markdown page built from RAW TEXT rather than from disk. Markdown needs nothing but
+// parseFrontmatter for this -- the whole page IS the file -- which is why loadPage is now one
+// line over it.
+export function parseMarkdownPage(relativePath: string, raw: string): Page {
   const { frontmatter, body } = parseFrontmatter(raw);
   return { relativePath, frontmatter, body };
+}
+
+export async function loadPage(rootDir: string, relativePath: string): Promise<Page> {
+  const raw = await readFile(path.resolve(rootDir, relativePath), 'utf8');
+  return parseMarkdownPage(relativePath, raw);
 }
 
 // Recursively lists every `.md` file under `<rootDir>/<contentDir>`, relative
@@ -225,6 +232,14 @@ export interface ContentReader {
   classifyPage(relativePath: string): Promise<PageClassification>;
   listContentFiles(): Promise<string[]>;
   loadPage(relativePath: string): Promise<Page>;
+  /**
+   * The same page shape as `loadPage`, from CONTENT THE CALLER ALREADY HOLDS rather than from
+   * the checkout. The seam a base-revision comparison needs: a gate that must decide whether a
+   * PR made a page worse has to read the page as it was at the base ref, and that revision is a
+   * git blob with no path on disk. Synchronous and I/O-free by contract -- a reader that reached
+   * back to the working tree here would silently mix head content into a base-revision page.
+   */
+  parsePage(relativePath: string, raw: string): Page;
   extractLinks(body: string): Link[];
   extractImages(body: string): Image[];
   extractH1s(body: string): string[];
@@ -284,6 +299,7 @@ function createMarkdownReader(opts: ContentReaderOptions): ContentReader {
     classifyPage: async (rel) => classifyMarkdownPage(rel),
     listContentFiles: () => listContentFiles(rootDir, contentDir),
     loadPage: (rel) => loadPage(rootDir, rel),
+    parsePage: parseMarkdownPage,
     extractLinks,
     extractImages,
     extractH1s,
@@ -310,6 +326,7 @@ function createJsonReader(opts: ContentReaderOptions): ContentReader {
     },
     listContentFiles: () => jsonImpl.listJsonContentFiles(rootDir, contentDir),
     loadPage: (rel) => jsonImpl.loadJsonPage(rootDir, rel, baseLocale),
+    parsePage: (rel, raw) => jsonImpl.parseJsonPage(raw, rel, baseLocale),
     extractLinks: jsonImpl.extractJsonLinks,
     extractImages: jsonImpl.extractJsonImages,
     extractH1s: jsonImpl.extractJsonH1s,
@@ -331,6 +348,7 @@ function createAutoReader(opts: ContentReaderOptions): ContentReader {
     classifyPage: (rel) => readerFor(rel).classifyPage(rel),
     listContentFiles: async () => [...(await md.listContentFiles()), ...(await json.listContentFiles())],
     loadPage: (rel) => readerFor(rel).loadPage(rel),
+    parsePage: (rel, raw) => readerFor(rel).parsePage(rel, raw),
     extractLinks: (body) => [...md.extractLinks(body), ...json.extractLinks(body)],
     extractImages: (body) => [...md.extractImages(body), ...json.extractImages(body)],
     extractH1s: (body) => [...md.extractH1s(body), ...json.extractH1s(body)],

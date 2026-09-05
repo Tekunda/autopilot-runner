@@ -471,29 +471,26 @@ export async function linksNotAuthoredHereReason(
   );
 }
 
-export async function loadJsonPage(
-  rootDir: string,
+// The whole of the page shape that is derivable from the PARSED document alone. Split out of
+// loadJsonPage so the same derivation serves a document that is not on disk -- a blob read out of
+// git history, which is how a gate compares a changed page against its base revision. The one
+// thing this cannot do for itself is the sibling `.html` fragments the document REFERENCES: those
+// live beside it in whatever revision it came from, so the caller fetches them and hands them in --
+// `baseBodyHtml` for the base-locale view `body` joins, `fetchedBodies` for the per-file view.
+function pageFromParsedJson(
+  parsed: unknown,
   relativePath: string,
-  baseLocale: string = DEFAULT_BASE_LOCALE,
-): Promise<Page> {
-  const parsed = await safeReadJson(path.resolve(rootDir, relativePath));
-  if (parsed === undefined) return { relativePath, frontmatter: {}, body: '' };
-
+  baseLocale: string,
+  baseBodyHtml: string,
+  fetchedBodies: PageBody[],
+): Page {
   const frontmatter = findJsonMeta(parsed, baseLocale);
 
   const text: string[] = [];
   const hrefs: string[] = [];
   collectCopy(parsed, baseLocale, text, hrefs);
 
-  // Every locale's body file, not just the base locale's: a defect authored into the Dutch
-  // fragment renders on the Dutch page. `body` below still joins the BASE-locale view alone,
-  // so every gate that reads it is unaffected; `bodies` is the additional per-file view.
-  const bodyFiles = bodyFilePaths(relativePath, parsed, baseLocale);
-  // Deduped by PATH, not locale: two locales may point at one file (an untranslated body), and
-  // reporting the same file twice would read as two defects in it.
-  const bodies: PageBody[] = await Promise.all(
-    [...new Set(bodyFiles.values())].map(async (file) => ({ path: file, body: await readRelative(rootDir, file) })),
-  );
+  const bodies: PageBody[] = [...fetchedBodies];
   // The document's own inline copy is a fragment too -- it is where a page that composes
   // sections instead of referencing a `bodyFile` authors its HTML.
   const inline = text.join('\n');
@@ -502,11 +499,57 @@ export async function loadJsonPage(
   // Structured hrefs are appended as bare anchors so extractLinks() sees inline
   // and structured links through one path.
   const anchorTags = hrefs.map((url) => `<a href="${url}"></a>`);
-  const baseBodyFile = bodyFiles.get(baseLocale);
-  const bodyFileHtml = baseBodyFile === undefined ? '' : (bodies.find((b) => b.path === baseBodyFile)?.body ?? '');
-  const body = [...text, bodyFileHtml, ...anchorTags].filter((s) => s.length > 0).join('\n');
+  const body = [...text, baseBodyHtml, ...anchorTags].filter((s) => s.length > 0).join('\n');
 
   return { relativePath, frontmatter, body, bodies };
+}
+
+// A JSON page parsed from RAW TEXT rather than from disk -- the seam a base-revision comparison
+// needs, since a blob out of `git show` has no path to read. Tolerates malformed JSON exactly as
+// safeReadJson does (an empty page, never a throw): a gate that judges content must not turn a bad
+// file into an infra fault.
+//
+// Deliberately does NOT resolve `copy.<locale>.bodyFile`. Reading it would mean reaching back to
+// disk for a sibling file that is the WORKING-TREE revision, silently mixing head content into a
+// base-revision page. Callers that need the body use loadJsonPage; the SEO fields this exists for
+// live in the document itself. `bodies` therefore carries the document's own inline copy alone --
+// that copy IS part of the revision handed in, the referenced fragments are not.
+export function parseJsonPage(
+  raw: string,
+  relativePath: string,
+  baseLocale: string = DEFAULT_BASE_LOCALE,
+): Page {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    return { relativePath, frontmatter: {}, body: '' };
+  }
+  return pageFromParsedJson(parsed, relativePath, baseLocale, '', []);
+}
+
+export async function loadJsonPage(
+  rootDir: string,
+  relativePath: string,
+  baseLocale: string = DEFAULT_BASE_LOCALE,
+): Promise<Page> {
+  const parsed = await safeReadJson(path.resolve(rootDir, relativePath));
+  if (parsed === undefined) return { relativePath, frontmatter: {}, body: '' };
+
+  // Every locale's body file, not just the base locale's: a defect authored into the Dutch
+  // fragment renders on the Dutch page. `body` below still joins the BASE-locale view alone,
+  // so every gate that reads it is unaffected; `bodies` is the additional per-file view.
+  const bodyFiles = bodyFilePaths(relativePath, parsed, baseLocale);
+  // Deduped by PATH, not locale: two locales may point at one file (an untranslated body), and
+  // reporting the same file twice would read as two defects in it.
+  const fetchedBodies: PageBody[] = await Promise.all(
+    [...new Set(bodyFiles.values())].map(async (file) => ({ path: file, body: await readRelative(rootDir, file) })),
+  );
+  const baseBodyFile = bodyFiles.get(baseLocale);
+  const baseBodyHtml =
+    baseBodyFile === undefined ? '' : (fetchedBodies.find((b) => b.path === baseBodyFile)?.body ?? '');
+
+  return pageFromParsedJson(parsed, relativePath, baseLocale, baseBodyHtml, fetchedBodies);
 }
 
 const HREF_RE = /<a\b[^>]*\bhref=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;

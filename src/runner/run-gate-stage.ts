@@ -144,7 +144,11 @@ export interface RunGateStageDeps {
 // RAN but reached no verdict AND still blocks -- it must NOT read as a pass, so it maps
 // to `fail` (and toChecks tags the check `unjudged:true` so the fix loop escalates it
 // to a human instead of burning fix rounds no edit can resolve).
-function toCheckStatus(result: GateResult): CheckStatus {
+// Exported so a gate's own tests can assert the status that actually REACHES THE MERGE GATE, not
+// just the internal GateStatus it returned. The two differ for exactly the case the tiered SEO
+// gates depend on (a judged `warn` publishes a green `pass`), and a test that re-implemented this
+// mapping locally would keep passing on the day the real one changed.
+export function toCheckStatus(result: GateResult): CheckStatus {
   if (result.status === 'fail') return 'fail';
   if (result.status === 'unjudged') return 'fail';
   if (result.status === 'skip') return 'pending';
