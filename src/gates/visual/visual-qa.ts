@@ -26,11 +26,13 @@
 // logic is unit-testable with fakes and never needs a real browser or API key in tests -- but the
 // DEFAULT judge does the real model call (judge.ts), never a stubbed pass.
 //
-// UNJUDGED (the false-green post-mortem): when every page the judge could not score was blocked by
-// a transient rate limit (no real defect found), the gate returns `unjudged`, NOT `warn`. A gate
-// that ran but reached no verdict must not read as a pass even though it's non-blocking -- it fails
-// closed and escalates to a human. `warn` would map to a pass; a green check on a gate that never
-// judged is worse than no gate.
+// NEVER A SILENT PASS (the false-green post-mortem): a page the judge could not score is never
+// reported as a page it scored and liked. What it IS reported as depends on WHY it could not be
+// scored, and the two answers are deliberately different -- `fail` when the judge ran and the page
+// was wrong, or when anything other than a rate limit stopped it, and a fail-open `skip` with
+// `skipReason:'infra'` when the model API itself was unavailable. Neither is `warn` and neither is
+// `pass`. The aggregation at the bottom of `run` says why the rate-limit arm is a skip rather than
+// the merge-blocking `unjudged` it used to be.
 
 import { asGateNotes, createContentReader, selectPages, type ContentFormat } from '../content/reader.ts';
 import type { Gate, GateContext, GateResult } from '../types.ts';
@@ -222,9 +224,10 @@ export function createVisualQaGate(deps: VisualQaDeps = {}): Gate {
       const failures: string[] = [];
       // Pages the vision judge could not score because the model API stayed rate-limited/overloaded
       // even after the judge's own backoff+retries. This is a TRANSIENT INFRA failure, not a visual
-      // defect, so it must not read as one -- it's tracked separately and, when nothing else failed,
-      // makes the gate `unjudged` (see aggregation below): it ran but reached no verdict, so it fails
-      // closed to a human rather than passing the merge on a 429 burst.
+      // defect, so it must not read as one -- it is tracked separately and, when nothing else
+      // failed, makes the gate a fail-open `skip` with `skipReason:'infra'` (see the aggregation
+      // below): the judging infrastructure was down, which is a statement about the provider and
+      // not about this diff.
       const inconclusive: string[] = [];
       try {
         for (const target of targets) {
@@ -262,22 +265,45 @@ export function createVisualQaGate(deps: VisualQaDeps = {}): Gate {
       // Aggregation:
       // - Any real defect (or non-transient error) -> `fail` (blocks the merge). Its findings carry
       //   the inconclusive ones too, so nothing is hidden when the run also hit rate limits.
-      // - No real defect but some page was rate-limited into inconclusive -> `unjudged`: the gate
-      //   RAN but reached no verdict. It is NOT a pass -- a green check on a gate that never judged
-      //   is worse than no gate (the false-green post-mortem). It fails closed and escalates to
-      //   a human, even though the gate is non-blocking; a transient 429 that outlasts the
-      //   retries is the API's failure, but "could not verify" is not "verified fine".
+      // - No real defect but some page was rate-limited into inconclusive -> fail-open `skip`
+      //   (skipReason 'infra'): the judge could not be reached, so the gate evaluated nothing.
+      //   NOT a pass and NOT a fail -- "could not verify" is neither "verified fine" nor "broken".
       // - Everything scored and passed -> `pass`.
       if (failures.length > 0) {
         return { id: VISUAL_QA_GATE_ID, status: 'fail', findings: [...failures, ...inconclusive] };
       }
       if (inconclusive.length > 0) {
-        // Every `inconclusive` entry came from a VisionRateLimitError (the ONLY branch that pushes
-        // to it): the judge could not RUN because the model API stayed rate-limited past its
-        // backoff. That is INFRA-class, not a no-verdict-about-the-page -- tag it so the fix loop
-        // grants one gate-only retry (a 429 may clear) before escalating, instead of escalating a
-        // human straight away. It stays `unjudged`, so it still fails closed and NEVER passes.
-        return { id: VISUAL_QA_GATE_ID, status: 'unjudged', unjudgedReason: 'infra', findings: inconclusive };
+        // COULD-NOT-EVALUATE IS NOT A VERDICT, IN EITHER DIRECTION. Every `inconclusive` entry came
+        // from a VisionRateLimitError, and that catch arm is the ONLY thing that pushes to this
+        // array: judge.ts throws that type exclusively for a 429/529 that survived its own bounded
+        // backoff. So this branch means exactly one thing -- the model API was unavailable and the
+        // judge never ran against these pages. Nothing was examined, so there is nothing to say
+        // about the diff.
+        //
+        // It is reported the way this codebase already reports a gate that did not run: `skip` with
+        // `skipReason:'infra'`, which run-gate-stage's toChecks publishes as `pending` +
+        // `skipped:true` + `skipReason`, carrying the per-page "could not verify" findings. That is
+        // the same shape as layout-gate.ts's own browser-infra arm and serve-and-gate.ts's per-site
+        // skips, and it is loudly not-a-pass: gate-coverage banks nothing for a skipped check, and
+        // gate-verdict-ledger classes an `infra` skip SUSPICIOUS, so a judge that is down on every
+        // promotion still raises `gate_never_fired` instead of going quiet.
+        //
+        // It used to return `unjudged`/`infra`. run-gate-stage maps EVERY unjudged to a
+        // merge-blocking `fail` and to `ok:false` for the whole stage, which turned a rate-limit
+        // burst into a permanent merge block: the QA aggregate is only dispatched after a GREEN
+        // gate stage, so the PR could not merge while all twelve of its findings said "transient
+        // infra issue, not a visual defect", and the bounded infra re-dispatch simply re-ran the
+        // same rate-limited judge for two hours before escalating. Converting an unreachable judge
+        // into a verdict about the code is the bug. That mapping is deliberately UNCHANGED for
+        // every other unjudged producer (a declared-but-absent Python tool, a dead heavy-serve, an
+        // unverifiable pack bundle), where the fault is durable and a human really does have to act.
+        //
+        // THE DEMOTION KEYS ON A TYPED, POSITIVE SIGNAL, never on a catch-all `else` or a bare
+        // exception handler -- so a coding error cannot launder itself into "unjudged" and sail
+        // through. A malformed model response, a missing credential, a 400/401/5xx, a page that
+        // would not render and every other throw go to `failures` and still FAIL, and an exception
+        // escaping this gate entirely is recorded as a `fail` by runGates.
+        return { id: VISUAL_QA_GATE_ID, status: 'skip', skipReason: 'infra', findings: inconclusive };
       }
       return { id: VISUAL_QA_GATE_ID, status: 'pass' };
     },

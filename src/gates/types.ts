@@ -50,15 +50,28 @@ import type { StackProfile } from './stack-profile.ts';
 // site-crawl.test.ts, and `assert.equal(result.noVerdict, true)` in cve-osv.test.ts.
 // All five, because a default cannot decide this for you.
 //
-// `unjudged` is the gate that EXECUTED but reached no verdict (e.g. the vision
-// judge stayed rate-limited past its retry budget). It is distinct from `warn`,
-// which is a report-only *finding*: an unjudged *gate* never counts as a pass,
-// even when the gate is non-blocking -- a gate that reports success when it never
-// judged is worse than no gate. Aggregation maps it to a merge-blocking `fail`,
-// and `unjudgedReason` then decides what happens next: `infra` (the judge could
-// not RUN, e.g. a 429 past its backoff) is retried as an infra fault on a bounded
-// budget, anything else escalates to a human at once -- see toCheckStatus and the
-// fix loop's non-revertable classification.
+// `unjudged` is the gate that EXECUTED but reached no verdict (a declared Python tool that is
+// not importable, a heavy-serve whose build died, a pack bundle that would not verify). It is
+// distinct from `warn`, which is a report-only *finding*: an unjudged *gate* never counts as a
+// pass, even when the gate is non-blocking -- a gate that reports success when it never judged is
+// worse than no gate. Aggregation maps it to a merge-blocking `fail`, and `unjudgedReason` then
+// decides what happens next: `infra` is retried as an infra fault on a bounded budget, anything
+// else escalates to a human at once -- see toCheckStatus and the fix loop's non-revertable
+// classification.
+//
+// THAT BLOCK IS A CLAIM, so do not reach for `unjudged` merely because a gate could not finish.
+// It says a human must act before this diff can merge, and it is right for the producers above:
+// each is a durable fault (an absent tool, a broken build, an unverifiable bundle) that no re-run
+// clears on its own. A gate stopped by a provider being momentarily UNAVAILABLE -- visual-qa's
+// vision API answering 429/529 past the judge's own backoff -- is the opposite: it says nothing
+// about the diff, a re-run usually just works, and blocking on it converts an outage into a
+// permanent merge block (a rate-limit burst once held a PR for over two hours, because the QA
+// aggregate is only dispatched after a GREEN gate stage). That case belongs in `skip` with
+// `skipReason:'infra'` -- non-blocking, still never a pass, still SUSPICIOUS in the verdict
+// ledger. See visual-qa.ts's and layout-gate.ts's aggregation for the shape, and note that the
+// demotion must key on a TYPED, narrow signal of unavailability (`err instanceof
+// VisionRateLimitError`), never on a catch-all: a crash, a malformed response or any unexpected
+// exception must still fail, or a coding error launders itself into a non-verdict.
 export type GateStatus = 'pass' | 'fail' | 'skip' | 'warn' | 'unjudged';
 
 export interface GateContext {
@@ -147,9 +160,10 @@ interface GateResultFields {
   // artifact (ci-runner parseGateReport) so the promotion record can tell a benign skip from a
   // suspicious perpetual one.
   skipReason?: SkipReason;
-  // Set on `status:'unjudged'` to say WHY the gate reached no verdict. 'infra': the judge could
-  // not RUN (the vision model stayed rate-limited/429 past its backoff -- transient infra); a
-  // re-run may succeed, so downstream grants one gate-only retry before escalating. 'content':
+  // Set on `status:'unjudged'` to say WHY the gate reached no verdict. 'infra': the check itself
+  // could not RUN (a heavy-serve whose install/build died, a declared tool the bootstrap could not
+  // install); a re-run may succeed, so downstream grants one gate-only retry before escalating.
+  // A merely UNAVAILABLE provider is not this -- see the GateStatus note above. 'content':
   // the judge RAN but reached no verdict about the page; a re-run won't help, so escalate now.
   // Absent -> treated as 'content'. It NEVER makes an unjudged pass -- it only routes escalation.
   unjudgedReason?: 'infra' | 'content';
