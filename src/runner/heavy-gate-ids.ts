@@ -14,8 +14,9 @@ export const URL_BOUND_HEAVY_GATE_IDS = ['seo-site-crawl', 'visual-qa', 'e2e', '
 // site, but whose RULES are per-brand (banned phrases, competitor lists, commercial-link patterns,
 // locale layout). A dual-brand monorepo needs `banned-phrase` to apply one brand's long phrase
 // list to that brand's files and the other brand's much shorter one to its own, which a single
-// unsuffixed run with base config cannot express -- the gap that grew a private `scopes` option
-// inside banned-phrase and got copied into competitor-mentions.
+// unsuffixed run with base config cannot express -- the gap that once grew a private `scopes`
+// option inside banned-phrase and got it copied into competitor-mentions. Both are gone: with the
+// per-site split closing the gap, nothing reads `scopes` any more.
 //
 // So these run ONCE PER SITE like the URL-bound ones, with that site's `gateConfig` overlaid and
 // a ` (<site>)` check suffix -- but WITHOUT a server, and with `ctx.changedFiles` narrowed to the

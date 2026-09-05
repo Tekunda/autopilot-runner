@@ -513,7 +513,7 @@ function selectionNotes(
 // The alias map resolves a LEGACY key onto the canonical gate (gateConfigFor), which is the common
 // case and needs no note. It does not resolve the reverse: config written under the CURRENT name
 // while an unexpired grant still names the old one. That is a real shortfall and the same failure
-// mode scopesOverlapNote exists for, so it is reported rather than dropped.
+// mode inertScopesNote exists for, so it is reported rather than dropped.
 //
 // Computed for EVERY site, outside the per-site loop, because the worst case is the one where that
 // loop never runs: the grant names none of these gates at all (the tenant is not entitled, or the
@@ -551,25 +551,23 @@ function baseConfigFor(grant: ExecutionGrant, deps: RunHeavyGateStageDeps, id: s
   return resolved && typeof resolved === 'object' ? (resolved as Record<string, unknown>) : {};
 }
 
-// The per-site overlay is a SHALLOW merge, so a base config that still carries the pre-per-site
-// `scopes` workaround keeps it alongside the site's own keys -- and a gate that resolves its scope
-// FIRST then reads the scope's values makes the per-site keys a silent no-op for every file a
-// scope claims. The site would be graded by the older mechanism while its config sits there
-// looking applied, which is the one outcome worse than either mechanism alone.
+// The pre-per-site `scopes` workaround -- a private per-path rule list some gate configs still
+// carry -- has been REMOVED from the gates. Nothing reads the key any more, so a config that still
+// carries one is running on its top-level rule list and the key changes nothing at all.
 //
-// Reported, not resolved: which of the two the tenant meant is a config decision, and guessing it
-// here would hide the very drift this exists to surface. The remedy is to move the rules into the
-// per-site gateConfig and drop the base `scopes` in the SAME write, so the two never both apply.
-function scopesOverlapNote(id: string, siteName: string, base: Record<string, unknown>, perSite: Record<string, unknown>): string | undefined {
-  const scopes = base['scopes'];
-  if (!Array.isArray(scopes) || scopes.length === 0) return undefined;
-  const keys = Object.keys(perSite);
-  if (keys.length === 0) return undefined;
+// Still reported, because dead config that LOOKS applied is exactly what this stage's other notes
+// exist to surface: a tenant reading a rule list cannot tell an obeyed one from an ignored one, and
+// the key will otherwise sit there being mistaken for the reason a file was (or was not) flagged.
+//
+// Keyed on the key's PRESENCE, not on any overlap with per-site config: an inert key is inert
+// whether or not the site also configures the gate, and keying on the overlap would hide it from
+// the one tenant most in need of the news -- the one that never moved its rules to per-site config.
+function inertScopesNote(id: string, base: Record<string, unknown>): string | undefined {
+  if (base['scopes'] === undefined) return undefined;
   return (
-    `note: ${id} has BOTH a base \`scopes\` list (${scopes.length} entr${scopes.length === 1 ? 'y' : 'ies'}) and ` +
-    `per-site config for ${siteName} (${keys.join(', ')}). The gate resolves its scope first, so for every file a ` +
-    'scope claims the per-site values are ignored. Move the rules into the per-site gateConfig and drop the base ' +
-    '`scopes` in the same change.'
+    `note: the config for ${id} still carries a \`scopes\` key. It is IGNORED -- the per-path rule ` +
+    'mechanism it configured no longer exists, so the gate ran on its top-level rule list and the key ' +
+    'changed nothing. Delete it; per-path rules come from per-site gateConfig now.'
   );
 }
 
@@ -715,8 +713,8 @@ async function runPerSiteHeavyGates(
       for (const id of siteScopedIds) {
         const perSite = { ...(gateConfigFor(id, site.gateConfig) ?? {}) };
         configOverlay[id] = perSite;
-        const overlap = scopesOverlapNote(id, site.name, baseConfigFor(grant, deps, id), perSite);
-        if (overlap) configNotes.set(id, overlap);
+        const inertScopes = inertScopesNote(id, baseConfigFor(grant, deps, id));
+        if (inertScopes) configNotes.set(id, inertScopes);
       }
       const runNotes = selectionNotes(site, sites, selection);
       if (stranded) {
