@@ -10,8 +10,8 @@
 // §11 CONSTRAINT (load-bearing): this stage crawls/screenshots a SETTLED LOCAL SERVER -- a stable
 // build we just produced and started -- NOT a mid-rollout production deploy. That is the whole
 // point: judging a settling deploy flags exactly the transient asset-skew / half-translated
-// errors the serpent incident hit. A local `yarn build` + `yarn start` is atomic and settled by
-// the time wait-for-ready returns, so the heavy gates see a stable site.
+// errors a prior mid-rollout incident hit. A local `yarn build` + `yarn start` is atomic and
+// settled by the time wait-for-ready returns, so the heavy gates see a stable site.
 //
 // The exact install/build/start commands are NOT hardcoded -- they come from tenant config (the
 // same command strings a command gate uses, e.g. `yarn build:<site>` / `yarn start:<site>`), so

@@ -1,6 +1,6 @@
 // Shared markdown+frontmatter parsing for content-scanning gates. Pages are
 // markdown files with a YAML-ish frontmatter block (title/description/
-// keyword), the format the Website pipeline's content pages use.
+// keyword), the format a git-backed content tree's pages use.
 //
 // This lives under src/gates/, NOT src/packs/, on purpose. It is commodity
 // parsing (frontmatter, links, images, page selection) with no licensed
@@ -127,8 +127,8 @@ export function isContentFile(rootDir: string, contentDir: string, relativePath:
 }
 
 // Names that live INSIDE a content tree but are documentation ABOUT it rather than
-// pages OF it, so no route exists to render or check. The gated repo deliberately
-// keeps `content/site/README.md` as its content-model documentation, so a PR that
+// pages OF it, so no route exists to render or check. A gated repo commonly keeps a
+// README inside the content tree as its content-model documentation, so a PR that
 // touches one of these is routine, not an edge case. Matched case-insensitively on
 // the basename up to its first dot, because these are conventions (`Readme.md`,
 // `README.en.md`) rather than exact filenames.
@@ -376,10 +376,10 @@ export interface PageSelection {
    * still applies to them -- but a caller must not assert anything about their METADATA.
    *
    * "We could not confidently read this document" and "this document's title is missing" are
-   * different statements, and only the first one is true. Website's legal pages carry ar/fr/de
-   * copy while the English body comes from Notion; grading their base-locale metadata reported
-   * three missing titles and three missing descriptions that no one could act on, because the
-   * title is not absent, it is simply not here.
+   * different statements, and only the first one is true. One tenant's legal pages carry ar/fr/de
+   * copy while the English body comes from an external CMS; grading their base-locale metadata
+   * reported three missing titles and three missing descriptions that no one could act on, because
+   * the title is not absent, it is simply not here.
    */
   inconclusive: Set<string>;
 }

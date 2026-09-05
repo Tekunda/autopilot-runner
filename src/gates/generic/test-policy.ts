@@ -28,7 +28,7 @@
 //     and the gate becomes a silent no-op. Converting a false green into a silent no-op is not
 //     a fix. The ledger's reach has since grown -- a skip tagged `invalid-config` now alarms
 //     (`gate_config_invalidated`) and drops out of the regression set even for a gate with a
-//     long verdict history (#3794), where before `lastRealVerdictAt` being sticky forever
+//     long verdict history, where before `lastRealVerdictAt` being sticky forever
 //     silenced every signal -- but an operator alarm on a merged promotion is a different thing
 //     from blocking the PR that broke it, which is what this defect needs.
 //
@@ -43,12 +43,12 @@
 // express. It works for JS/TS, where the test sits next to the source, and it is structurally
 // incapable of expressing the near-universal Python layout, where it does not:
 //
-//     invoice_wizard/collectors/gmail.py   ->   tests/test_gmail.py
+//     <pkg>/collectors/reader.py   ->   tests/test_reader.py
 //
 // The test moves to a DIFFERENT DIRECTORY and takes a PREFIX, not a suffix. No value of
 // `sourceDirs`, `sourceExtensions`, `testMarkers` or `exemptSuffixes` could name it, which is why
-// docs/runbooks/invoices-wizard-tenant.md §4 lists this gate as a hard blocker for the live Python
-// tenant and why docs/language-support-extension-points.md §3 says the model itself has to change.
+// the Python tenant runbook lists this gate as a hard blocker for the live Python tenant and why
+// docs/language-support-extension-points.md §3 says the model itself has to change.
 // `blocking:false` was NOT an available workaround: an `unjudged` gate always blocks
 // (run-gate-stage's `ok` predicate), so the tenant needed BOTH a `sourceDirs` that exists AND
 // `blocking:false` just to stop the gate wedging every PR -- two coupled config edits to buy a
@@ -123,8 +123,8 @@ export const DEFAULT_TEST_POLICY_CONFIG: TestPolicyGateConfig = {
 
 // Python's defaults, built from what the DETECTOR found rather than from a convention this file
 // asserts. `sourceRoots` is `src/` for a src-layout project and the top-level `__init__.py`
-// packages otherwise (stack-profile.ts pythonSourceRoots), which is `invoice_wizard` on the live
-// tenant. `testRoots` is `tests`/`test` when present.
+// packages otherwise (stack-profile.ts pythonSourceRoots), which on the live Python tenant is its
+// single `<pkg>` root. `testRoots` is `tests`/`test` when present.
 //
 // EMPTY sourceRoots is the branch that matters: it means "no conventional root is present" (a flat
 // repo of `foo.py` + `tests/test_foo.py`), NOT "this repo has no sources". Falling back to the
@@ -135,8 +135,8 @@ export function pythonTestPolicyDefaults(profile: StackProfile): TestPolicyGateC
   // A TEST ROOT IS NOT A SOURCE ROOT, even when the detector reports it as one. `pythonSourceRoots`
   // returns every top-level directory holding an `__init__.py`, and `tests/__init__.py` is
   // completely ordinary -- so `tests` would arrive here as a source root, and then every helper in
-  // it (`conftest.py` is exempt, but `design_oracle.py`, `pdf_fixture.py`, `node_harness.py` are
-  // not) would demand a `tests/test_design_oracle.py`. Excluding the detected test roots is not
+  // it (`conftest.py` is exempt, but an ordinary shared helper -- a fixture builder, a harness --
+  // is not) would demand a companion test of its own. Excluding the detected test roots is not
   // second-guessing the detector: it reported both facts, and this gate is the consumer that has to
   // decide which one wins for "things that need a test".
   const detectedTestRoots = new Set(profile.testRoots);
@@ -270,8 +270,8 @@ function templatesFromMarkers(markers: readonly string[]): string[] {
 const SCOPE_KEYS = ['sourceDirs', 'sourceExtensions', 'testMarkers', 'exemptSuffixes', 'companionTemplates'] as const;
 
 // The stack supplies the defaults ONLY when the tenant scoped nothing. Tenant scope wins WHOLE, not
-// key by key: an operator who named this repo's source roots and silently got `force-app/` or
-// `invoice_wizard/` bolted on beside them would be policing a scope nobody approved, and would have
+// key by key: an operator who named this repo's source roots and silently got `force-app/` or a
+// detected `<pkg>/` bolted on beside them would be policing a scope nobody approved, and would have
 // no way to say "only these". Detection informs the default; it never edits a decision someone made.
 //
 // Keyed on the SCOPE keys, not on `specConfig` being present at all. `gateConfig['test-policy']`
@@ -397,8 +397,8 @@ function isInScope(file: string, config: TestPolicyGateConfig): boolean {
 }
 
 // Expands the companion templates for one source file. `src/foo/bar.ts` with
-// '{root}{dir}{name}.test{ext}' -> `src/foo/bar.test.ts`; `invoice_wizard/collectors/gmail.py`
-// with 'tests/test_{name}{ext}' -> `tests/test_gmail.py`.
+// '{root}{dir}{name}.test{ext}' -> `src/foo/bar.test.ts`; `<pkg>/collectors/reader.py`
+// with 'tests/test_{name}{ext}' -> `tests/test_reader.py`.
 //
 // The companion may carry ANY configured source extension, not only the changed file's own:
 // a test harness is routinely written in a different language from the thing it tests (a

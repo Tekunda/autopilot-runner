@@ -1,12 +1,11 @@
-// The runner's BUNDLED gate catalog -- and, as of the public-exposure fix, the whole of it.
+// The runner's BUNDLED gate catalog -- and, as of the packaging fix, the whole of it.
 //
-// This module used to `import` the twelve deterministic pack gates statically from
-// ../packs/**. That single fact forced src/packaging/build-runner-dist.ts to copy 18 licensed
-// pack files into runner-dist/, which is mirrored verbatim into the PUBLIC repo
-// Tekunda/autopilot-runner on every release -- thousands of lines of paid gate logic, readable
-// by anyone. Those imports are gone and must not come back: src/runner/no-packs-import.test.ts
-// and src/packaging/build-runner-dist.test.ts both fail CI on ANY src/packs import from the
-// runner or its distribution.
+// This module used to `import` the deterministic pack gates statically. That single fact made
+// licensed gate logic a dependency of runner-dist/, which is mirrored verbatim into the PUBLIC
+// repo Tekunda/autopilot-runner on every release, and so pointed the packaging step at source
+// that must not be published. Those imports are gone and must not come back:
+// src/runner/no-packs-import.test.ts and src/packaging/build-runner-dist.test.ts both fail CI on
+// ANY src/packs import from the runner or its distribution.
 //
 // What still lives here:
 //   - the always-on GENERIC gates -- commodity checks with no licensed IP (npm-audit

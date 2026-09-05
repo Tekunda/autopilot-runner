@@ -359,10 +359,10 @@ export async function computeChangedFiles(baseRef: string, cwd: string = process
   //
   // `--no-renames` is not cosmetic either, and it is the same class of silent false green. With
   // rename detection on (git's default), a moved file is reported as ONE path -- the destination.
-  // So `git mv apps/tekunda-web/components/Foo.tsx packages/ui/Foo.tsx` yields a changed-file list
-  // containing NOTHING under `apps/tekunda-web/`, even though the diff deletes a file from it. Every
+  // So `git mv apps/web/components/Foo.tsx packages/ui/Foo.tsx` yields a changed-file list
+  // containing NOTHING under `apps/web/`, even though the diff deletes a file from it. Every
   // path-scoped consumer then concludes the directory it guards was untouched: a command gate
-  // scoped to `apps/tekunda-web/**` skips, a site scoped to it is not served, and the salesforce/
+  // scoped to `apps/web/**` skips, a site scoped to it is not served, and the salesforce/
   // python/lwc selectors miss the source they exist to find. Turning detection off reports both
   // sides of the move, which is what a SCOPE question needs -- it asks which trees this diff
   // touched, and a move touches two.

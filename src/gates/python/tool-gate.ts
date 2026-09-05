@@ -2,7 +2,7 @@
 //
 // WHY THESE ARE GENERIC GATES AND NOT TENANT COMMAND GATES. `CommandGateSpec` runs a shell line
 // from `PackConfig.commandGates`, which is a TENANT RECORD -- somebody has to write the line, per
-// tenant, by hand, including the PEP 668 venv bootstrap. That is the state the Invoices-Wizard
+// tenant, by hand, including the PEP 668 venv bootstrap. That is the state the Python tenant
 // runbook documents, and it is the thing this change exists to remove: "a pyproject.toml repo
 // gets the Python gate set with zero hand configuration" is only achievable if the gates are in
 // the signed grant for EVERY tenant, because `enabledGateSpecs` runs server-side and the control
@@ -32,9 +32,10 @@
 //   tool exited zero                    -> pass
 //
 // There is NO path from an absent tool, an unreadable output, or a bootstrap that never completed
-// to `pass`. That is the non-negotiable this repo has been burned by (TEK-3691) and it is why the
-// probe in step 5 exists at all rather than trusting the tool's own exit code: a missing tool exits
-// 1, which is indistinguishable from "the tool found defects" by exit code alone.
+// to `pass`. That is the non-negotiable this repo has been burned by (the false-green post-mortem)
+// and it is why the probe in step 5 exists at all rather than trusting the tool's own exit code: a
+// missing tool exits 1, which is indistinguishable from "the tool found defects" by exit code
+// alone.
 //
 // TWO THINGS THE CHECKOUT MUST NOT BE ABLE TO DO BY ACCIDENT OR BY A ONE-FILE EDIT, both closed in
 // toolchain.ts and relied on here: shadow the toolchain (nothing runs `python -m` with the checkout
@@ -87,7 +88,7 @@ export interface PythonToolGateSpec {
   // The gate id AND the check name it reports under. Deliberately names the TOOL (`python-ruff`,
   // not `python-lint`): the first question asked of a red Python check is "which tool said that",
   // and it also keeps these ids clear of the `python-lint`/`python-tests` command-gate names the
-  // Invoices-Wizard runbook proposes, so a tenant that already hand-wrote those does not collide
+  // Python tenant runbook proposes, so a tenant that already hand-wrote those does not collide
   // with these (run-gate-stage skips a command spec whose id is already registered -- a silent
   // swallow this naming avoids rather than relies on).
   id: string;

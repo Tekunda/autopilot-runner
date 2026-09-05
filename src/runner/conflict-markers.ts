@@ -4,7 +4,7 @@
 // cheerfully stage a file that still contains `<<<<<<< HEAD`, so an agent that gave up halfway
 // through a conflict resolution -- or a conflict-resolve stage that merged, hit a conflict and
 // then "finished" -- produced a commit, a force-push and a PR whose diff is literal merge
-// markers. The Website pipeline this replaced had this guard; Autopilot shipped without it.
+// markers. The shell pipeline this replaced had this guard; Autopilot shipped without it.
 //
 // This is the guard, in TypeScript rather than as bash inside action.yml, for two reasons: it is
 // testable (action.yml's shell has no unit tests, only string-presence assertions), and the

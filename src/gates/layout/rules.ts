@@ -1,9 +1,10 @@
-// The PURE, deterministic core of the layout-rules gate (TEK-3691 post-mortem "Deterministic
-// layout rules, declared per tenant and repo"). It knows nothing about a browser: it turns a
-// declared rule set into a MEASUREMENT SPEC (the DOM queries whose geometry the in-page routine
-// must collect) and, given the raw getBoundingClientRect numbers that routine returns, decides
-// which rules are violated. No model, no tokens, no network -- just arithmetic on rectangles, so
-// it is exhaustively unit-testable with plain geometry objects and can never be rate-limited.
+// The PURE, deterministic core of the layout-rules gate (the false-green post-mortem's
+// "Deterministic layout rules, declared per tenant and repo"). It knows nothing about a browser: it
+// turns a declared rule set into a MEASUREMENT SPEC (the DOM queries whose geometry the in-page
+// routine must collect) and, given the raw getBoundingClientRect numbers that routine returns,
+// decides which rules are violated. No model, no tokens, no network -- just arithmetic on
+// rectangles, so it is exhaustively unit-testable with plain geometry objects and can never be
+// rate-limited.
 //
 // Every threshold comparison is at the EDGE: a measured value EQUAL to its threshold PASSES; only
 // a value strictly past it fails (503 vs 872 with max_px 160 -> 369px delta > 160 -> fail; a delta

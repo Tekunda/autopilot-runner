@@ -2,7 +2,7 @@
 // P5): send a rendered page to a Claude vision model with the tenant's judging criteria, get
 // back a pass/fail verdict. This is the ONE place a heavy gate legitimately calls a model -- the
 // criteria are tenant config (signed), not bundled IP, so it stays generalizable Autopilot
-// mechanism rather than Website-specific logic.
+// mechanism rather than tenant-specific logic.
 //
 // VisionJudge is an INTERFACE first, so the gate is unit-testable with a fake judge and never
 // needs a live API key in tests. The default implementation (createAnthropicVisionJudge) does

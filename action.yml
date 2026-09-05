@@ -749,7 +749,8 @@ runs:
     # Its only artifact was the AGENT-written plan.json, uploaded by a step with no always() --
     # so a run the model provider REFUSED, where no agent ever executed and no plan was written,
     # reported nothing but a `failure` conclusion, and the control plane charged it to the PR's
-    # content repair budget (Tekunda/Website external-pr-1534, run 33694525003).
+    # content repair budget. (Observed live on a tenant repo; the run id and the measured spend
+    # are kept out of this file -- see the internal record.)
     #
     # always() is the entire point: the runs this exists for are the failing ones.
     #

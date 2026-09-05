@@ -3,8 +3,8 @@
 //
 // THE FAILURE THIS FILE EXISTS TO PREVENT: an audit that could not RUN must never be reportable
 // as "clean". The first version ran `npm audit --json` unconditionally and did
-// `report.vulnerabilities ?? {}`. On a Yarn tenant (Tekunda/Website: `yarn.lock`, no
-// `package-lock.json`) npm exits non-zero and prints a perfectly VALID JSON error document --
+// `report.vulnerabilities ?? {}`. On a Yarn tenant (`yarn.lock`, no `package-lock.json`)
+// npm exits non-zero and prints a perfectly VALID JSON error document --
 //   {"error":{"code":"ENOLOCK","summary":"This command requires an existing lockfile.",...}}
 // -- so `JSON.parse` succeeded, `?? {}` turned the missing `vulnerabilities` key into zero
 // advisories, and the gate reported `pass` on every run while auditing nothing at all. A known

@@ -88,8 +88,8 @@ export interface RunGateStageDeps {
    */
   onlyGateIds?: ReadonlySet<string>;
   /**
-   * Appended to each reported check's `name` (e.g. ` (tekunda)`), so a per-site heavy run
-   * publishes disambiguated `seo-site-crawl (tekunda)` / `(serpent)` checks -- the matrix-variant
+   * Appended to each reported check's `name` (e.g. ` (marketing)`), so a per-site heavy run
+   * publishes disambiguated `seo-site-crawl (marketing)` / `(docs)` checks -- the matrix-variant
    * shape Track F's required-check matcher (customer-checks.ts matchesRequired) already accepts.
    * Presentation only: the gate's own id, config and blocking verdict are unchanged. Absent ->
    * the bare gate id is the check name.
@@ -229,8 +229,8 @@ const TRANSIENT_BUNDLE_FAILURES: ReadonlySet<string> = new Set([
 // everything resolved, or a GateResult describing the failure when the stage must fail.
 //
 // The deterministic pack gates (SEO crawl/changed-file, docs coverage, the security regex
-// review) ride in the grant as ordinary `{kind:'generic'}` specs, but the runner no longer
-// carries their code: it is licensed IP and runner-dist/ is published to a PUBLIC repo (see
+// review) ride in the grant as ordinary `{kind:'generic'}` specs, but the runner does not carry
+// their code: it is licensed IP and runner-dist/ is published to a PUBLIC repo (see
 // ./pack-bundle.ts). So an id the runner's own registry cannot resolve is fetched from the
 // private bundle the SIGNED grant points at, checksum-verified against the SIGNED digest,
 // and only then registered -- and only for ids the signed gateSpecs already named.
@@ -433,7 +433,7 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
   // An `unjudged` gate ALWAYS blocks -- report-only (`blocking:false`) can excuse a *finding*
   // fail (the gate judged and reported a defect it's non-blocking about), but NEVER a gate that
   // reached no verdict at all. A green stage on a gate that never ran is worse than no gate
-  // (post-mortem TEK-3691), so nonBlockingIds cannot rescue it.
+  // (the false-green post-mortem), so nonBlockingIds cannot rescue it.
   // A REPORT MISSING A GATE MUST NOT BE GREEN. `[].every(...)` is `true`, so a stage that
   // produced nothing at all resolved `result: 'pass'` with `checks: []` -- and the same hole is
   // there per-gate: the registry only iterates gates it HAS, so a signed spec id that resolves

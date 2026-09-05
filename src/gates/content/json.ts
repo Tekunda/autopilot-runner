@@ -1,6 +1,6 @@
-// JSON content adapter for the Website content tree. Website's pages are not
+// JSON content adapter for a git-backed content tree whose pages are not
 // markdown-with-frontmatter but JSON documents under a content dir
-// (`content/site/pages/**.json`, `content/site/articles/**.json`): per-locale
+// (`<contentDir>/pages/**.json`, `<contentDir>/articles/**.json`): per-locale
 // SEO lives in `seo.<locale>.{title,description}`, per-locale copy in nested
 // `copy.<locale>.{title,summary,description,body,...}` (inline HTML), and an
 // article's body may be an HTML file referenced by `copy.<locale>.bodyFile`.
@@ -30,8 +30,8 @@ import type {
 export const DEFAULT_BASE_LOCALE = 'en';
 
 // True if `relativePath` is a `.json` file inside `<rootDir>/<contentDir>`. A
-// tenant scopes which JSON counts as a page via `contentDir` (e.g.
-// `content/site/pages`), mirroring how the markdown reader scopes `.md`.
+// tenant scopes which JSON counts as a page via `contentDir` (e.g. a
+// `content/pages` directory), mirroring how the markdown reader scopes `.md`.
 export function isJsonContentFile(rootDir: string, contentDir: string, relativePath: string): boolean {
   if (!relativePath.endsWith('.json')) return false;
   const abs = path.resolve(rootDir, relativePath);
@@ -93,7 +93,7 @@ function rootLocaleBlock(
 }
 
 // The base-locale SEO block (`seo.<baseLocale>`), searched depth-first so a page
-// that nests its SEO still resolves. Website keeps it at the document root.
+// that nests its SEO still resolves. The surveyed tree keeps it at the document root.
 function findSeo(node: unknown, baseLocale: string): Record<string, unknown> | undefined {
   if (Array.isArray(node)) {
     for (const child of node) {
@@ -169,26 +169,26 @@ export function findJsonMeta(parsed: unknown, baseLocale: string): Frontmatter {
 
 // The keys that hold a structured link TARGET in this content model. `href` alone was the
 // whole list, which silently dropped every link this tree expresses some other way: a
-// section item's button target is `cta` (`sections[].items[].cta`, rendered as
-// `href={normalizeSerpentLink(item.CTA)}`), and 198 relative `cta` links across 36 pages --
-// 10 of 11 compare pages, all 3 migrate pages, the Serpent home page -- were counted as zero
+// section item's button target is `cta` (`sections[].items[].cta`, passed through the app's own
+// link normaliser), and on a large content tree that accounted for a few hundred relative links
+// across dozens of pages -- whole page families, the home page included -- being counted as zero
 // outbound links. That, not "React renders these CTAs so the data has no links", is why
 // section-composition pages looked link-less.
 //
-// The list is what a survey of the tree ACTUALLY found, not a guess at what a CMS might use:
+// The list is what a survey of a real tree ACTUALLY found, not a guess at what a CMS might use:
 // `link`, `url`, `to` and `buttonHref` do not occur here and are deliberately absent.
 // Excluded on purpose: `src` (image sources -- extractJsonImages' job, and counting art as an
 // outbound link would inflate every page), `body`/`subtitle`/`scriptCode` (prose and code that
 // merely CONTAIN URL-ish text; the HTML in them is already scanned by extractJsonLinks), and
-// `route` (screenshot-capture metadata in help-center/_screen-map.json, which is not a
-// rendered link and not even a document).
+// `route` (screenshot-capture metadata in a capture manifest, which is not a rendered link
+// and not even a document).
 const LINK_KEYS = ['href', 'cta', 'ctaUrl', 'caseHref', 'demoUrl', 'secondaryButton', 'secondaryButtonSlug'];
 
 // Whether a value under a link key is a link TARGET rather than link TEXT. The distinction is
 // load-bearing, not defensive: `cta` carries a URL at `items[].cta` and a LOCALIZED BUTTON
-// LABEL at `items[].copy.<locale>.cta` -- 330 of its values in this tree are prose ("Explore
-// Task-Based Workflow in Serpent"). Counting those as links would replace one wrong number
-// with another.
+// LABEL at `items[].copy.<locale>.cta` -- in the surveyed tree, hundreds of its values are
+// prose ("Explore the task-based workflow"). Counting those as links would replace one wrong
+// number with another.
 //
 // A leading `//` is REFUSED. Every such value in the tree is a code comment inside a `body` or
 // `scriptCode` field (`// Bad: SOQL inside a loop`), never a protocol-relative URL -- and a
@@ -234,7 +234,7 @@ function collectCopy(
   }
 
   // Every child is recursed into, link keys included, and that is deliberate: `cta` holds a URL
-  // STRING in 724 places and a nested COPY OBJECT (`{title, sub, primary}`) in 86 others. Skipping
+  // STRING in most places and a nested COPY OBJECT (`{title, sub, primary}`) in the rest. Skipping
   // the key name -- as this loop used to do for `href` -- would drop that copy out of the body the
   // editorial gates scan. Recursing into a string is already a no-op (the guard above returns), so
   // there is nothing to skip and nothing to lose.
@@ -244,8 +244,8 @@ function collectCopy(
 }
 
 // The `bodyFile` each locale of a document declares, as repo-relative paths keyed by locale.
-// The file is resolved beside the page JSON (Website stores the `.html` next to the article
-// `.json`). Locales are returned in authored order.
+// The file is resolved beside the page JSON (the `.html` sits next to the article `.json`).
+// Locales are returned in authored order.
 function bodyFilePaths(relativePath: string, parsed: unknown, baseLocale: string): Map<string, string> {
   const out = new Map<string, string>();
   const copy = (parsed as Record<string, unknown> | null)?.copy;
@@ -307,9 +307,9 @@ export async function safeReadJson(abs: string): Promise<unknown | undefined> {
 //
 // A THIRD case, and the one that matters most in practice: a JSON file under the content
 // dir that is not a DOCUMENT at all. A content tree holds config, navigation trees and
-// ledgers alongside its pages -- Website keeps a DataForSEO keyword ledger at
-// `content/site/globals/seo-targets.json` that nearly every daily-blog commit touches --
-// and a ledger has no title, no meta description and no body to link out of. Auditing one
+// ledgers alongside its pages -- a keyword-targeting ledger under a `globals/` directory
+// that nearly every content commit touches, say -- and a ledger has no title, no meta
+// description and no body to link out of. Auditing one
 // as a page is not a strict check, it is a wrong one: it produced "missing title" and
 // "0 internal links" on a file where those words mean nothing, on every content PR.
 //
@@ -421,14 +421,14 @@ export async function classifyJsonDocument(
 //      empty. Sections carrying only an `id` are shared bands (`final-cta`) resolved from
 //      elsewhere and are not this page's content.
 //
-// Both matter. `serpent/tools.json` satisfies (1) -- there is a `tools/` directory -- but its
-// `tools-list` section carries three items it authored itself, so it is a real page that really
-// should link, and it is NOT excluded. Detail pages like `glossary/2gp.json` fail (1): nothing
-// sits under them.
+// Both matter. A `tools.json` beside a `tools/` directory satisfies (1) -- but if its
+// `tools-list` section carries items it authored itself, it is a real page that really should
+// link, and it is NOT excluded. A detail page like `glossary/<term>.json` fails (1): nothing
+// sits under it.
 //
-// The route slug is deliberately NOT used to find the children: slugs are inconsistent in this
-// tree (`serpent/compare/copado` is fully qualified, `automations` is bare), so a slug-prefix
-// walk misses half the hubs. The directory layout is the reliable fact.
+// The route slug is deliberately NOT used to find the children: slugs are inconsistent in a real
+// tree (some are fully qualified, `<section>/<group>/<page>`, others are a bare leaf), so a
+// slug-prefix walk misses half the hubs. The directory layout is the reliable fact.
 //
 // COVERAGE HANDOFF, so the next reader knows this is not a hole: these pages' outbound links are
 // visible in the RENDERED DOM, and that is where they are asserted -- seo-site-crawl, which sees
@@ -602,8 +602,8 @@ export function extractJsonH1s(body: string): string[] {
   return headings;
 }
 
-// The route a JSON page serves: its `slug` (Website stores the full route slug,
-// e.g. "serpent/compare/copado"), falling back to the content-relative path.
+// The route a JSON page serves: its `slug` (the full route slug, e.g.
+// "<section>/<group>/<page>"), falling back to the content-relative path.
 export async function jsonPageRoute(
   rootDir: string,
   contentDir: string,
@@ -623,19 +623,19 @@ export async function jsonPageRoute(
 // ---------------------------------------------------------------------------
 // Indexed records: the per-locale, per-route view a collision check needs.
 //
-// Two document shapes live in one Website content tree and they carry their
+// Two document shapes live in one content tree and they carry their
 // title in DIFFERENT places, so both are read here:
 //
 //   article  root `copy.<locale>.{title,seoTitle,publicSlug,bodyFile}`, routed by
 //            the `scopes` array (one route per scope -- an article carrying two
 //            scopes really is two indexable URLs).
 //   page     root `seo.<locale>.{title,description}` plus a root `slug` that is
-//            the FULL route ("serpent/compare/copado"), so the segment is its last
+//            the FULL route ("<section>/<group>/<page>"), so the segment is its last
 //            path element and the route is everything before it.
 //
 // The effective title is `seoTitle || title` for an article and `seo.<loc>.title`
 // for a page: that is what the site actually renders into `<title>`. The URL
-// segment is `publicSlug || title` for an article -- the rule the Website content
+// segment is `publicSlug || title` for an article -- the rule the content
 // loader itself applies -- and the slug's last element for a page.
 // ---------------------------------------------------------------------------
 
@@ -656,8 +656,8 @@ function nonEmptyString(value: unknown): string | undefined {
 }
 
 // Route keys are compared, never rendered as URLs, so they are canonicalized to one
-// shape: lower-case, no leading or trailing slash. Website writes the same route as
-// `serpent/blog` (a scope) and `/serpent/blog` (a slug); those are one route.
+// shape: lower-case, no leading or trailing slash. A tree writes the same route as
+// `<section>/blog` (a scope) and `/<section>/blog` (a slug); those are one route.
 function normalizeRoute(route: string): string {
   return route.trim().replace(/^\/+|\/+$/g, '').toLowerCase();
 }

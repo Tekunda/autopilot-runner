@@ -26,8 +26,8 @@
 // logic is unit-testable with fakes and never needs a real browser or API key in tests -- but the
 // DEFAULT judge does the real model call (judge.ts), never a stubbed pass.
 //
-// UNJUDGED (post-mortem TEK-3691): when every page the judge could not score was blocked by a
-// transient rate limit (no real defect found), the gate returns `unjudged`, NOT `warn`. A gate
+// UNJUDGED (the false-green post-mortem): when every page the judge could not score was blocked by
+// a transient rate limit (no real defect found), the gate returns `unjudged`, NOT `warn`. A gate
 // that ran but reached no verdict must not read as a pass even though it's non-blocking -- it fails
 // closed and escalates to a human. `warn` would map to a pass; a green check on a gate that never
 // judged is worse than no gate.
@@ -63,7 +63,7 @@ export interface VisualQaConfig {
   // the SEO pack's convention. A changed content file under it maps to the route it serves. Default
   // `content`.
   contentDir?: string;
-  // Content-tree format the file->route mapping uses: markdown pages ('md', default), Website JSON
+  // Content-tree format the file->route mapping uses: markdown pages ('md', default), JSON
   // pages ('json', route taken from each page's `slug`), or a mix ('auto'). Mirrors the SEO pack.
   contentFormat?: ContentFormat;
   // Locale a JSON page is read from when deriving its route (json/auto only). Default 'en'.
@@ -264,9 +264,9 @@ export function createVisualQaGate(deps: VisualQaDeps = {}): Gate {
       //   the inconclusive ones too, so nothing is hidden when the run also hit rate limits.
       // - No real defect but some page was rate-limited into inconclusive -> `unjudged`: the gate
       //   RAN but reached no verdict. It is NOT a pass -- a green check on a gate that never judged
-      //   is worse than no gate (post-mortem TEK-3691). It fails closed and escalates to a human,
-      //   even though the gate is non-blocking; a transient 429 that outlasts the retries is the
-      //   API's failure, but "could not verify" is not "verified fine".
+      //   is worse than no gate (the false-green post-mortem). It fails closed and escalates to
+      //   a human, even though the gate is non-blocking; a transient 429 that outlasts the
+      //   retries is the API's failure, but "could not verify" is not "verified fine".
       // - Everything scored and passed -> `pass`.
       if (failures.length > 0) {
         return { id: VISUAL_QA_GATE_ID, status: 'fail', findings: [...failures, ...inconclusive] };

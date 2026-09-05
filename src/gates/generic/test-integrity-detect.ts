@@ -16,8 +16,8 @@
 // widening `structure`'s selection first would produce a loud, permanently-skipping gate
 // (`unjudgeable-language`), which is honest but useless.
 //
-// The JS/TS rules are ported from Tekunda/Website's scripts/code-structure-check.sh, which
-// enforced them on the pipeline this replaced. The Python rules are the pytest/unittest analogues
+// The JS/TS rules are ported from the code-structure check of the shell pipeline this replaced,
+// which enforced them there. The Python rules are the pytest/unittest analogues
 // of the same three ideas -- a test disabled outright, a test that asserts nothing, and a skip
 // conditioned on the absence of the content the test exists to assert -- and they are kept
 // consistent with assertion-delta-detect.ts's `skipMarkers` (`@pytest.mark.skip`) and

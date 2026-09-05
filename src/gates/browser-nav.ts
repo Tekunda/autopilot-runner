@@ -3,8 +3,8 @@
 // it -- but "finished" is not the same as "network idle". A perfectly-rendered page can hold a
 // lingering connection open forever (an analytics socket, an SSE stream, a long-poll), so
 // `waitUntil: 'networkidle'` never fires and Playwright throws a TimeoutError -- failing the gate
-// on a page that is fully on screen. Observed live on test.tekunda.com/products/delivery-autopilot,
-// where networkidle would not settle within 45s though the page was completely rendered.
+// on a page that is fully on screen. Observed live on a tenant's marketing site, where
+// networkidle would not settle within 45s though the page was completely rendered.
 //
 // settledGoto separates "the page loaded" (a hard requirement -- only a genuinely dead server fails
 // it, which legitimately throws) from "the network went quiet" (a BEST-EFFORT nicety -- a lingering

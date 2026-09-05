@@ -72,8 +72,8 @@ export interface GatePolicy {
   // ticket NAMES (an imperative spec/title instruction, or a DELIVERABLES: item) with no covering
   // subtask AND no justified removal is re-architected (bounded), then HELD for a human if a re-plan
   // still leaves it uncovered. Per-tenant like every other gate field. Optional; defaults to TRUE
-  // (a silently dropped deliverable is the TEK-3727 failure). Re-architect-first, so a rare false
-  // positive self-corrects rather than halting work.
+  // (a silently dropped deliverable is a real observed failure). Re-architect-first, so a rare
+  // false positive self-corrects rather than halting work.
   holdOnUncoveredDeliverables?: boolean;
   // Which of the three independent assembled-branch reviewers (Track E) actually run.
   // A lens explicitly disabled here is SKIPPED cleanly -- no grant, no check, and the
@@ -137,8 +137,9 @@ export interface GatePolicy {
   // baseBranchRequiredChecks but NOT listed here is report-only: drift still raises the alarm, and
   // merges still go through.
   //
-  // Same burn-in idiom, for the same reason, as `SECURITY_GATE_ENFORCED` and `E2E_REQUIRED_SITES`
-  // in the Website pipeline: never flip a never-validated check straight to blocking. It matters
+  // Same burn-in idiom, for the same reason, as the `SECURITY_GATE_ENFORCED` and
+  // `E2E_REQUIRED_SITES` flags of the shell pipeline this replaced: never flip a
+  // never-validated check straight to blocking. It matters
   // more here than usual, because a false positive does not fail one run -- it holds EVERY merge
   // onto that branch, indefinitely, and the ways to get one are mundane (a check actually named
   // `Autopilot / qa` written here as `qa`; a branch whose ruleset has not been created yet).
@@ -268,8 +269,8 @@ export interface ServeConfig {
   readyIntervalMs?: number;
 }
 
-// One site of a MULTI-SITE tenant (e.g. Tekunda/Website serves both `tekunda` and `serpent`
-// from one repo): its own serve recipe and its own per-URL-bound-gate config, so each site is
+// One site of a MULTI-SITE tenant (a monorepo that serves two brands from one repo, say): its
+// own serve recipe and its own per-URL-bound-gate config, so each site is
 // brought up on its own server and crawled/screenshotted with its own routes/brand-lists. Rides
 // in the SIGNED grant (ExecutionGrant.sites) exactly like ServeConfig -- `serve.startCommand` is
 // a shell command, so it must be signed, never taken from the unsigned GateTarget. The heavy
@@ -277,7 +278,7 @@ export interface ServeConfig {
 // site's checks `<gate> (<name>)` so a fail on either site is legible and blocks. Absent (no
 // `sites`) -> the single-`serve` path is used unchanged.
 export interface SiteConfig {
-  // Disambiguates this site's per-gate checks (`seo-site-crawl (tekunda)`), so keep it short and
+  // Disambiguates this site's per-gate checks (`seo-site-crawl (marketing)`), so keep it short and
   // stable -- it becomes part of the published check name Track F matches as a matrix variant.
   name: string;
   // How to bring THIS site up (install/build/start/baseUrl), same shape as the single-site path.
@@ -300,8 +301,8 @@ export interface SiteConfig {
   //
   // Absent, or no entry for this base branch -> no baseline, every finding blocks as before.
   deployedBaseUrls?: Record<string, string>;
-  // The repo-relative path patterns whose changes this site's build depends on (`apps/serpent-web/**`,
-  // `content/site/**/serpent/**`). The heavy stage serves and crawls a site only when the PR's diff
+  // The repo-relative path patterns whose changes this site's build depends on (`apps/<app>/**`,
+  // `content/**/<site>/**`). The heavy stage serves and crawls a site only when the PR's diff
   // touches them, so a dual-brand monorepo stops paying two production builds for a one-brand diff.
   //
   // Scoping is OPT-IN and fails towards RUNNING: absent on any site -> that site is always served;
@@ -337,8 +338,7 @@ export interface CheckResult {
   // and only a fault outliving that reaches a human. 'content': the judge RAN but reached no
   // verdict about the page -- no re-run helps, so it escalates to a human immediately. Absent ->
   // treated as 'content' (fail closed, escalate now), which is LOAD-BEARING across the gate-report
-  // artifact round-trip: parseGateReport must carry the reason or every unjudged reads as one
-  // (TEK-3788).
+  // artifact round-trip: parseGateReport must carry the reason or every unjudged reads as one.
   unjudgedReason?: 'infra' | 'content';
   // The gate NEVER RAN (returned `skip`) -- the complement of `unjudged`'s "ran, no verdict". It
   // publishes with `status:'pending'` (a skip was never evaluated, not passed), but a skip is not
@@ -361,9 +361,10 @@ export interface CheckResult {
   // reason. A report-only result is never banked as coverage and never stamps a real verdict.
   reportOnly?: true;
   // The gate's base id BEFORE any per-site display suffix is appended to `name`. A URL-bound gate
-  // that runs once per site publishes distinct display names (`seo-site-crawl (tekunda)`), but the
-  // never-run/no-baseline ledger and the enabled-gate set are keyed by the bare gate id -- so the
-  // base id must survive the suffixing to match them. Absent (== `name`) when no suffix was applied.
+  // that runs once per site publishes distinct display names (`seo-site-crawl (marketing)`), but
+  // the never-run/no-baseline ledger and the enabled-gate set are keyed by the bare gate id -- so
+  // the base id must survive the suffixing to match them. Absent (== `name`) when no suffix was
+  // applied.
   baseId?: string;
 }
 
@@ -557,8 +558,8 @@ export interface ReviewVerdict {
 // the evidence for why acting on it would be wrong. A dispute is a TERMINAL outcome that changes
 // nothing -- the fixer's only other exits were "produce a diff" and "fail", and being forced to
 // produce a diff for a finding it could not legitimately satisfy is exactly what drove it to
-// damage the artifact instead (TEK-3784). The control plane escalates a dispute to a human; it
-// never resolves it in the content and never lets it pass silently.
+// damage the artifact instead (the disputed-finding incident). The control plane escalates a
+// dispute to a human; it never resolves it in the content and never lets it pass silently.
 export interface FixDispute {
   /** The gate finding being disputed, quoted from the fix prompt. */
   finding: string;
@@ -648,11 +649,11 @@ export interface ArchitectReview {
 // ticket, checked against the checked-out base tree on its own.
 //
 // A CLASS is a KIND of change, never an instance of one. That distinction is the whole point:
-// TEK-3782's ticket enumerated 1,476 individual findings (121 over-long titles, 50 images with no
-// alt text, 39 orphan pages, ...) across five classes, and the architect planned 13 subtasks to
-// redo work that was already merged -- it read the enumeration as the work list and never checked
-// the five CLASSES against the tree. One global "is this whole ticket satisfied?" judgment is
-// unanswerable at that scale; five per-class ones are each trivially answerable.
+// one observed ticket enumerated over a thousand individual findings (over-long titles, images
+// with no alt text, orphan pages, ...) across five classes, and the architect planned a dozen
+// subtasks to redo work that was already merged -- it read the enumeration as the work list and
+// never checked the five CLASSES against the tree. One global "is this whole ticket satisfied?"
+// judgment is unanswerable at that scale; five per-class ones are each trivially answerable.
 //
 // `verdict` is deliberately three-valued and only the literal 'present' counts as done, so the
 // checklist can also express the honest middle -- a class the architect could not confirm. Both
@@ -1169,11 +1170,11 @@ export interface SubtaskState {
 // Nothing else in the state says this. A findings block reads identically whether the findings
 // describe a real defect in the customer's code or a defect in the GATE, so fixing the gate could
 // not release the tickets that gate had wrongly blocked -- they stayed blocked until a human
-// noticed and nudged them by hand. TEK-3694 is the worked example: a subtask that added
-// `content/site/README.md` tripped two gate defects (an SEO-pack rootDir that defaulted to
-// process.cwd() and so read the action's own directory, and a markdown-to-route mapper that turned
-// the README into the route `/site/README`), escalated as "no code fix can resolve", and stayed
-// blocked after PR #336 removed both defects.
+// noticed and nudged them by hand. The worked example: a subtask that added a README to a
+// content tree tripped two gate defects (an SEO-pack rootDir that defaulted to process.cwd()
+// and so read the action's own directory, and a markdown-to-route mapper that turned the README
+// into a route of its own), escalated as "no code fix can resolve", and stayed blocked until
+// both defects were removed.
 //
 // This is the record recoverBlockedOnGateChange reasons over -- see blocked-recovery.ts.
 export interface GateBlockProvenance {
@@ -1210,10 +1211,10 @@ export interface RecordedGateCheck {
   // stamps no real verdict, so a gate whose every result is report-only still fires
   // `gate_never_fired` instead of looking like a gate that has judged this branch.
   reportOnly?: true;
-  // The bare gate id when `id` carries a per-site display suffix (e.g. id `seo-site-crawl (tekunda)`,
-  // baseId `seo-site-crawl`). The never-run/no-baseline ledger keys off this so a multi-site tenant's
-  // URL-bound gates match the enabled-gate set instead of skipping the diagnostic entirely. Absent
-  // (== `id`) for a single-run gate.
+  // The bare gate id when `id` carries a per-site display suffix (e.g. id `seo-site-crawl
+  // (marketing)`, baseId `seo-site-crawl`). The never-run/no-baseline ledger keys off this so a
+  // multi-site tenant's URL-bound gates match the enabled-gate set instead of skipping the
+  // diagnostic entirely. Absent (== `id`) for a single-run gate.
   baseId?: string;
 }
 
@@ -1351,7 +1352,7 @@ export interface TicketState {
   //
   // It VOIDS plan claims. A claim that could only be kept, restored, or verified by changing an
   // excluded area gets NO finding at all -- not a downgraded one -- because the ticket outranks
-  // the plan. TEK-3766 burned three repair rounds on a `PLAN NOT KEPT` blocker demanding blog
+  // the plan. One incident burned three repair rounds on a `PLAN NOT KEPT` blocker demanding blog
   // changes the ticket itself had declared out of scope. Undefined for a ticket that declares
   // no exclusions (then the reviewer prompt is byte-identical to what it was before this field
   // existed).
@@ -1746,7 +1747,7 @@ export interface TicketState {
   // The user-visible surfaces a human has AUTHORIZED deleting. Durable, and deliberately NOT
   // cleared by a replan.
   //
-  // This is the correction to the mistake that made TEK-3745 loop four times in three hours. The
+  // This is the correction to the mistake that made one ticket loop four times in three hours. The
   // sign-off had been treated as PLAN-scoped, living only in the ticket's transient description, so
   // every re-read of the spec dropped it: when the fix loop exhausted and the ticket auto-replanned
   // (freshRestart re-reads the tracker, which never carried the answer), the approval vanished and

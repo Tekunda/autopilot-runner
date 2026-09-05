@@ -8,13 +8,13 @@
 //   * the provider refused the request (a rate/usage limit on the shared token) so the agent
 //     NEVER RAN -- a fact about the infrastructure that says nothing about the diff.
 //
-// Observed live on Tekunda/Website 2026-09-02..03 (ticket external-pr-1534, runs 33694525003,
-// 33697929655, 33698219984, 33698363442): four consecutive stages ended in ~330ms with one turn,
-// $0, and an empty modelUsage. The control plane counted every one of them as a repair attempt,
-// spent the whole budget, and told the operator the fix loop was exhausted -- a sentence about
-// code that never had a fixer pointed at it. Roughly an hour later the SAME PR ran clean with
-// $0.63 of real usage: the rejection was transient, exactly the class the infra retry budget
-// exists for.
+// Observed live on a tenant repo: four consecutive stages ended in ~330ms with one turn, no
+// spend, and an empty modelUsage. The control plane counted every one of them as a repair
+// attempt, spent the whole budget, and told the operator the fix loop was exhausted -- a
+// sentence about code that never had a fixer pointed at it. Roughly an hour later the SAME PR
+// ran clean, with real model usage on every turn: the rejection was transient, exactly the
+// class the infra retry budget exists for. (The run ids, dates and measured spend are kept
+// out of this file on purpose -- see the internal record.)
 //
 // THE SIGNAL. The vendor writes the raw SDK message stream to
 // $RUNNER_TEMP/claude-execution-output.json and publishes its path as the step's
@@ -110,8 +110,8 @@ function deniedNothing(message: ResultMessage): boolean {
 //
 // `result` only. NOT gated on debug.showFullOutput, and that is a deliberate reading of why that
 // toggle is off by default: it is off because raw SDK output carries TOOL RESULTS, which can hold
-// secrets. A run that spent $0 with an empty modelUsage executed no turn and therefore no tool,
-// so on THIS path `result` is the provider's canned refusal ("Claude AI usage limit
+// secrets. A run that spent nothing with an empty modelUsage executed no turn and therefore no
+// tool, so on THIS path `result` is the provider's canned refusal ("Claude AI usage limit
 // reached|<epoch>") with no tool output behind it. Withholding it would leave the operator with
 // the same uninformative summary the toggle exists to escape.
 //

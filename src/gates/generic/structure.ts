@@ -7,8 +7,8 @@
 //
 // (3) is why this gate is no longer decoration. (1) and (2) alone are a path-prefix match
 // and a count: they pass on essentially every real PR, so the gate reported `pass` for a
-// check nobody could fail. The false-green ban is the check the pipeline this replaced
-// actually enforced (Tekunda/Website scripts/code-structure-check.sh), and it is the one
+// check nobody could fail. The false-green ban is the check the shell pipeline this replaced
+// actually enforced (its code-structure check), and it is the one
 // worth having: a gate that bans vacuous tests while being vacuous itself is the joke
 // writing itself. The detection is a pure text scan (./test-integrity-detect.ts); this
 // file only decides WHICH changed files to feed it and reads them off the PR checkout.
@@ -108,8 +108,8 @@ export const DEFAULT_STRUCTURE_CONFIG: StructureGateConfig = {
   // interchangeable: widening selection first would have produced a loud, permanently-skipping
   // `unjudgeable-language` gate, while judging first and selecting second is what actually turns
   // test-integrity enforcement ON for those repos. Without `.py` the false-green ban was silently
-  // inert on 100% of a Python tenant's tests -- a real latent bug, not a gap
-  // (docs/runbooks/invoices-wizard-tenant.md §4).
+  // inert on 100% of a Python tenant's tests -- a real latent bug, not a gap (see the Python
+  // tenant runbook).
   testFileExtensions: ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.cls', '.trigger'],
   enforceTestIntegrity: true,
   maxTestFileBytes: 2_000_000,
@@ -191,10 +191,10 @@ export function isTestFile(file: string, config: StructureGateConfig): boolean {
 //
 //   ALPHANUMERIC-LED, NOT `.`-terminated (`test_`)  -> a filename PREFIX. Python's convention, and
 //       the reason this function exists: a plain `includes('test_')` selects
-//       `invoice_wizard/latest_run.py` (l-a-`test_`-run) and `contest_form.py` as test files.
+//       `<pkg>/fastest_path.py` (fas-`test_`-path) and `greatest_common.py` as test files.
 //       "Alphanumeric" here means ASCII: `/^[A-Za-z0-9]/` does not match `тест_` or `é`, so a
 //       non-ASCII marker takes the separator-led branch and gets substring semantics -- which
-//       re-creates the `latest_run.py` misclassification in that alphabet. No tenant names test
+//       re-creates the `fastest_path.py` misclassification in that alphabet. No tenant names test
 //       files this way, but the character class is the whole point of this line, so it is stated.
 //
 // TWO REGRESSIONS GOT HERE THE SAME WAY, and both were silent -- the files simply stopped being

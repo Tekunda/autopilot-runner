@@ -2,7 +2,7 @@
 //
 // One matcher, two consumers, both of which had no way to ask the question before:
 //   - CommandGateSpec.paths -- a tenant command gate that lints/builds ONE app in a monorepo
-//     (`yarn lint:serpent`) was run on every PR, including one that changed only the other app.
+//     (`yarn lint:<app>`) was run on every PR, including one that changed only the other app.
 //   - SiteConfig.paths -- the heavy stage served and crawled EVERY configured site on every
 //     gated PR, so a dual-brand repo paid two production builds for a one-brand diff.
 //
@@ -20,7 +20,7 @@ import type { SiteConfig } from './types.ts';
 
 // Glob subset, deliberately small: `**` (any number of path segments, including none), `*` and
 // `?` (within one segment). Enough for the shapes a CI paths-filter is written in
-// (`apps/tekunda-web/**`, `content/site/**/tekunda/**`, `yarn.lock`) and nothing more, so no
+// (`apps/<app>/**`, `content/**/<site>/**`, `yarn.lock`) and nothing more, so no
 // dependency is added for it.
 //
 // A pattern with NO wildcard is treated as a path OR a directory prefix (`packages` matches

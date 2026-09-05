@@ -10,9 +10,9 @@
 // That is what made a PROVIDER REJECTION indistinguishable from a judgment that ran and failed:
 // finalize-stage.ts has classified the two apart since #431 and puts a `provider-rejected` check
 // in the judgment telemetry, but nothing carried that telemetry off the runner. Observed live on
-// Tekunda/Website external-pr-1534 (run 33694525003, 2026-09-02 23:19 UTC): the accept/QA run
-// ended in 332ms having spent $0 with an empty modelUsage, and the control plane charged it to
-// the PR's content repair budget.
+// a tenant repo: an accept/QA run ended in 332ms having spent nothing with an empty modelUsage,
+// and the control plane charged it to the PR's content repair budget. (The run id and the
+// measured spend are kept out of this file -- see the internal record.)
 //
 // Written by the runner (action-entry.ts) rather than by the agent, and uploaded with `always()`,
 // so it exists on exactly the runs that matter -- the failing ones.

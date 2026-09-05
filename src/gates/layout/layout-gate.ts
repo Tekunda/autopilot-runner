@@ -1,4 +1,4 @@
-// layout-rules: an OPTIONAL, deterministic declarative layout gate (TEK-3691 post-mortem
+// layout-rules: an OPTIONAL, deterministic declarative layout gate (the false-green post-mortem's
 // "Deterministic layout rules, declared per tenant and repo"). It runs in the SAME served-site
 // heavy harness as Visual-QA, but does ONLY getBoundingClientRect measurements against a tenant's
 // declared rule set -- no model, no tokens, so it can never be rate-limited. Absent a rule set (or a
@@ -7,7 +7,7 @@
 //
 // TARGET DERIVATION mirrors Visual-QA: a changed content/page file maps to the route it serves; a
 // changed app-router source file (page/layout/i18n) under the tenant's `appDir` maps to the route of
-// its own directory, so a page whose copy lives only in the app i18n dictionary (no content/site
+// its own directory, so a page whose copy lives only in the app i18n dictionary (no content-tree
 // record) still maps; a changed `layout`/`template` additionally fans out to the representative route
 // sample, since it WRAPS a subtree of descendant routes whose regressions never show on its own
 // directory route; a changed shared/global asset fans out to a representative route sample. Those
@@ -68,10 +68,10 @@ export interface LayoutRulesConfig {
   // The small representative route sample checked when a shared asset changed. Default `['/']`.
   representativeRoutes?: string[];
   // The app-router source ROOT (relative to the checkout root) under which route directories live,
-  // e.g. tekunda's `apps/tekunda-web/app/[locale]`. Set -> a changed route source file (a Next.js
+  // e.g. `apps/<app>/app/[locale]`. Set -> a changed route source file (a Next.js
   // route file or a colocated i18n dictionary) under it derives the route of its own directory
-  // (`.../products/delivery-autopilot/page.jsx` -> `/products/delivery-autopilot`), so pages whose
-  // copy lives in the app i18n dictionary rather than a content/site record still map to a route.
+  // (`.../products/<product>/page.jsx` -> `/products/<product>`), so pages whose
+  // copy lives in the app i18n dictionary rather than a content-tree record still map to a route.
   // Unset -> path derivation is off and only content records / global-asset fanout map files
   // (backward compatible).
   appDir?: string;
@@ -131,7 +131,7 @@ function matchesAnyGlob(file: string, globs: string[]): boolean {
 }
 
 // Basenames that mark a file as an app-router PAGE source: the Next.js page/layout conventions and a
-// colocated i18n dictionary (`i18n.js` or `delivery-autopilot-i18n.js`). A change to one derives the
+// colocated i18n dictionary (`i18n.js` or `<page>-i18n.js`). A change to one derives the
 // route of its own directory. `route.ts` is deliberately excluded -- it is an API route handler
 // returning data, never a navigable page. Everything else under the app root -- shared components,
 // hooks, utilities, colocated CSS -- is NOT path-derived here: it either fans out via the
@@ -163,9 +163,9 @@ function isWrapperRouteFile(file: string, appDir: string): boolean {
 
 // The route a changed app-source file serves, or null if it does not derive one. A file under
 // `appDir` whose basename is a route source file maps to its directory path relative to `appDir`
-// (`apps/.../app/[locale]/products/delivery-autopilot/page.jsx` with appDir
-// `apps/.../app/[locale]` -> `/products/delivery-autopilot`). Next.js route groups `(marketing)` are
-// stripped (they never appear in the URL); a file inside a private `_folder` derives nothing. A
+// (`apps/<app>/app/[locale]/products/<product>/page.jsx` with appDir `apps/<app>/app/[locale]` ->
+// `/products/<product>`). Next.js route groups `(marketing)` are stripped (they never appear in
+// the URL); a file inside a private `_folder` derives nothing. A
 // DYNAMIC segment (`[slug]`/`[...rest]`) derives nothing either: a dynamic page is not navigable
 // without a concrete param, so `/products/[slug]` would load a 404 and measure garbage -- such a
 // page must instead be targeted by a concrete `representativeRoutes` URL via the shared/global
@@ -276,7 +276,7 @@ export function createLayoutRulesGate(deps: LayoutRulesDeps = {}): Gate {
       if (rules.length === 0) {
         if (dropped.length > 0) {
           // Rules WERE declared but every entry failed to parse (a typo'd field/type). Silently
-          // treating this as "nothing configured" is the never-run hole the TEK-3691 verdict ledger
+          // treating this as "nothing configured" is the never-run hole the verdict ledger
           // exists to catch: it would bank a permanent no-op as a benign skip forever. Surface the
           // dropped entries and mark the skip `invalid-config` (a SUSPICIOUS reason) so the
           // never-fired tracker alarms instead of staying silent on a config typo.

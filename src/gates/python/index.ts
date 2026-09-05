@@ -45,14 +45,14 @@ export function pythonGates(deps: PythonToolGateDeps = {}): Gate[] {
         tool: 'ruff',
         command: 'ruff',
         // Diff-scoped. A whole-tree `ruff check .` on a repo whose own CI runs it advisory
-        // (`ruff check . || true`, which is exactly what rimonhanna/Invoices-Wizard does) would
+        // (`ruff check . || true`, which is exactly what the live Python tenant does) would
         // block every PR on inherited lint debt the diff did not create -- a gate nobody can
         // clear gets demoted to `blocking:false` within a day and then enforces nothing. Judging
         // the files the PR actually touched is a verdict the author can act on.
         // NO `--force-exclude`. That flag makes ruff honour the checkout's `[tool.ruff] exclude` /
         // `extend-exclude` EVEN FOR EXPLICITLY PASSED PATHS -- it exists for pre-commit, which
         // passes every staged file. `pyproject.toml` is PR-authored and no gate reviews it, so a
-        // diff adding `extend-exclude = ["invoice_wizard"]` would get
+        // diff adding `extend-exclude = ["<pkg>"]` would get
         // "ran ruff over 3 changed Python file(s) and found no problems": a green check over an
         // unlinted tree. Without the flag, a path this gate names explicitly is always checked.
         argsFor: () => ['check', '--output-format=concise'],
@@ -88,10 +88,10 @@ export function pythonGates(deps: PythonToolGateDeps = {}): Gate[] {
         // `addopts = "--collect-only"` (or `-k nothing`, or `--co`) exits 0 having run no tests at
         // all, and exit 0 is a pass. The exit-5 guard below only catches ZERO COLLECTION, not
         // "collected and deliberately did not run". The cost is that the project's own flags
-        // (`--strict-markers --timeout=120` on the live tenant) are dropped: strictness the suite
-        // wanted is lost, and a hung test is caught by this gate's own 15-minute timeout as
-        // `unjudged`/`infra` rather than by pytest-timeout. Losing strictness is a weaker check;
-        // honouring an attacker-chosen flag is no check at all.
+        // are dropped: strictness the suite asked for is lost, and a hung test is caught by this
+        // gate's own 15-minute timeout as `unjudged`/`infra` rather than by a timeout plugin.
+        // Losing strictness is a weaker check; honouring an attacker-chosen flag is no check at
+        // all.
         argsFor: () => ['--override-ini=addopts=', '-q'],
         diffScoped: false,
         noVerdictExitCodes: PYTEST_NO_VERDICT,

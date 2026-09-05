@@ -1,12 +1,12 @@
 // Fetches, verifies, and loads the PRIVATE pack-gate bundle -- the deterministic pack gates
 // the runner used to bundle statically.
 //
-// THE EXPOSURE THIS EXISTS TO CLOSE. runner-dist/ is mirrored verbatim into the PUBLIC repo
-// Tekunda/autopilot-runner on every release. Because src/runner/gate-registry.ts imported the
-// pack gates statically, src/packaging/build-runner-dist.ts had to copy 18 licensed pack files
-// into that public tree -- 4,527 lines of paid gate logic, readable by anyone. Nothing
-// from src/packs/ ships there any more. Instead the pack gates are published as a PRIVATE
-// release asset and pulled in here, per gate stage.
+// THE BOUNDARY THIS EXISTS TO KEEP. runner-dist/ is mirrored verbatim into the PUBLIC repo
+// Tekunda/autopilot-runner on every release, so anything the runner imports statically is
+// published along with it. Gate logic that is licensed cannot be: while gate-registry.ts
+// imported the pack gates directly, the packaging step had to follow that import into licensed
+// source. It no longer does, and nothing from the pack tree ships there. The pack gates are
+// published as a PRIVATE release asset instead, and pulled in here, per gate stage.
 //
 // THE TRUST BOUNDARY. This runs inside the customer's CI job, which holds the customer's
 // credentials, and it downloads CODE THIS PROCESS THEN IMPORTS. The release host is not
@@ -583,7 +583,7 @@ async function extract(manifest: PackBundleManifest, root: string): Promise<stri
  * Every failure throws a PackBundleError with its own code and its own message. NOTHING here
  * degrades to "carry on without the pack gates": the caller turns any throw into a failed gate
  * stage, because a stage that reports green over gates that never executed is worse than no
- * gate at all (post-mortem TEK-3691).
+ * gate at all (the false-green post-mortem).
  */
 export async function loadPackBundleGates(spec: PackBundleGrant, deps: LoadPackBundleDeps = {}): Promise<Gate[]> {
   const bytes = await fetchPackBundle(spec, deps);

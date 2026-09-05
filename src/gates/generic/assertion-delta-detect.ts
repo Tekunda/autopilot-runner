@@ -1,9 +1,10 @@
 // Pure detector for the `assertion-delta` gate: given the unified diff of the test files a
 // build changed, find where the diff WEAKENED its own tests -- deleted/loosened assertions,
 // removed or skipped tests, or lowered a numeric bound (a count/length/threshold dropped, most
-// damningly to zero). This is the deterministic core behind TEK-3691 post-mortem F6, where the
-// build stage rewrote its own Playwright specs to certify its deletions (ADDON_MIN_CHARS 200->60,
-// added `toHaveCount(0)` for the sections it deleted, deleted the `steps.toHaveCount(9)` block).
+// damningly to zero). This is the deterministic core behind the false-green post-mortem's F6, where
+// the build stage rewrote its own Playwright specs to certify its deletions (ADDON_MIN_CHARS
+// 200->60, added `toHaveCount(0)` for the sections it deleted, deleted the `steps.toHaveCount(9)`
+// block).
 //
 // No I/O and no framework knowledge lives here: every keyword/marker is config, defaulted to a
 // cross-framework set (JS/TS, Python, Go, Java, ...). The gate (./assertion-delta.ts) fetches

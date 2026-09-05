@@ -1,5 +1,5 @@
 // e2e: the end-to-end heavy gate (docs/ci-gate-refit-plan.md P5). It runs the CUSTOMER's own
-// end-to-end suite (a tenant-configured command, e.g. `yarn test:e2e:tekunda`) against the SERVED
+// end-to-end suite (a tenant-configured command, e.g. `yarn test:e2e`) against the SERVED
 // site the heavy stage brought up -- the same "we run/crawl the served site, we don't own the
 // specs" split the SEO crawl and Visual-QA gates use. Autopilot owns the mechanism (run the
 // configured command against the served baseUrl, judge the exit code); the specs are the
@@ -23,10 +23,10 @@ import type { Gate, GateContext, GateResult } from '../types.ts';
 
 export const E2E_GATE_ID = 'e2e';
 
-// The env var the customer's Playwright config reads its base URL from -- Tekunda/Website's
-// apps/*/playwright.config.ts use `baseURL: process.env.PLAYWRIGHT_BASE_URL`. The heavy stage
-// threads the served instance's baseUrl into ctx.config['e2e'].baseUrl; this gate exports it to
-// the spawned command under this name so the suite targets the served site.
+// The env var the customer's Playwright config reads its base URL from -- the conventional
+// `baseURL: process.env.PLAYWRIGHT_BASE_URL` a tenant's playwright.config.ts declares. The heavy
+// stage threads the served instance's baseUrl into ctx.config['e2e'].baseUrl; this gate exports it
+// to the spawned command under this name so the suite targets the served site.
 export const E2E_BASE_URL_ENV = 'PLAYWRIGHT_BASE_URL';
 
 // Provision the browsers the tenant's OWN Playwright will look for, in the checkout, immediately
@@ -39,9 +39,9 @@ export const E2E_BASE_URL_ENV = 'PLAYWRIGHT_BASE_URL';
 // `~/.cache/ms-playwright/chromium_headless_shell-1234`, while a tenant whose lockfile pins
 // @playwright/test 1.59.1 launches `chromium_headless_shell-1217` and dies with
 // `browserType.launch: Executable doesn't exist at ...` on every spec that opens a page. That is
-// exactly what Tekunda/Website#1549 hit on the first PR to run this gate: 259 of 568 specs failed
-// and 125 never ran, on the missing binary alone -- while the specs that only use the `request`
-// fixture passed against the same served site, which is why the run looked partially healthy.
+// exactly what the first PR to run this gate hit: most of the suite failed or never ran, on the
+// missing binary alone -- while the specs that only use the `request` fixture passed against the
+// same served site, which is why the run looked partially healthy rather than obviously broken.
 //
 // It has to happen HERE and not in action.yml, because the tenant's Playwright does not exist
 // until the heavy stage's install step has populated the checkout's node_modules -- which is after
@@ -64,9 +64,9 @@ export const E2E_BROWSER_PROVISION_COMMAND = 'npx --no-install playwright instal
 // PROVISIONAL. How long the tenant's suite may run before the gate kills it.
 //
 // It exists because exec.ts's DEFAULT_TIMEOUT_MS is 10 minutes and a real suite does not fit: the
-// browser fix above turns "every spec dies instantly" into "571 specs actually run, one worker at
-// a time", and a timeout REJECTS rather than returning an exit code, so the gate would swap a red
-// `Executable doesn't exist` for a red `could not run: ...` and teach us nothing.
+// browser fix above turns "every spec dies instantly" into "the whole suite actually runs, one
+// worker at a time", and a timeout REJECTS rather than returning an exit code, so the gate would
+// swap a red `Executable doesn't exist` for a red `could not run: ...` and teach us nothing.
 //
 // THE CEILING IS NOT THIS GATE'S TO SPEND, and that is the part to read before raising it. The
 // same budget ordering the Salesforce org gates document (org-gate-common.ts) applies here:
@@ -81,13 +81,13 @@ export const E2E_BROWSER_PROVISION_COMMAND = 'npx --no-install playwright instal
 // destroys the whole stage's output, including the seo-site-crawl and visual-qa verdicts that had
 // already passed. A gate whose budget exceeds its stage's does not gate; it just loses.
 //
-// The arithmetic, against the MEASURED cost of the stage that produced this defect
-// (Website#1549, `Autopilot / gate` 13:01:40Z -> 13:11:26Z = 9m46s wall clock for both sites):
+// The arithmetic, against the MEASURED cost of the stage that produced this defect (a two-site
+// tenant, whose `Autopilot / gate` took 9m46s of wall clock for both sites):
 //
 //     35.0   HOSTED_STAGE_TIMEOUT_MS
 //   -  6.2   that stage's non-e2e cost: checkout, npm ci, the action's own browser install,
 //            and per site yarn install + `yarn build:<site>` + serve + the full sitemap crawl
-//            (9m46s total, less the 1.3m + 2.3m the two fast-failing e2e runs spent)
+//            (the 9m46s total, less what the two fast-failing e2e runs spent)
 //   -  2.0   NEW: the tenant browser download above -- a real fetch on the first site, a no-op
 //            on the second
 //   -  1.0   assembling and publishing gate-report.json, plus headroom
@@ -101,8 +101,8 @@ export const E2E_BROWSER_PROVISION_COMMAND = 'npx --no-install playwright instal
 // Tighten it once a green run reports a real duration. If a green run instead shows the suites
 // need MORE than this, RAISING THIS CONSTANT IS THE WRONG FIX -- it would blow the stage deadline
 // and produce no verdict at all. The two right fixes both live elsewhere: give the suite more
-// workers (Playwright defaults to ONE worker under CI, which is what serialises 571 specs on a
-// 4-vCPU runner -- a change in the tenant's own playwright.config.ts), or split the heavy stage
+// workers (Playwright defaults to ONE worker under CI, which is what serialises a large suite on
+// a 4-vCPU runner -- a change in the tenant's own playwright.config.ts), or split the heavy stage
 // per site so each site gets its own 35-minute budget.
 //
 // Hardcoded rather than tenant config on purpose: this is a property of OUR stage budget, not a
@@ -112,7 +112,7 @@ export const E2E_BROWSER_PROVISION_COMMAND = 'npx --no-install playwright instal
 export const E2E_SUITE_TIMEOUT_MS = 12 * 60 * 1000;
 
 export interface E2eConfig {
-  // The tenant's e2e command line, run via `sh -c` in the PR checkout (e.g. `yarn test:e2e:tekunda`).
+  // The tenant's e2e command line, run via `sh -c` in the PR checkout (e.g. `yarn test:e2e`).
   // Absent -> the gate skips (nothing to run), never fails.
   run?: string;
   // The served site root -- threaded in by the heavy stage (serve-and-gate.ts) at run time, since

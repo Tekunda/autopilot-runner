@@ -1,4 +1,4 @@
-// `assertion-delta` gate: test-integrity surface for the TEK-3691 post-mortem F6 failure --
+// `assertion-delta` gate: test-integrity surface for the false-green post-mortem's F6 failure --
 // a build stage that rewrites its OWN tests to certify its deletions (lowered a MIN_CHARS
 // bound 200->60, flipped a `toHaveCount(9)` to `toHaveCount(0)`, deleted an assertion block).
 // It fetches the unified diff of just the test files this change touched and runs the pure
@@ -92,9 +92,9 @@ export function effectiveAssertionDeltaConfig(specConfig?: Record<string, unknow
 // whole point: THREE gates select test files off the same marker list (`structure`, `test-policy`,
 // this one), and structure.ts's own note says two gates disagreeing about what a test file is would
 // be worse than either rule alone. Until this change only two of the three agreed -- this one still
-// substring-matched, so with `.py` in the extension list `invoice_wizard/latest_run.py`
-// (l-a-`test_`-run) and `contest_form.py` were classified as TEST files and their assertion counts
-// policed as if they were suites.
+// substring-matched, so with `.py` in the extension list `<pkg>/fastest_path.py`
+// (fas-`test_`-path) and `greatest_common.py` were classified as TEST files and their assertion
+// counts policed as if they were suites.
 export function isAssertionDeltaTestFile(file: string, config: AssertionDeltaGateConfig): boolean {
   if (!config.testFileExtensions.some((ext) => file.endsWith(ext))) return false;
   return (

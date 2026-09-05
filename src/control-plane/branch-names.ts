@@ -22,8 +22,8 @@ export function slugify(text: string, maxLen = 48): string {
 // (e.g. `3c1ac5b0-4ad7-806f...` and `3c1ac5b0-4ad7-81f7...` share `3c1ac5b04ad7`).
 // A short prefix would collapse a whole batch onto one `ticket/<stem>` branch and
 // cross-wire their rollups; the full id keeps every ticket's branch unique and lets
-// a branch be matched back to its exact ticket for idempotent reuse. Mirrors
-// Website's `ticket/<slug>-<full-id>` scheme.
+// a branch be matched back to its exact ticket for idempotent reuse. Mirrors the
+// `ticket/<slug>-<full-id>` scheme of the pipeline this replaced.
 export function ticketIdKey(ticketId: string): string {
   return ticketId.toLowerCase().replace(/[^a-z0-9]/g, '') || 'ticket';
 }

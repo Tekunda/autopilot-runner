@@ -24,8 +24,8 @@ export interface CommandGateSpec {
   onBase?: string[];
   // Repo-relative path patterns this command is about. When set and the PR's diff touches NONE
   // of them, the gate SKIPS (`no-matching-files`) instead of running -- so a monorepo tenant can
-  // declare `yarn lint:serpent` on `apps/serpent-web/**` and stop paying for it on a
-  // Tekunda-only PR. Absent -> unchanged: the command runs on every gated PR.
+  // declare `yarn lint:<app>` on `apps/<app>/**` and stop paying for it on a PR that touches
+  // only a sibling app. Absent -> unchanged: the command runs on every gated PR.
   //
   // A skip is never a pass: it publishes as `skipped` with its reason, stays out of the coverage
   // record, and keeps `gate_never_fired` reachable for a matcher that never matches. Scoping

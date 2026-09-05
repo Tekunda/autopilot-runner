@@ -1,11 +1,11 @@
-// The headless-browser seam the layout-rules gate measures through (TEK-3691). It mirrors the
-// Visual-QA ScreenshotBrowser (src/gates/visual/browser.ts) but does ONLY geometry: it navigates a
-// served URL at a viewport, runs a tiny in-page routine that returns raw getBoundingClientRect
-// numbers for the rule's DOM queries, and hands them back for the PURE evaluator (rules.ts) to
-// judge. No screenshot, no model, no thresholds in-page -- the browser measures, the evaluator
-// decides. It is an INTERFACE first, so the gate is unit-testable with a fake browser and needs no
-// real Chromium in the loop. The default implementation is Playwright, launched runner-side in the
-// dedicated heavy stage -- the only stage with a browser.
+// The headless-browser seam the layout-rules gate measures through (the false-green post-mortem).
+// It mirrors the Visual-QA ScreenshotBrowser (src/gates/visual/browser.ts) but does ONLY geometry:
+// it navigates a served URL at a viewport, runs a tiny in-page routine that returns raw
+// getBoundingClientRect numbers for the rule's DOM queries, and hands them back for the PURE
+// evaluator (rules.ts) to judge. No screenshot, no model, no thresholds in-page -- the browser
+// measures, the evaluator decides. It is an INTERFACE first, so the gate is unit-testable with a
+// fake browser and needs no real Chromium in the loop. The default implementation is Playwright,
+// launched runner-side in the dedicated heavy stage -- the only stage with a browser.
 
 import { settledGoto } from '../browser-nav.ts';
 import type { Box, MatchGeometry, MeasureSpec, RawMeasurements } from './rules.ts';

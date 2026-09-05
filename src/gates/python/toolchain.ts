@@ -10,11 +10,10 @@
 // manifests -- which is what makes the whole set zero-configuration: the opt-in already exists,
 // written by the people who own the tree, and nothing has to be duplicated into a tenant record.
 //
-// The concrete case that decides it is the live one. `rimonhanna/Invoices-Wizard` declares
-// `pytest`, `pytest-cov`, `pytest-timeout`, `ruff` and `playwright` in
-// `[project.optional-dependencies].dev`, and configures `[tool.ruff]` and
+// The concrete case that decides it is the live one. The live Python tenant declares `pytest`
+// and `ruff` in `[project.optional-dependencies].dev`, and configures `[tool.ruff]` and
 // `[tool.pytest.ini_options]`. It declares NO mypy and carries NO `[tool.mypy]`. A blanket mypy
-// default would run a type checker over ~5.9MB of un-annotated Python and emit thousands of
+// default would run a type checker over a large un-annotated code base and emit thousands of
 // `error: Function is missing a type annotation` / `Cannot find implementation or library stub`
 // findings -- a red, merge-blocking gate on the tenant's very first PR, reporting a "defect" the
 // repo never signed up for and that no diff-scoped fix can clear. That is not a strict gate, it
@@ -315,11 +314,10 @@ export function pythonProfileOf(profiles: readonly StackProfile[] | undefined): 
 //   1. PEP 668. The composite runner action does `actions/setup-node` + `npm ci` for its own code
 //      and nothing else, so a Python gate arrives on a runner with a SYSTEM interpreter and no
 //      project environment. On an EXTERNALLY-MANAGED interpreter -- most distro Pythons, and
-//      specifically the SELF-HOSTED runners tenants use (`rimonhanna/Invoices-Wizard` has three) --
-//      a bare `pip install -e '.[dev]'` fails with `error: externally-managed-environment` before
-//      anything is installed. A gate that shells straight to `ruff` then does not lint an un-linted
-//      repo: it fails to start, and the naive reading of that failure ("the linter is unhappy") is
-//      a red gate nobody can fix.
+//      specifically the SELF-HOSTED runners tenants use -- a bare `pip install -e '.[dev]'` fails
+//      with `error: externally-managed-environment` before anything is installed. A gate that
+//      shells straight to `ruff` then does not lint an un-linted repo: it fails to start, and the
+//      naive reading of that failure ("the linter is unhappy") is a red gate nobody can fix.
 //
 //      NOT universal, and it was wrong to write it as if it were: GitHub's HOSTED images delete the
 //      `EXTERNALLY-MANAGED` marker during provisioning, so ubuntu-latest's `python3` accepts a bare
@@ -342,9 +340,9 @@ export function pythonProfileOf(profiles: readonly StackProfile[] | undefined): 
 // venv's site-packages -- and the CWD is the checkout. A committed `ruff/__main__.py` (or a
 // top-level `pytest.py`, which happens by ACCIDENT) is imported in preference to the real tool, so
 // both the probe and the run execute PR-authored code. Measured on one repo, the same violations:
-// without the shim `python-ruff` failed with three real errors; with a three-line
-// `ruff/__main__.py` that printed a version and exited 0 it PASSED. The venv's console scripts
-// (`<venv>/bin/ruff`) are absolute paths outside the checkout and resolve nothing from the CWD.
+// without the shim `python-ruff` reported them; with a three-line `ruff/__main__.py` that printed
+// a version and exited 0 it PASSED. The venv's console scripts (`<venv>/bin/ruff`) are absolute
+// paths outside the checkout and resolve nothing from the CWD.
 export const PYTHON_VENV_ROOT_ENV = 'AUTOPILOT_PYTHON_VENV_ROOT';
 
 // Where this checkout's venv lives. Deterministic (so one stage's gates share it), outside the
@@ -393,10 +391,10 @@ export function shellQuote(value: string): string {
 //
 // NO `|| <fallback>` ON THE EXTRAS INSTALL. The first cut wrote
 // `pip install -e '.[dev]' || pip install -e .`, which DISCARDS the real error: a project whose dev
-// extra fails to resolve (Invoices-Wizard pulls PyMuPDF and playwright) then bootstrapped
-// "successfully" without its tools, and the gate reported the misleading "declared but not
-// installed after a successful bootstrap". The extra is now only named when the manifest actually
-// declares it, so a failure to install it is a real failure with its own error text.
+// extra fails to resolve (a dev extra routinely pulls native wheels and a browser driver) then
+// bootstrapped "successfully" without its tools, and the gate reported the misleading "declared
+// but not installed after a successful bootstrap". The extra is now only named when the manifest
+// actually declares it, so a failure to install it is a real failure with its own error text.
 export function pythonInstallCommand(
   profile: StackProfile,
   workspaceRoot: string,

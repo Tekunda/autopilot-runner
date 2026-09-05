@@ -1,10 +1,10 @@
 // The `fix` stage's own verdict on the round it just ran, produced runner-side in finalize and
 // carried back to the control plane on the fix-report artifact.
 //
-// WHY THIS EXISTS (TEK-3784). Before it, a fix attempt could report exactly two things: it
-// changed something, or it failed. It had no way to say "this finding is itself wrong", and
-// nothing distinguished removing a SYMPTOM from fixing a CAUSE. Handed a finding it could not
-// legitimately satisfy -- the seo site-crawl gate reporting "unresolved template markers
+// WHY THIS EXISTS (the disputed-finding incident). Before it, a fix attempt could report exactly
+// two things: it changed something, or it failed. It had no way to say "this finding is itself
+// wrong", and nothing distinguished removing a SYMPTOM from fixing a CAUSE. Handed a finding it
+// could not legitimately satisfy -- the seo site-crawl gate reporting "unresolved template markers
 // {{ secrets.SF_JWT_KEY_QA }}" against a `<pre><code>` GitHub Actions sample in an article ABOUT
 // writing GitHub Actions -- the fixer took the finding as ground truth and edited the article
 // until the regex went quiet. Round one replaced `${{ secrets.SF_JWT_KEY_QA }}` with a literal

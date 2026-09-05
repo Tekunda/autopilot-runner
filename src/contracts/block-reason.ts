@@ -4,9 +4,9 @@
 // the stale-block revalidation lanes select their population by matching the reason's TEXT
 // (blocked-recovery.ts's `resumeEntitlementBlocked` keys on `entitlement:`, `isFindingsBlock`
 // on `review not met`), so a block with no reason matches no predicate and is invisible to
-// every recovery lane -- permanently unrecoverable AND unexplainable. That shipped: on
-// 2026-09-02 the repo-budget gate blocked ticket 3ceac5b0-... having computed the sentence
-// "budget: repo \"Tekunda/Website\" is over its configured budget cap" and then persisted a
+// every recovery lane -- permanently unrecoverable AND unexplainable. That shipped: the
+// repo-budget gate blocked a ticket having computed the sentence
+// "budget: repo \"<owner>/<repo>\" is over its configured budget cap" and then persisted a
 // state with no reason at all.
 //
 // `BlockReason` is a branded string that only `blockReason()` can mint, and TicketState /

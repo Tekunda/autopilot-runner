@@ -1,8 +1,8 @@
 // Content integrity for bytes the runner downloads before it executes them.
 //
-// The runner no longer bundles the licensed pack gates (see ./pack-bundle.ts and
-// src/packs/runner-gates.ts); it fetches them at run time. Fetching CODE over the network
-// from inside a job that holds the customer's credentials is a trust boundary, and the only
+// The runner does not bundle the licensed pack gates (see ./pack-bundle.ts); it fetches them at
+// run time. Fetching CODE over the network from inside a job that holds the customer's
+// credentials is a trust boundary, and the only
 // thing on the runner's side of it is this: the expected digest travels in the SIGNED
 // ExecutionGrant, so it cannot be swapped by whoever serves the bytes, and the bytes are
 // checked against it BEFORE they are parsed, written to disk, or imported.

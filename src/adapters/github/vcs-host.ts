@@ -125,12 +125,12 @@ const ASYNC_MERGE_POLL_INTERVAL_MS = 5_000;
 const MERGE_VERIFY_TIMEOUT_MS = 5_000;
 
 // The merge method every control-plane merge lands with. NOT a default worth leaving implicit:
-// rollups and promotions must produce a MERGE COMMIT, because the Website deploy workflow reads
+// rollups and promotions must produce a MERGE COMMIT, because a tenant's deploy workflow reads
 // the merge commit's second parent to decide what changed, and blocked-recovery compares refs by
 // ancestry (see blocked-recovery.ts -- "a squash-merged ref is an ancestor of nothing and
 // compares as uncontained forever"). The synchronous endpoint happens to default to `merge`
 // already; `merge-async` documents NO default at all and could resolve to the repository's
-// configured one (Tekunda/Website allows squash and rebase too), so both paths state it.
+// configured one (a tenant repo may allow squash and rebase too), so both paths state it.
 //
 // This applies to EVERY PR that reaches this method, subtask PRs included -- they arrive here via
 // completeOrArmMerge from subtask-pipeline's drive paths, so this is not a rollup-only concern.
@@ -148,7 +148,7 @@ const MERGE_METHOD = 'merge';
 // OpenAPI (`pull-request-merge-async-result`) gives the RESPONSE enum as
 // ["default","merge","squash","rebase"] while the PUT REQUEST enum is only
 // ["merge","squash","rebase"], so `default` means "whatever this repository is configured to do"
-// -- and Tekunda/Website permits squash. Refusing it therefore cannot wedge our own resume: the
+// -- and a tenant repo may permit squash. Refusing it therefore cannot wedge our own resume: the
 // request enum cannot express `default`, so a 409 reporting it is BY DEFINITION somebody else's
 // enqueued request (a human, native auto-merge, an older deployment), never one this code sent.
 // Refusing is free; adopting risks landing a squash on an integration branch.
@@ -312,8 +312,8 @@ export class GitHubVCSHost implements VCSHost {
   // The synchronous endpoint is still the normal path -- one request, done. But it cannot merge
   // every PR: a STACKED pull request (one whose base is another open PR's head) is refused with
   // a 403 -- "Merging stacked PRs via this endpoint is not supported. Use the asynchronous merge
-  // endpoint instead." -- and no amount of retrying changes that. TEK-3766 wedged for days on
-  // exactly this: rollup PR #1532 targeted the head branch of open promotion PR #1518, the
+  // endpoint instead." -- and no amount of retrying changes that. A ticket wedged for days on
+  // exactly this: a rollup PR targeted the head branch of an open promotion PR, the
   // adapter only knew the synchronous endpoint, and a permanent refusal was filed as a retryable
   // "pending" that burned eight ticks and then blocked with an invented reason.
   //
@@ -397,11 +397,11 @@ export class GitHubVCSHost implements VCSHost {
       // method that is not ours. `merge_method` in a 409 body is not part of the documented
       // contract -- the 409 documents the uuid -- and it is evidenced solely by this repo's own
       // stub, exactly the argument this same lane makes about the uuid. A terminal verdict keyed
-      // on a guess about an undocumented field's spelling is TEK-3766 with the sign flipped: our
-      // own healthy async merge refused on tick two, with a fabricated reason describing somebody
-      // else's merge. So: case- and whitespace-insensitive, and only UNADOPTABLE_MERGE_METHODS
-      // counts. Anything else -- absent, unrecognised, a shape this code does not know -- is
-      // ADOPTED, with a one-shot warning so it is diagnosable in one run.
+      // on a guess about an undocumented field's spelling is the stacked-merge incident with the
+      // sign flipped: our own healthy async merge refused on tick two, with a fabricated reason
+      // describing somebody else's merge. So: case- and whitespace-insensitive, and only
+      // UNADOPTABLE_MERGE_METHODS counts. Anything else -- absent, unrecognised, a shape this code
+      // does not know -- is ADOPTED, with a one-shot warning so it is diagnosable in one run.
       const runningMethod = asyncMergeMethodOf(err.body);
       const normalizedMethod = runningMethod?.trim().toLowerCase();
       if (normalizedMethod !== undefined && normalizedMethod !== MERGE_METHOD) {
@@ -854,7 +854,7 @@ export class GitHubVCSHost implements VCSHost {
 
   async protectedRules(repoId: string, branch: string): Promise<{ requiredChecks: string[]; requiresReview: boolean }> {
     // A branch's required checks can come from classic branch protection OR a
-    // repository ruleset (e.g. Website's `test-qa-gate` ruleset requires `qa`).
+    // repository ruleset (e.g. a tenant ruleset that requires the `qa` check).
     // Reading only the legacy endpoint silently misses ruleset-required checks
     // and lets a promotion merge past a gate the repo actually enforces -- so
     // read both and union them. (live-readiness 2026-08-19 §4.)
@@ -984,10 +984,10 @@ export class GitHubVCSHost implements VCSHost {
   }
 
   // The owner half of GitHub's `head=owner:branch` filter is matched case-insensitively, the
-  // branch half is not. VERIFIED against a live repo: `gh api "repos/Tekunda/Website/pulls?state=all&head=tekunda%3A$B"`
-  // returns the same count as the canonically-cased query; the CONTROL is the same query with
-  // `head=octocat%3A$B`, which returns 0 -- a real but unrelated owner, proving the filter is
-  // genuinely matched rather than silently dropped. Re-run that pair to detect a server-side flip.
+  // branch half is not. VERIFIED against a live repo: `gh api "repos/<owner>/<repo>/pulls?state=all&head=<owner-lowercased>%3A$B"`
+  // returns the same count as the canonically-cased query; the CONTROL is the same query with a
+  // real but UNRELATED owner, which returns 0 -- proving the filter is genuinely matched rather
+  // than silently dropped. Re-run that pair to detect a server-side flip.
   // repoId is canonicalized at startup (see canonicalRepoId), so this assumption is not
   // load-bearing for a tenant started after that -- but it still is on canonicalRepoId's own
   // fallback path (a lookup that fails keeps the configured spelling) and for any ticket/tenant
@@ -1056,8 +1056,8 @@ export class GitHubVCSHost implements VCSHost {
     const sha = (await this.getBranchSha(repoId, ref)) ?? ref;
     // A skipped gate is FINISHED, it just never ran, and a superseded stage is finished too --
     // its run was cancelled before it could report. Both must be published `completed`; only a
-    // genuinely running stage stays in_progress, or it hangs on the PR forever (Website PR
-    // #1453 sat on an `Autopilot / gate` in_progress whose run had been cancelled, BLOCKED).
+    // genuinely running stage stays in_progress, or it hangs on the PR forever (a PR once sat
+    // on an `Autopilot / gate` in_progress whose run had been cancelled, BLOCKED).
     const completes = check.status !== 'pending' || check.skipped === true || check.cancelled === true;
     const payload = {
       name: check.name,

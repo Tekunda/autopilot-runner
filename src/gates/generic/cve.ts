@@ -8,7 +8,7 @@
 // THE FAILURE THIS FILE EXISTS TO PREVENT: an audit that could not RUN must
 // never be reportable as "clean". The first version of this gate ran
 // `npm audit --json` unconditionally and did `report.vulnerabilities ?? {}`.
-// On a Yarn tenant (Tekunda/Website: `yarn.lock`, no `package-lock.json`) npm
+// On a Yarn tenant (`yarn.lock`, no `package-lock.json`) npm
 // exits non-zero and prints a perfectly VALID JSON error document --
 //   {"error":{"code":"ENOLOCK","summary":"This command requires an existing lockfile.",...}}
 // -- so `JSON.parse` succeeded, `?? {}` turned the missing `vulnerabilities`
@@ -251,9 +251,9 @@ function shapeProblem(reason: string): AuditPlan {
   return { kind: 'inconclusive', cause: 'repo-shape', reason };
 }
 
-// Pure routing. Mirrors what the pipeline this gate replaced did
-// (Tekunda/Website scripts/security-deps-check.sh: npm when a sibling
-// package-lock.json exists, otherwise yarn) and then goes further, because
+// Pure routing. Mirrors what the shell pipeline this gate replaced did
+// (its dependency-audit script: npm when a sibling package-lock.json
+// exists, otherwise yarn) and then goes further, because
 // "yarn" is two incompatible tools:
 //   - Yarn 1 classic: `yarn audit --json`, NDJSON (one JSON object per LINE).
 //   - Yarn 2+ (Berry): `yarn audit` does not exist; it is `yarn npm audit`,

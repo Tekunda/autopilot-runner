@@ -23,7 +23,7 @@ export interface Frontmatter {
 }
 
 // One authored body fragment of a page, and the file an editor would open to change it.
-// A content model that keeps its body OUTSIDE the page file (Website's articles put per-locale
+// A content model that keeps its body OUTSIDE the page file (articles that put per-locale
 // HTML in sibling `.html` files named by `copy.<locale>.bodyFile`) has one of these per locale,
 // so a body-level finding can name the `.nl.html` that actually carries the defect instead of
 // the `.json` that merely references it.
@@ -70,8 +70,8 @@ export interface PageClassification {
 // One indexable surface a content record publishes: for ONE locale, on ONE route,
 // the `<title>` the page emits there and the URL segment it occupies.
 //
-// A record can publish several: a multilingual document has one per locale, and a
-// Website article routed by its `scopes` array has one per (locale, scope). The
+// A record can publish several: a multilingual document has one per locale, and an
+// article routed by its `scopes` array has one per (locale, scope). The
 // cannibalization gate compares these across the tree, so every field it needs to
 // name a defect an AUTOFIXER can act on is carried here -- including which field
 // produced each value. "Two pages emit the same title" is not actionable; "98's
@@ -103,8 +103,8 @@ export interface IndexedTitle {
 // several hundred records.
 export interface IndexedRecord {
   relativePath: string;
-  // The record's publication status, verbatim. Website's convention, and the rule
-  // the gate applies, is that ABSENT means published; `draft`/`archived` mean the
+  // The record's publication status, verbatim. The content-tree convention, and the
+  // rule the gate applies, is that ABSENT means published; `draft`/`archived` mean the
   // record is not indexable and therefore cannot cannibalize anything.
   status?: string;
   // The declared target keyword, where the format has one (markdown frontmatter).

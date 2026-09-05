@@ -287,7 +287,7 @@ export interface VCSHost {
   /**
    * Land the PR on its base branch.
    *
-   * Two obligations, both learned the hard way (TEK-3766):
+   * Two obligations, both learned the hard way in the stacked-merge incident:
    *
    * 1. RESOLVE ONLY ONCE THE PR IS ACTUALLY MERGED. Not "the request was accepted", not "the
    *    host queued it" -- merged. Every caller reads a resolved merge() as "the work landed"
@@ -614,10 +614,10 @@ export function retryableHostMessage(message: string): boolean {
  * this, and waiting cannot change that) or not. Returns the refusal -- status plus the host's
  * verbatim message -- when permanent, and `undefined` for everything else.
  *
- * THE RULE, and why it is drawn exactly here (TEK-3766: a permanent 403 was filed as `pending`,
- * burned an 8-tick retry budget, and then blocked a ticket with a fabricated reason -- "rollup
- * merge stayed pending 8 ticks" -- that named the retry loop instead of the cause, so every
- * human "resume" restarted the same loop):
+ * THE RULE, and why it is drawn exactly here (the stacked-merge incident: a permanent 403 was filed
+ * as `pending`, burned an 8-tick retry budget, and then blocked a ticket with a fabricated reason
+ * -- "rollup merge stayed pending 8 ticks" -- that named the retry loop instead of the cause, so
+ * every human "resume" restarted the same loop):
  *
  *   PERMANENT = 403 or 422, MINUS anything that is really a throttle or a race.
  *
