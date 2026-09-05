@@ -356,12 +356,22 @@ export async function computeChangedFiles(baseRef: string, cwd: string = process
   // silent false green (a spec containing `it.only(...)` sails through the structure gate),
   // and it is invisible precisely because nothing errors. The NUL stream also preserves names
   // with trailing whitespace, which the old `.trim()` mangled.
+  //
+  // `--no-renames` is not cosmetic either, and it is the same class of silent false green. With
+  // rename detection on (git's default), a moved file is reported as ONE path -- the destination.
+  // So `git mv apps/tekunda-web/components/Foo.tsx packages/ui/Foo.tsx` yields a changed-file list
+  // containing NOTHING under `apps/tekunda-web/`, even though the diff deletes a file from it. Every
+  // path-scoped consumer then concludes the directory it guards was untouched: a command gate
+  // scoped to `apps/tekunda-web/**` skips, a site scoped to it is not served, and the salesforce/
+  // python/lwc selectors miss the source they exist to find. Turning detection off reports both
+  // sides of the move, which is what a SCOPE question needs -- it asks which trees this diff
+  // touched, and a move touches two.
   let out: string;
   try {
-    out = await git(['diff', '--name-only', '-z', `${base}...HEAD`]);
+    out = await git(['diff', '--no-renames', '--name-only', '-z', `${base}...HEAD`]);
   } catch (err) {
     await git(['fetch', '--unshallow', 'origin']).catch(() => undefined);
-    out = await git(['diff', '--name-only', '-z', `${base}...HEAD`]).catch(() => {
+    out = await git(['diff', '--no-renames', '--name-only', '-z', `${base}...HEAD`]).catch(() => {
       throw err;
     });
   }

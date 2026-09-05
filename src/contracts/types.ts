@@ -174,7 +174,7 @@ export interface GatePolicy {
 export type GateSpec =
   | { kind: 'generic'; id: string; config?: Record<string, unknown>; blocking?: boolean }
   | { kind: 'prompt'; id: string; prompt: string }
-  | { kind: 'command'; id: string; run: string; blocking?: boolean };
+  | { kind: 'command'; id: string; run: string; blocking?: boolean; paths?: string[] };
 
 // One MCP server an agent stage may use, carried in the signed grant (control-plane
 // authority) so the runner writes a claude-code-action `--mcp-config` file for it. The
@@ -300,6 +300,15 @@ export interface SiteConfig {
   //
   // Absent, or no entry for this base branch -> no baseline, every finding blocks as before.
   deployedBaseUrls?: Record<string, string>;
+  // The repo-relative path patterns whose changes this site's build depends on (`apps/serpent-web/**`,
+  // `content/site/**/serpent/**`). The heavy stage serves and crawls a site only when the PR's diff
+  // touches them, so a dual-brand monorepo stops paying two production builds for a one-brand diff.
+  //
+  // Scoping is OPT-IN and fails towards RUNNING: absent on any site -> that site is always served;
+  // absent on every site -> the feature is off; a changed file matching NO site's patterns is a
+  // SHARED change and selects every site. See contracts/changed-paths.ts, which owns the rules --
+  // a missed gate is worse than a wasted one.
+  paths?: string[];
 }
 
 export interface CheckResult {
@@ -951,6 +960,16 @@ export interface InFlightStage {
   // evidence available at the boundary: the head moved, so something was actually pushed. Absent
   // on legacy markers and when the host could not answer, both of which read as "no evidence".
   feedbackHeadSha?: string;
+  // The PR head sha this stage was DISPATCHED against, for a stage whose verdict is a claim about
+  // a particular commit (`gate`, `accept`). A reconcile happens ticks later and reads the head as
+  // it is THEN, so without this the verdict is stamped onto -- and published onto -- whatever the
+  // branch points at now: VCSHost.publishCheck re-resolves the branch to its current head, so the
+  // ticket memory and the published check move onto the wrong commit together, and a commit
+  // nothing gated carries a green gate check. The gate window is a multi-site production build,
+  // so that race is wide. A mismatch means the run judged a superseded commit and its verdict is
+  // discarded. Absent on legacy markers and when the host could not answer -- both read as "no
+  // evidence", which never invalidates.
+  dispatchHeadSha?: string;
   // The check-run id VCSHost.publishCheck returned for this stage's `pending` progress
   // publish, so the LATER publish that reports this stage's pass/fail can PATCH that same
   // check-run instead of POSTing a second one that never transitions out of `in_progress`
@@ -1682,6 +1701,31 @@ export interface TicketState {
   // longer matches this sha is somebody else's push -- new work, and it gets a fresh budget.
   // Only meaningful while the budget is spent; the reset clears it.
   externalQaExhaustedSha?: string;
+  // The DETERMINISTIC gate stage's verdict for one external-PR head. The `accept` judgment above
+  // is a model reading the diff with a shell; this is the tenant's own entitled pack gates
+  // (seo-site-crawl, the command gates, ...) run under a real `gate` grant on the same PR --
+  // which the ticket-driven lane has always had and this one did not, so a redirecting internal
+  // link that seo-site-crawl exists to catch shipped to `test` and broke the image build.
+  //
+  // Head-scoped like externalQaExhaustedSha, and for the same reason: a new head is new work and
+  // must be re-gated. An ABSENT PRStatus.headSha is UNKNOWN, never "already gated" -- with no sha
+  // to compare, the gate runs again (the compareRefs discipline).
+  // `checks` carries the FAILING gate results verbatim (bounded by the fix prompt's own budget),
+  // because VCSHost.listChecks does not round-trip findings -- without them a later tick could
+  // only tell the fixer "the gate failed", not which gate or why. Present on `fail` and `infra`.
+  //
+  // `infra` is a THIRD outcome, not a flavour of `fail`, and the distinction is the whole point: a
+  // gate that timed out, produced no checks, died in dependency install, or could not be judged
+  // never ran the tenant's code, so it is evidence about the infrastructure and none about the
+  // PR. It must never reach the fixer (there is nothing to fix) and must never be reported as the
+  // author's defect. It is stamped only once the bounded gate retries below are spent.
+  externalGate?: { headSha: string; outcome: 'pass' | 'fail' | 'infra'; recordedAt: string; checks?: CheckResult[] };
+  // Consecutive gate-stage INFRA faults on an external PR's current head, bounding the gate
+  // re-dispatch the way the ticket-driven lane's `gateErrorAttempts` bounds its own. One counter
+  // for all four fault classes on purpose: it bounds how long a PR may sit on gates that never
+  // judged it, whatever kept them from judging, so a PR alternating classes earns no fresh budget.
+  // Cleared by any real verdict.
+  externalGateErrorAttempts?: number;
   // Set when the control plane holds a decomposed ticket for a replan/continue decision --
   // its recorded plan is possibly stale (the ticket re-entered the ready status, or every
   // ticket blocking it has shipped) and a human must choose: reply "replan" to discard the

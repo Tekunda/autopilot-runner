@@ -20,6 +20,7 @@
 import { spawn as nodeSpawn } from 'node:child_process';
 
 import type { CheckResult, ExecutionGrant, ServeConfig, SiteConfig, StatusTelemetry } from '../contracts/types.ts';
+import { sitesForChangedFiles } from '../contracts/changed-paths.ts';
 import type { ExecutorCredential } from '../gates/visual/judge.ts';
 import { verifyGrant } from '../control-plane/grant-verify.ts';
 import { runCommand as defaultRunCommand } from '../gates/exec.ts';
@@ -351,6 +352,26 @@ function siteServeFailureChecks(site: SiteConfig, urlBoundIds: ReadonlySet<strin
   return [...skipChecks, serveCheck];
 }
 
+// The URL-bound gates a site's OWN checks would have carried, reported as an explicit per-site
+// SKIP because this PR's diff touches none of the site's declared `paths`. Published rather than
+// silently omitted: an absent check is indistinguishable from a gate nobody noticed did not run,
+// which is the failure mode run-gate-stage.ts's `missing` backstop exists for. Same shape as
+// siteServeFailureChecks' skips (including `baseId` for the never-run ledger); only the reason
+// differs, and it is a DIFF-scoped one -- the next PR touching this site runs it.
+function siteOutOfScopeChecks(site: SiteConfig, urlBoundIds: ReadonlySet<string>, changedFiles: readonly string[]): CheckResult[] {
+  return [...urlBoundIds].map((id) => ({
+    name: `${id} (${site.name})`,
+    baseId: id,
+    status: 'pending' as const,
+    skipped: true as const,
+    skipReason: 'no-matching-files' as const,
+    findings: [
+      `${site.name} was not served: none of the ${changedFiles.length} changed file(s) matches ` +
+        `[${(site.paths ?? []).join(', ')}], so this diff cannot change what ${id} would see there.`,
+    ],
+  }));
+}
+
 // The multi-site heavy run. The deterministic gates (and any command gates) run ONCE against the
 // PR checkout with no server; the URL-bound gates (seo-site-crawl, visual-qa) run ONCE PER SITE,
 // each against that site's freshly served instance, with its baseUrl + per-site gateConfig
@@ -395,7 +416,19 @@ async function runPerSiteHeavyGates(
   }
 
   if (urlBoundIds.size > 0) {
+    // Serve only the sites this PR's diff can actually affect. A production build + crawl PER SITE
+    // is the most expensive thing this stage does, and a dual-brand monorepo was paying for every
+    // brand on every PR. Opt-in (SiteConfig.paths) and biased towards running: an unscoped tenant
+    // is unchanged, and a changed file no site claims is shared and selects all of them. See
+    // contracts/changed-paths.ts.
+    const changedFiles = deps.target.changedFiles;
+    const selected = sitesForChangedFiles(sites, changedFiles);
     for (const site of sites) {
+      if (selected.includes(site)) continue;
+      process.stdout.write(`[site] ${site.name}: not served -- out of this diff's path scope\n`);
+      checks.push(...siteOutOfScopeChecks(site, urlBoundIds, changedFiles));
+    }
+    for (const site of selected) {
       let served: ServedSite | undefined;
       try {
         try {

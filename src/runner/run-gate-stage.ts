@@ -365,7 +365,18 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
   for (const spec of commandSpecs) {
     if (deps.registry.get(spec.id)) continue;
     deps.registry.register(
-      createCommandGate({ name: spec.id, run: spec.run, ...(spec.blocking !== undefined ? { blocking: spec.blocking } : {}) }, workspaceRoot),
+      createCommandGate(
+        {
+          name: spec.id,
+          run: spec.run,
+          ...(spec.blocking !== undefined ? { blocking: spec.blocking } : {}),
+          // Changed-path scope, honoured against ctx.changedFiles inside the gate: a scoped gate
+          // whose patterns this diff misses SKIPS rather than running. Dropping it here would
+          // make a signed scope a silent no-op, which is the shape onBase already is.
+          ...(spec.paths ? { paths: spec.paths } : {}),
+        },
+        workspaceRoot,
+      ),
     );
   }
 
