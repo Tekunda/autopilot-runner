@@ -22,10 +22,27 @@ export interface Frontmatter {
   fields?: Record<string, string>;
 }
 
+// One authored body fragment of a page, and the file an editor would open to change it.
+// A content model that keeps its body OUTSIDE the page file (Website's articles put per-locale
+// HTML in sibling `.html` files named by `copy.<locale>.bodyFile`) has one of these per locale,
+// so a body-level finding can name the `.nl.html` that actually carries the defect instead of
+// the `.json` that merely references it.
+export interface PageBody {
+  /** Repo-relative path of the file holding this fragment. */
+  path: string;
+  body: string;
+}
+
 export interface Page {
   relativePath: string;
   frontmatter: Frontmatter;
   body: string;
+  // Every authored fragment the page owns, ACROSS locales -- present only for content models
+  // that split the body out of the page file. Absent for markdown, where the page IS its body
+  // and `body` already says everything. `body` stays the base-locale view every other gate
+  // reads; this is the additional per-file view a gate needs when it must name the offending
+  // file (see seo-monitor's H1 rule).
+  bodies?: PageBody[];
 }
 
 export interface Link {

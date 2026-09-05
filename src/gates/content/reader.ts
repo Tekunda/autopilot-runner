@@ -18,7 +18,7 @@ import path from 'node:path';
 import * as jsonImpl from './json.ts';
 
 import type { Frontmatter, Image, Link, Page, PageClassification } from './types.ts';
-export type { Frontmatter, Image, Link, Page, PageClassification } from './types.ts';
+export type { Frontmatter, Image, Link, Page, PageBody, PageClassification } from './types.ts';
 
 const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/;
 // Keys may carry the `og:image` / `twitter:card` colon convention, so `:` (along with `-` and
@@ -219,6 +219,18 @@ export interface ContentReader {
   extractLinks(body: string): Link[];
   extractImages(body: string): Image[];
   extractH1s(body: string): string[];
+  /**
+   * Whether the bodies this reader returns are FRAGMENTS the site's renderer wraps in a
+   * template, rather than whole documents. It decides which way the H1 rule points, and the
+   * two directions are opposites -- so a gate that assumes one is wrong on every page of the
+   * other.
+   *
+   * A markdown page IS the document: no `# ` heading means the rendered page has no H1 at all,
+   * and that is the defect. A JSON body fragment is rendered INSIDE a component that already
+   * emits the `<h1>` from the page's title field, so a fragment correctly starts at `<p>`/`<h2>`
+   * and an `<h1>` INSIDE it is the defect -- it renders a second H1 on the page.
+   */
+  bodyIsFragment(relativePath: string): boolean;
   /** The route the file serves, for diff-driven target derivation (visual-qa). */
   routeFor(relativePath: string): Promise<string>;
 }
@@ -233,6 +245,7 @@ function createMarkdownReader(opts: ContentReaderOptions): ContentReader {
     extractLinks,
     extractImages,
     extractH1s,
+    bodyIsFragment: () => false,
     routeFor: async (rel) => markdownRoute(rootDir, contentDir, rel),
   };
 }
@@ -245,13 +258,14 @@ function createJsonReader(opts: ContentReaderOptions): ContentReader {
     // which has to read the document to decide.
     classifyPage: async (rel) => {
       const reason = nonPageNameReason(rel);
-      return reason ? { isPage: false, reason } : jsonImpl.classifyJsonDocument(rootDir, rel);
+      return reason ? { isPage: false, reason } : jsonImpl.classifyJsonDocument(rootDir, rel, baseLocale);
     },
     listContentFiles: () => jsonImpl.listJsonContentFiles(rootDir, contentDir),
     loadPage: (rel) => jsonImpl.loadJsonPage(rootDir, rel, baseLocale),
     extractLinks: jsonImpl.extractJsonLinks,
     extractImages: jsonImpl.extractJsonImages,
     extractH1s: jsonImpl.extractJsonH1s,
+    bodyIsFragment: () => true,
     routeFor: (rel) => jsonImpl.jsonPageRoute(rootDir, contentDir, rel),
   };
 }
@@ -271,6 +285,7 @@ function createAutoReader(opts: ContentReaderOptions): ContentReader {
     extractLinks: (body) => [...md.extractLinks(body), ...json.extractLinks(body)],
     extractImages: (body) => [...md.extractImages(body), ...json.extractImages(body)],
     extractH1s: (body) => [...md.extractH1s(body), ...json.extractH1s(body)],
+    bodyIsFragment: (rel) => readerFor(rel).bodyIsFragment(rel),
     routeFor: (rel) => readerFor(rel).routeFor(rel),
   };
 }
@@ -287,6 +302,18 @@ function createAutoReader(opts: ContentReaderOptions): ContentReader {
 export interface PageSelection {
   pages: string[];
   notes: string[];
+  /**
+   * The selected pages whose classification was INCONCLUSIVE (`isPage: true` WITH a reason).
+   * They stay in `pages` -- the fail-safe direction is unchanged, and every structural rule
+   * still applies to them -- but a caller must not assert anything about their METADATA.
+   *
+   * "We could not confidently read this document" and "this document's title is missing" are
+   * different statements, and only the first one is true. Website's legal pages carry ar/fr/de
+   * copy while the English body comes from Notion; grading their base-locale metadata reported
+   * three missing titles and three missing descriptions that no one could act on, because the
+   * title is not absent, it is simply not here.
+   */
+  inconclusive: Set<string>;
 }
 
 export async function selectPages(
@@ -300,6 +327,7 @@ export async function selectPages(
 
   const pages: string[] = [];
   const notes: string[] = [];
+  const inconclusive = new Set<string>();
   inScope.forEach((file, i) => {
     const { isPage, reason } = classified[i];
     if (!isPage) {
@@ -308,10 +336,13 @@ export async function selectPages(
     }
     // isPage with a reason == inconclusive: checked anyway (the safe side), but
     // said out loud so the run explains why it looked at an odd file.
-    if (reason) notes.push(`checking ${file} despite an inconclusive classification: ${reason}`);
+    if (reason) {
+      notes.push(`checking ${file} despite an inconclusive classification: ${reason}`);
+      inconclusive.add(file);
+    }
     pages.push(file);
   });
-  return { pages, notes };
+  return { pages, notes, inconclusive };
 }
 
 // The `notes` a gate carries on its result, tagged so they read as provenance
