@@ -20,13 +20,14 @@
 import { spawn as nodeSpawn } from 'node:child_process';
 
 import type { CheckResult, ExecutionGrant, ServeConfig, SiteConfig, StatusTelemetry } from '../contracts/types.ts';
-import { sitesForChangedFiles } from '../contracts/changed-paths.ts';
+import { matchesAnyPath, sitesForChangedFiles } from '../contracts/changed-paths.ts';
+import { canonicalGateId, gateConfigFor } from '../gates/gate-id-aliases.ts';
 import type { ExecutorCredential } from '../gates/visual/judge.ts';
 import { verifyGrant } from '../control-plane/grant-verify.ts';
 import { runCommand as defaultRunCommand } from '../gates/exec.ts';
 import { boundedCapture } from '../gates/output-capture.ts';
 import { registerHeavyGatesForSpecs } from './gate-registry.ts';
-import { URL_BOUND_HEAVY_GATE_IDS } from './heavy-gate-ids.ts';
+import { SITE_SCOPED_GATE_IDS, URL_BOUND_HEAVY_GATE_IDS } from './heavy-gate-ids.ts';
 import { digestFor, grantId, rejectedTelemetry } from './prepare-stage.ts';
 import { runGateStage, type RunGateStageDeps } from './run-gate-stage.ts';
 
@@ -352,34 +353,263 @@ function siteServeFailureChecks(site: SiteConfig, urlBoundIds: ReadonlySet<strin
   return [...skipChecks, serveCheck];
 }
 
-// The URL-bound gates a site's OWN checks would have carried, reported as an explicit per-site
-// SKIP because this PR's diff touches none of the site's declared `paths`. Published rather than
-// silently omitted: an absent check is indistinguishable from a gate nobody noticed did not run,
-// which is the failure mode run-gate-stage.ts's `missing` backstop exists for. Same shape as
+// The gates a site's OWN checks would have carried, reported as an explicit per-site SKIP because
+// this PR's diff touches none of the site's declared `paths`. Published rather than silently
+// omitted: an absent check is indistinguishable from a gate nobody noticed did not run, which is
+// the failure mode run-gate-stage.ts's `missing` backstop exists for. Same shape as
 // siteServeFailureChecks' skips (including `baseId` for the never-run ledger); only the reason
 // differs, and it is a DIFF-scoped one -- the next PR touching this site runs it.
-function siteOutOfScopeChecks(site: SiteConfig, urlBoundIds: ReadonlySet<string>, changedFiles: readonly string[]): CheckResult[] {
-  return [...urlBoundIds].map((id) => ({
+//
+// Both per-site loops report through here, so `notRunPhrase` names what actually did not happen:
+// the URL-bound loop never brought the site's server up ("was not served"), while the site-scoped
+// deterministic loop had a server-less run to make but no file of this site's to make it about
+// ("owns none of this diff").
+function siteOutOfScopeChecks(
+  site: SiteConfig,
+  gateIds: ReadonlySet<string>,
+  changedFiles: readonly string[],
+  notRunPhrase: string,
+): CheckResult[] {
+  return [...gateIds].map((id) => ({
     name: `${id} (${site.name})`,
     baseId: id,
     status: 'pending' as const,
     skipped: true as const,
     skipReason: 'no-matching-files' as const,
     findings: [
-      `${site.name} was not served: none of the ${changedFiles.length} changed file(s) matches ` +
+      `${site.name} ${notRunPhrase}: none of the ${changedFiles.length} changed file(s) matches ` +
         `[${(site.paths ?? []).join(', ')}], so this diff cannot change what ${id} would see there.`,
     ],
   }));
 }
 
-// The multi-site heavy run. The deterministic gates (and any command gates) run ONCE against the
-// PR checkout with no server; the URL-bound gates (seo-site-crawl, visual-qa) run ONCE PER SITE,
-// each against that site's freshly served instance, with its baseUrl + per-site gateConfig
-// overlaid and its checks named `<gate> (<site>)` so a legible per-site check lands. Every site
-// is served then torn down in its own try/finally, so one site's server never leaks into the
-// next. Results aggregate across all calls: a BLOCKING `fail` on ANY site fails the stage, while
-// a report-only gate's fail is published without blocking (each runGateStage call honours the
-// signed `blocking` flag). The loop is gate-agnostic, so an added URL-bound gate (e2e) reuses it.
+// Does this site CLAIM the file -- would it be judged here at all?
+//
+// A site that declared no `paths` never claimed to be scopeable, so it claims EVERYTHING. That is
+// the inclusive reading contracts/changed-paths.ts takes for the same question.
+function siteClaims(site: SiteConfig, file: string): boolean {
+  if (!site.paths || site.paths.length === 0) return true;
+  return matchesAnyPath(file, site.paths);
+}
+
+// Does this site OWN the file -- did it positively NAME it? Stricter than siteClaims: a pathless
+// site claims everything and owns nothing, because it never said what it was about.
+//
+// Ownership, not claim, is what may EXCLUDE a file from another site (filesForSite). The
+// difference decides the shared-file rule: keyed on claim, a pathless sibling would absorb every
+// unclaimed `packages/**` file and the scoped site would skip a file its own build consumes --
+// the opposite of the rule contracts/changed-paths.ts states and sitesForChangedFiles enforces,
+// where a file matching no site's paths selects EVERY site.
+function siteOwns(site: SiteConfig, file: string): boolean {
+  return Boolean(site.paths && site.paths.length > 0 && matchesAnyPath(file, site.paths));
+}
+
+// The changed files ONE site's server-less, site-scoped gates are allowed to judge, plus the two
+// distinct ways a file can be in that run without the site owning it.
+//
+// A file is EXCLUDED from a site only on the positive fact that another site OWNS it and this one
+// does not claim it. So a file NO site owns runs everywhere -- the shared-module / lockfile /
+// cross-site content case -- and ambiguity again resolves towards RUNNING, because a missed gate
+// is worse than a wasted one. It is also why no shared path list has to be written or kept in
+// sync: sites declare only what they OWN.
+//
+// A pathless site is therefore fan-out in both directions: it grades everything, and it excludes
+// nothing from anyone. That is the honest reading -- it declared nothing, so "its" files and
+// shared files are indistinguishable -- and the tenant closes the ambiguity by declaring `paths`.
+//
+// The two unowned sets are returned rather than re-derived by the caller, so the notes that report
+// them and the selection they describe can never disagree. They are kept APART because only one of
+// them supports a cross-site claim:
+//   - `unclaimed`: no site owns it, so by the rule above it is in EVERY site's run. A note may say
+//     so of every site.
+//   - `foreign`: another site owns it and this (pathless) site graded it anyway. A note may say
+//     only what THIS site did -- a third, scoped site excluded it.
+function filesForSite(
+  site: SiteConfig,
+  sites: readonly SiteConfig[],
+  changedFiles: readonly string[],
+): { files: readonly string[]; unclaimed: readonly string[]; foreign: readonly string[] } {
+  const files: string[] = [];
+  const unclaimed: string[] = [];
+  const foreign: string[] = [];
+  for (const file of changedFiles) {
+    const owner = sites.find((candidate) => siteOwns(candidate, file));
+    if (owner && !siteClaims(site, file)) continue;
+    files.push(file);
+    if (!owner) unclaimed.push(file);
+    else if (owner !== site && !siteOwns(site, file)) foreign.push(file);
+  }
+  return { files, unclaimed, foreign };
+}
+
+// How many paths a note names before it summarises the rest. A note is a diagnostic, not a
+// manifest: a 200-file refactor must not bury the finding it is attached to.
+const UNOWNED_FILE_NOTE_LIMIT = 10;
+
+function listed(files: readonly string[]): string {
+  const named = files.slice(0, UNOWNED_FILE_NOTE_LIMIT).join(', ');
+  return files.length > UNOWNED_FILE_NOTE_LIMIT ? `${named}, +${files.length - UNOWNED_FILE_NOTE_LIMIT} more` : named;
+}
+
+// The provenance of the files a site graded without owning them, as `note:` findings.
+//
+// This has to be SAID, not just done. A file graded under more than one site's rules is a file
+// whose finding means something different: it is evidence the file is wrongly shared and wants
+// splitting into per-site variants. Without the provenance a reader (or a fix agent) sees a
+// finding against a file the site never named and reaches for the two wrong repairs -- weakening
+// the rule, or contorting one file to satisfy every site.
+//
+// EVERY SENTENCE HERE IS ONLY WHAT THE DATA SUPPORTS. `unclaimed` is owned by nobody, which by
+// filesForSite's rule puts it in every site's run, so the cross-site sentence is a fact. `foreign`
+// is owned by someone else, so all that can be said is what THIS site did -- a scoped third site
+// excluded that file, and claiming otherwise would send a reader looking for a check that does not
+// exist.
+//
+// A `note:` finding is the seam the content gates already use for "something about WHAT I looked
+// at, which is not itself a defect". Verdicts are computed before these are attached, so a note can
+// never turn a check red, and they ride on every check of the run (not only the failed ones)
+// because they are facts about the selection, not about any one gate's result.
+function selectionNotes(
+  site: SiteConfig,
+  sites: readonly SiteConfig[],
+  selection: { unclaimed: readonly string[]; foreign: readonly string[] },
+): string[] {
+  // Nothing to disambiguate for a lone site: there is no other rule set for a file to also be
+  // graded under, so every sentence below would be about a comparison that does not exist.
+  if (sites.length < 2) return [];
+  // NOBODY declared `paths`. Then every file is unclaimed in every run and a per-file list carries
+  // no information -- it is just the diff, repeated on every check, for the tenants who scoped
+  // nothing. One note that names the cause and the remedy is the whole signal.
+  if (!sites.some((candidate) => candidate.paths && candidate.paths.length > 0)) {
+    return selection.unclaimed.length === 0
+      ? []
+      : [
+          `note: no site declares \`paths\`, so ownership of the ${selection.unclaimed.length} changed file(s) is ` +
+            `undecidable and every site graded all of them under its own rules. Declaring \`paths\` on the sites ` +
+            'will scope this.',
+        ];
+  }
+  const notes: string[] = [];
+  if (selection.unclaimed.length > 0) {
+    notes.push(
+      `note: ${selection.unclaimed.length} changed file(s) are owned by no site, so EVERY site graded them under ` +
+        'its own rules. A finding against one of these means the file is wrongly shared and wants a per-site ' +
+        `variant -- not a weakened rule, and not one file bent to satisfy every site: ${listed(selection.unclaimed)}`,
+    );
+  }
+  if (selection.foreign.length > 0) {
+    notes.push(
+      `note: ${site.name} declares no \`paths\`, so it also graded ${selection.foreign.length} changed file(s) ` +
+        `another site owns. Declare \`paths\` on ${site.name} to stop it judging content it does not own: ` +
+        `${listed(selection.foreign)}`,
+    );
+  }
+  return notes;
+}
+
+// Per-site gateConfig keys that named a site-scoped gate this run did not execute -- so the config
+// sits there looking applied and does nothing.
+//
+// The alias map resolves a LEGACY key onto the canonical gate (gateConfigFor), which is the common
+// case and needs no note. It does not resolve the reverse: config written under the CURRENT name
+// while an unexpired grant still names the old one. That is a real shortfall and the same failure
+// mode scopesOverlapNote exists for, so it is reported rather than dropped.
+//
+// Computed for EVERY site, outside the per-site loop, because the worst case is the one where that
+// loop never runs: the grant names none of these gates at all (the tenant is not entitled, or the
+// gate is off), so `ran` is empty, every per-site value applies to nothing, and there is no
+// per-site check to hang the news on. This note's own text offers exactly that as a cause, so it
+// has to survive it -- see publishedSiteNotes below for how it reaches the report either way.
+function unappliedConfigNote(site: SiteConfig, siteScoped: ReadonlySet<string>, ran: ReadonlySet<string>): string | undefined {
+  const gateConfig = site.gateConfig;
+  if (!gateConfig) return undefined;
+  // Identity, not id arithmetic: "applied" means some gate this run executed actually RESOLVED to
+  // this entry. Comparing canonical ids instead would call a legacy-id run and a canonical-id key
+  // a match, which is the one case that does NOT resolve and the whole reason for this note.
+  const applied = new Set([...ran].map((id) => gateConfigFor(id, gateConfig)).filter((entry) => entry !== undefined));
+  const stranded = Object.keys(gateConfig).filter(
+    (key) => siteScoped.has(canonicalGateId(key)) && !applied.has(gateConfig[key]),
+  );
+  if (stranded.length === 0) return undefined;
+  return (
+    `note: per-site config for ${site.name} names ${stranded.join(', ')}, which this run did not execute, so ` +
+    'those values applied to nothing. The grant may still name the gate under a different id, or the tenant may ' +
+    'not be entitled to it.'
+  );
+}
+
+// The config a gate id would have run with WITHOUT any per-site overlay: the signed spec's own
+// config, else the runner-supplied target config for that id. Mirrors the precedence
+// run-gate-stage.ts applies before it merges the overlay on top.
+function baseConfigFor(grant: ExecutionGrant, deps: RunHeavyGateStageDeps, id: string): Record<string, unknown> {
+  const spec = (grant.gateSpecs ?? []).find((candidate) => candidate.kind === 'generic' && candidate.id === id);
+  const signed = spec?.kind === 'generic' ? spec.config : undefined;
+  // `!== undefined`, not `??`: run-gate-stage.ts tests the same way, so a spec config of `null`
+  // shadows the target config there and must shadow it here too, or this note would be computed
+  // against config the gate never saw.
+  const resolved = signed !== undefined ? signed : deps.target.config?.[id];
+  return resolved && typeof resolved === 'object' ? (resolved as Record<string, unknown>) : {};
+}
+
+// The per-site overlay is a SHALLOW merge, so a base config that still carries the pre-per-site
+// `scopes` workaround keeps it alongside the site's own keys -- and a gate that resolves its scope
+// FIRST then reads the scope's values makes the per-site keys a silent no-op for every file a
+// scope claims. The site would be graded by the older mechanism while its config sits there
+// looking applied, which is the one outcome worse than either mechanism alone.
+//
+// Reported, not resolved: which of the two the tenant meant is a config decision, and guessing it
+// here would hide the very drift this exists to surface. The remedy is to move the rules into the
+// per-site gateConfig and drop the base `scopes` in the SAME write, so the two never both apply.
+function scopesOverlapNote(id: string, siteName: string, base: Record<string, unknown>, perSite: Record<string, unknown>): string | undefined {
+  const scopes = base['scopes'];
+  if (!Array.isArray(scopes) || scopes.length === 0) return undefined;
+  const keys = Object.keys(perSite);
+  if (keys.length === 0) return undefined;
+  return (
+    `note: ${id} has BOTH a base \`scopes\` list (${scopes.length} entr${scopes.length === 1 ? 'y' : 'ies'}) and ` +
+    `per-site config for ${siteName} (${keys.join(', ')}). The gate resolves its scope first, so for every file a ` +
+    'scope claims the per-site values are ignored. Move the rules into the per-site gateConfig and drop the base ' +
+    '`scopes` in the same change.'
+  );
+}
+
+// Attach notes to the checks a per-site run produced. `forAll` rides on every check (facts about
+// the SELECTION, true of every gate in the run); `byGateId` rides only on the check for that gate
+// (facts about one gate's config). Non-destructive (the telemetry is rebuilt, not mutated) and
+// verdict-free: `status` and every flag are copied through untouched.
+function withNotes(
+  telemetry: StatusTelemetry,
+  forAll: readonly string[],
+  byGateId: ReadonlyMap<string, string>,
+): StatusTelemetry {
+  if (forAll.length === 0 && byGateId.size === 0) return telemetry;
+  return {
+    ...telemetry,
+    checks: telemetry.checks.map((check) => {
+      const own = byGateId.get(check.baseId ?? check.name);
+      const added = own ? [...forAll, own] : forAll;
+      return added.length > 0 ? { ...check, findings: [...(check.findings ?? []), ...added] } : check;
+    }),
+  };
+}
+
+// The multi-site heavy run, a THREE-way split of the grant's signed specs:
+//
+//   - URL-bound gates (seo-site-crawl, visual-qa, e2e, layout-rules) run ONCE PER SITE against
+//     that site's freshly served instance, with its baseUrl + per-site gateConfig overlaid;
+//   - site-scoped deterministic gates (SITE_SCOPED_GATE_IDS -- the content/SEO gates) also run
+//     ONCE PER SITE, but with NO server: per-site gateConfig overlaid and `ctx.changedFiles`
+//     narrowed to the files that site owns, so each site's rules judge only that site's content.
+//     Opt-in on evidence -- see the lane derivation below -- so a tenant that has configured
+//     nothing per-site keeps them in the lane below;
+//   - everything else (every deterministic gate neither lane took, AND the command gates) runs
+//     ONCE, unsuffixed, against the whole checkout, exactly as before.
+//
+// Both per-site loops name their checks `<gate> (<site>)` so a legible per-site check lands. Every
+// served site is torn down in its own try/finally, so one site's server never leaks into the next.
+// Results aggregate across all calls: a BLOCKING `fail` on ANY site fails the stage, while a
+// report-only gate's fail is published without blocking (each runGateStage call honours the signed
+// `blocking` flag). Both loops are gate-agnostic, so an added id in either list reuses them.
 async function runPerSiteHeavyGates(
   grant: ExecutionGrant,
   sites: readonly SiteConfig[],
@@ -388,17 +618,42 @@ async function runPerSiteHeavyGates(
   serveSiteImpl: (config: ServeConfig, deps: ServeSiteDeps) => Promise<ServedSite>,
 ): Promise<StatusTelemetry> {
   const urlBound = new Set<string>(URL_BOUND_HEAVY_GATE_IDS);
-  const urlBoundIds = new Set(
-    (grant.gateSpecs ?? [])
-      .filter((spec): spec is Extract<typeof spec, { kind: 'generic' }> => spec.kind === 'generic')
-      .map((spec) => spec.id)
-      .filter((id) => urlBound.has(id)),
+  const siteScoped = new Set<string>(SITE_SCOPED_GATE_IDS);
+  const genericIds = (grant.gateSpecs ?? [])
+    .filter((spec): spec is Extract<typeof spec, { kind: 'generic' }> => spec.kind === 'generic')
+    .map((spec) => spec.id);
+  const urlBoundIds = new Set(genericIds.filter((id) => urlBound.has(id)));
+  // OPT-IN ON EVIDENCE. A site-scoped gate joins the per-site lane only when the tenant has
+  // actually said something per-site about it: some site declares `paths` (so the files can be
+  // split) or some site declares `gateConfig` for that id (so the rules can be). Without either,
+  // running it per site would run the SAME gate over the SAME files with the SAME config once per
+  // site and publish N duplicate checks and N copies of every finding -- pure noise, and a
+  // behaviour change for every tenant that has not adopted this yet. So it stays in the `rest`
+  // lane and runs once, exactly as before.
+  const anySiteScopesFiles = sites.some((site) => site.paths && site.paths.length > 0);
+  const siteScopedIds = new Set(
+    genericIds.filter(
+      (id) =>
+        siteScoped.has(id) &&
+        // Alias-resolved, like the overlay below and like the server-side PackRegistry: a tenant
+        // keys `gateConfig` by whatever the gate was called when they wrote it, and an exact-id
+        // lookup would read a legacy key as "no per-site config" and leave the lane off.
+        (anySiteScopesFiles || sites.some((site) => gateConfigFor(id, site.gateConfig) !== undefined)),
+    ),
   );
-  // Everything else the grant carries -- the deterministic generic gates AND the command gates --
-  // runs once, unsuffixed, without a server (a URL-bound gate is the only kind a per-site server
-  // changes). runGateStage re-derives command ids from the signed specs, so "rest" is just "not a
-  // URL-bound gate id".
-  const restIds = new Set((grant.gateSpecs ?? []).map((spec) => spec.id).filter((id) => !urlBound.has(id)));
+  // Everything else the grant carries -- the deterministic generic gates neither lane took AND the
+  // command gates -- runs once, unsuffixed, against the whole diff. A command gate is never
+  // site-scoped: its scoping axis is its own signed `paths`, honoured inside the gate.
+  //
+  // Subtracted from the DERIVED lane sets, never from the constant id lists. Against the constants,
+  // a `{kind:'command'}` spec whose id collides with a lane id would land in NO lane: absent from
+  // every `onlyGateIds`, so run-gate-stage.ts never adds it to `enabledIds`, so even its `missing`
+  // backstop cannot see it -- and the stage reports PASS with no checks at all. Silent green, from
+  // one colliding id. The derived sets contain only ids a lane will really run, so every remaining
+  // id lands here and is reported one way or another.
+  const restIds = new Set(
+    (grant.gateSpecs ?? []).map((spec) => spec.id).filter((id) => !urlBoundIds.has(id) && !siteScopedIds.has(id)),
+  );
 
   const checks: CheckResult[] = [];
   let ok = true;
@@ -415,6 +670,74 @@ async function runPerSiteHeavyGates(
     absorb(await runGateStage(grant, { ...deps, workspaceRoot, onlyGateIds: restIds }));
   }
 
+  // Stranded per-site config, worked out for every site BEFORE the lane guard below. The guard is
+  // exactly the condition under which this diagnostic matters most (no site-scoped gate ran, so
+  // nothing consumed any of it), and computing it inside would silence it there.
+  const strandedBySite = new Map<string, string>();
+  for (const site of sites) {
+    const note = unappliedConfigNote(site, siteScoped, siteScopedIds);
+    if (note) strandedBySite.set(site.name, note);
+  }
+  // Sites whose stranded-config note has found a home on a real check. Whatever is left over at
+  // the end gets a synthetic check of its own, so the news never depends on a lane having run.
+  const reported = new Set<string>();
+
+  if (siteScopedIds.size > 0) {
+    // No server here -- these gates read the checkout. What makes them per-site is the pair of
+    // per-site inputs: the site's own gateConfig (its banned phrases, its competitor list) and a
+    // changedFiles list narrowed to the files it owns. Run under a site's rules, a file belonging
+    // to the OTHER brand would be judged by rules that were never written for it.
+    const changedFiles = deps.target.changedFiles;
+    for (const site of sites) {
+      const stranded = strandedBySite.get(site.name);
+      const selection = filesForSite(site, sites, changedFiles);
+      const { files } = selection;
+      // An EMPTY selection is only a skip when the diff itself was non-empty -- that is the
+      // positive fact "this site owns none of these files". An empty `changedFiles` is IGNORANCE
+      // (contracts/changed-paths.ts), so it runs, with the same empty list today's single
+      // unsuffixed call would have passed. And the skip is PUBLISHED, never an omission: an
+      // unreported gate reads as a pass nobody checked.
+      if (files.length === 0 && changedFiles.length > 0) {
+        process.stdout.write(`[site] ${site.name}: content gates not run -- owns no file in this diff\n`);
+        const skips = siteOutOfScopeChecks(site, siteScopedIds, changedFiles, 'owns none of this diff');
+        // A site can be out of THIS diff's scope and still be misconfigured, and the skip checks
+        // are the only per-site checks it will publish -- so the stranded config rides on them.
+        if (stranded) {
+          process.stdout.write(`[site] ${site.name}: ${stranded}\n`);
+          reported.add(site.name);
+          for (const skip of skips) skip.findings = [...(skip.findings ?? []), stranded];
+        }
+        checks.push(...skips);
+        continue;
+      }
+      const configOverlay: Record<string, Record<string, unknown>> = {};
+      const configNotes = new Map<string, string>();
+      for (const id of siteScopedIds) {
+        const perSite = { ...(gateConfigFor(id, site.gateConfig) ?? {}) };
+        configOverlay[id] = perSite;
+        const overlap = scopesOverlapNote(id, site.name, baseConfigFor(grant, deps, id), perSite);
+        if (overlap) configNotes.set(id, overlap);
+      }
+      const runNotes = selectionNotes(site, sites, selection);
+      if (stranded) {
+        runNotes.push(stranded);
+        reported.add(site.name);
+      }
+      for (const line of [...runNotes, ...configNotes.values()]) {
+        process.stdout.write(`[site] ${site.name}: ${line}\n`);
+      }
+      const telemetry = await runGateStage(grant, {
+        ...deps,
+        workspaceRoot,
+        configOverlay,
+        onlyGateIds: siteScopedIds,
+        changedFilesOverride: files,
+        checkNameSuffix: ` (${site.name})`,
+      });
+      absorb(withNotes(telemetry, runNotes, configNotes));
+    }
+  }
+
   if (urlBoundIds.size > 0) {
     // Serve only the sites this PR's diff can actually affect. A production build + crawl PER SITE
     // is the most expensive thing this stage does, and a dual-brand monorepo was paying for every
@@ -426,7 +749,7 @@ async function runPerSiteHeavyGates(
     for (const site of sites) {
       if (selected.includes(site)) continue;
       process.stdout.write(`[site] ${site.name}: not served -- out of this diff's path scope\n`);
-      checks.push(...siteOutOfScopeChecks(site, urlBoundIds, changedFiles));
+      checks.push(...siteOutOfScopeChecks(site, urlBoundIds, changedFiles, 'was not served'));
     }
     for (const site of selected) {
       let served: ServedSite | undefined;
@@ -447,7 +770,11 @@ async function runPerSiteHeavyGates(
         for (const id of urlBoundIds) {
           // Per-site gateConfig (routes/brands/budgets) first, the served baseUrl over it -- the
           // baseUrl is the whole point of the served instance, so it always wins.
-          configOverlay[id] = { ...(site.gateConfig?.[id] ?? {}), baseUrl: served.baseUrl };
+          // Alias-resolved like every other per-site lookup. Dormant while no URL-bound gate has
+          // been renamed -- and it must stay that way by construction, because unappliedConfigNote
+          // only inspects the site-scoped ids, so a legacy key here would stop applying with
+          // nothing to report it.
+          configOverlay[id] = { ...(gateConfigFor(id, site.gateConfig) ?? {}), baseUrl: served.baseUrl };
         }
         if (deps.executorCredential && urlBoundIds.has('visual-qa')) {
           configOverlay['visual-qa'] = { ...configOverlay['visual-qa'], executorCredential: deps.executorCredential };
@@ -465,6 +792,18 @@ async function runPerSiteHeavyGates(
         if (served) await served.stop().catch(() => {});
       }
     }
+  }
+
+  // Any site whose stranded config found no check to ride on gets one. This is the case the guard
+  // above creates: the grant names no site-scoped gate, so the lane never ran and the per-site
+  // values applied to nothing -- the exact silence this note exists to break. Synthetic and
+  // non-blocking, like `heavy-serve (<site>)`, and carrying no `baseId` because there is no bare
+  // gate id for the never-run ledger to match it against.
+  for (const site of sites) {
+    const stranded = strandedBySite.get(site.name);
+    if (!stranded || reported.has(site.name)) continue;
+    process.stdout.write(`[site] ${site.name}: ${stranded}\n`);
+    checks.push({ name: `heavy-config (${site.name})`, status: 'pass', findings: [stranded] });
   }
 
   return {

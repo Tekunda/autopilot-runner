@@ -88,6 +88,15 @@ export interface RunGateStageDeps {
    */
   onlyGateIds?: ReadonlySet<string>;
   /**
+   * Runner-side (unsigned) narrowing of `target.changedFiles` for THIS call, for the heavy
+   * stage's per-site run of the site-scoped deterministic gates: each site grades only the files
+   * it owns (see serve-and-gate.ts filesForSite), so one brand's rules never judge the other
+   * brand's content. Like `onlyGateIds` it can only SUBTRACT from what the run sees, so it needs
+   * no signature -- and it is the same filesystem-derived, branch-untouchable list, just shorter.
+   * Absent -> `target.changedFiles`, unchanged.
+   */
+  changedFilesOverride?: readonly string[];
+  /**
    * Appended to each reported check's `name` (e.g. ` (marketing)`), so a per-site heavy run
    * publishes disambiguated `seo-site-crawl (marketing)` / `(docs)` checks -- the matrix-variant
    * shape Track F's required-check matcher (customer-checks.ts matchesRequired) already accepts.
@@ -178,6 +187,15 @@ function toChecks(results: GateResult[], nameSuffix = ''): CheckResult[] {
     ...(result.findings?.length ? { findings: result.findings } : {}),
     ...(result.detailsUrl ? { detailsUrl: result.detailsUrl } : {}),
   }));
+}
+
+// One gate's config entry, detached from the object the caller holds. Shallow, deliberately: it is
+// the same depth of protection the copied `changedFiles` array gets, it costs nothing next to
+// running a gate, and a deep clone would silently change the semantics of any non-plain value a
+// tenant config carries. Non-objects (and arrays, which no gate config uses at the top level) pass
+// through untouched.
+function copyConfigValue(value: unknown): unknown {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? { ...(value as object) } : value;
 }
 
 function isGenericSpec(spec: GateSpec): spec is Extract<GateSpec, { kind: 'generic' }> {
@@ -318,9 +336,17 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
   // A generic spec's signed `config` is authorization-adjacent policy (severity thresholds,
   // forbidden-path lists, ...) -- it overrides the runner-supplied, unsigned
   // GateTarget.config for that same gate id, never the other way around.
-  const config: Record<string, unknown> = { ...(deps.target.config ?? {}) };
+  //
+  // Each per-gate entry is COPIED, not aliased. The heavy stage calls runGateStage several times
+  // with the same `deps.target` and the same signed `grant`, so assigning `spec.config` itself
+  // would hand every lane -- and every site within a lane -- the same mutable object, and a gate
+  // that edits its own config (a normaliser filling a default in place) would leak that edit into
+  // the next lane's run. Only the site-scoped lane was accidentally safe, because its overlay
+  // always spreads. One shallow copy per gate, matching the guarantee `changedFiles` gets below.
+  const config: Record<string, unknown> = {};
+  for (const [id, value] of Object.entries(deps.target.config ?? {})) config[id] = copyConfigValue(value);
   for (const spec of genericSpecs) {
-    if (spec.config !== undefined) config[spec.id] = spec.config;
+    if (spec.config !== undefined) config[spec.id] = copyConfigValue(spec.config);
   }
 
   // Runtime overlay wins over the signed config for the same gate id: a served baseUrl only
@@ -352,7 +378,12 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
     prNumber: deps.target.prNumber,
     branch: deps.target.branch,
     baseRef: deps.target.baseRef,
-    changedFiles: deps.target.changedFiles,
+    // COPIED, always -- not just on the override path, and for the same reason the per-gate config
+    // entries above are: the heavy stage calls runGateStage several times with the SAME
+    // `deps.target`, so handing the array itself to a gate lets one gate's mutation shorten the
+    // next lane's (or the next site's) list. A fresh array per call costs nothing next to running
+    // a gate.
+    changedFiles: [...(deps.changedFilesOverride ?? deps.target.changedFiles)],
     workspaceRoot,
     vcsHost: deps.vcsHost,
     config,
