@@ -66,3 +66,48 @@ export interface PageClassification {
   /** Why the file is not a page, or why the classification was inconclusive. */
   reason?: string;
 }
+
+// One indexable surface a content record publishes: for ONE locale, on ONE route,
+// the `<title>` the page emits there and the URL segment it occupies.
+//
+// A record can publish several: a multilingual document has one per locale, and a
+// Website article routed by its `scopes` array has one per (locale, scope). The
+// cannibalization gate compares these across the tree, so every field it needs to
+// name a defect an AUTOFIXER can act on is carried here -- including which field
+// produced each value. "Two pages emit the same title" is not actionable; "98's
+// `copy.de.seoTitle` equals 116's `copy.de.title`" is.
+export interface IndexedTitle {
+  locale: string;
+  // The route prefix the segment hangs off, normalized: lower-case, no leading or
+  // trailing slash. '' is the site root. Two records collide on a URL only when
+  // this AND `segment` match; they collide on a TITLE across DIFFERING routes,
+  // which is why the two are separate fields and separate rules.
+  route: string;
+  // The title the page actually emits -- an SEO override where one is set, the
+  // editorial title otherwise. Verbatim, NOT normalized: a gate reporting the
+  // colliding string has to print what is actually in the file.
+  title: string;
+  // Where `title` came from, as an addressable path into the record
+  // (`copy.de.seoTitle`, `seo.en.title`, `title`). This is the autofix target.
+  titleField: string;
+  // The URL segment this record occupies under `route`, verbatim.
+  segment: string;
+  // Where `segment` came from (`copy.ar.publicSlug`, `slug`, `filename`).
+  segmentField: string;
+}
+
+// A content record reduced to what a cross-tree collision check needs, in ONE read
+// of the file. Deliberately not `Page`: `Page` is base-locale-only (so it cannot
+// see a collision that exists in `de` and not in `en`) and it carries the body,
+// which a collision check never reads and which is the expensive part of loading
+// several hundred records.
+export interface IndexedRecord {
+  relativePath: string;
+  // The record's publication status, verbatim. Website's convention, and the rule
+  // the gate applies, is that ABSENT means published; `draft`/`archived` mean the
+  // record is not indexable and therefore cannot cannibalize anything.
+  status?: string;
+  // The declared target keyword, where the format has one (markdown frontmatter).
+  keyword?: string;
+  titles: IndexedTitle[];
+}

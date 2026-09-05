@@ -16,7 +16,16 @@
 import { access, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 
-import type { Frontmatter, Image, Link, Page, PageBody, PageClassification } from './types.ts';
+import type {
+  Frontmatter,
+  Image,
+  IndexedRecord,
+  IndexedTitle,
+  Link,
+  Page,
+  PageBody,
+  PageClassification,
+} from './types.ts';
 
 export const DEFAULT_BASE_LOCALE = 'en';
 
@@ -310,6 +319,64 @@ export async function safeReadJson(abs: string): Promise<unknown | undefined> {
 // A root `seo`/`copy` that is not a locale map for THIS base locale keeps the fail-safe
 // asymmetry: it is a document whose base locale we could not read, so `isPage: true` with
 // a reason, never a silent drop.
+/**
+ * What KIND of thing a parsed JSON file under the content dir is. The one structural
+ * ruling in this module, shared by every caller that needs it -- `classifyJsonDocument`
+ * (which turns it into the fail-safe `PageClassification` a changed-file gate consumes)
+ * and `indexJsonRecord` (which decides from it whether a record may enter a
+ * cross-tree collision index). Two callers re-deriving "what counts as a document"
+ * from the raw keys is exactly how they drift apart.
+ *
+ * The kinds are deliberately FINER-GRAINED than `PageClassification`'s
+ * page/not-page/inconclusive triple, because the two consumers need different cuts of
+ * the same fact:
+ *
+ *   - `unreadable`   present, but not a JSON object. Nothing about it can be read, so
+ *                    no consumer may assert anything -- but a page may well exist, so
+ *                    the changed-file gates still CHECK it (`isPage: true` + reason).
+ *   - `not-a-document` no root `seo`/`copy`: config, navigation or a ledger. Certainly
+ *                    not a page, for anyone.
+ *   - `base-locale-absent` a real document whose `seo`/`copy` omits the BASE locale.
+ *                    Its base-locale VIEW is empty -- which is all `PageClassification`
+ *                    can say, hence inconclusive -- but the locales it DOES define were
+ *                    read with full certainty. A per-locale consumer is entitled to
+ *                    them; a base-locale consumer is not.
+ *   - `document`     a document publishing a base-locale view.
+ */
+export type JsonDocumentKind =
+  | { kind: 'document' }
+  | { kind: 'base-locale-absent'; reason: string }
+  | { kind: 'not-a-document'; reason: string }
+  | { kind: 'unreadable'; reason: string };
+
+/**
+ * The structural ruling, on an ALREADY-PARSED value. Pure and synchronous on purpose:
+ * `indexJsonRecord` has the document in hand and must not pay a second read of the
+ * same file to learn what it already holds.
+ */
+export function classifyParsedJsonDocument(parsed: unknown, baseLocale: string): JsonDocumentKind {
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return { kind: 'unreadable', reason: 'could not be read as a JSON page document' };
+  }
+  const doc = parsed as Record<string, unknown>;
+  const declares = ['seo', 'copy'].filter((key) => key in doc);
+  if (declares.length === 0) {
+    return {
+      kind: 'not-a-document',
+      reason:
+        'it declares no `seo` or `copy` block, so the content loader publishes no page for it ' +
+        '(config, navigation or ledger data that lives in the content tree, not a document of it)',
+    };
+  }
+  if (!declares.some((key) => isLocaleMap(doc[key], baseLocale))) {
+    return {
+      kind: 'base-locale-absent',
+      reason: `its \`${declares.join('`/`')}\` block defines no "${baseLocale}" locale, so the base-locale view of it is empty`,
+    };
+  }
+  return { kind: 'document' };
+}
+
 export async function classifyJsonDocument(
   rootDir: string,
   relativePath: string,
@@ -324,27 +391,17 @@ export async function classifyJsonDocument(
     }
     throw err;
   }
-  const parsed = await safeReadJson(abs);
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    return { isPage: true, reason: 'could not be read as a JSON page document' };
+  const ruling = classifyParsedJsonDocument(await safeReadJson(abs), baseLocale);
+  switch (ruling.kind) {
+    case 'document':
+      return { isPage: true };
+    case 'not-a-document':
+      return { isPage: false, reason: ruling.reason };
+    // Both remaining kinds are INCONCLUSIVE: checked anyway (the fail-safe side),
+    // with the reason said out loud. See PageClassification.
+    default:
+      return { isPage: true, reason: ruling.reason };
   }
-  const doc = parsed as Record<string, unknown>;
-  const declares = ['seo', 'copy'].filter((key) => key in doc);
-  if (declares.length === 0) {
-    return {
-      isPage: false,
-      reason:
-        'it declares no `seo` or `copy` block, so the content loader publishes no page for it ' +
-        '(config, navigation or ledger data that lives in the content tree, not a document of it)',
-    };
-  }
-  if (!declares.some((key) => isLocaleMap(doc[key], baseLocale))) {
-    return {
-      isPage: true,
-      reason: `its \`${declares.join('`/`')}\` block defines no "${baseLocale}" locale, so the base-locale view of it is empty`,
-    };
-  }
-  return { isPage: true };
 }
 
 // Why this page's outbound links are not in its own data, or undefined when they are.
@@ -518,6 +575,172 @@ export async function jsonPageRoute(
   const noExt = rel.replace(/\.json$/, '');
   const trimmed = noExt.replace(/(?:^|\/)index$/, '');
   return trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
+}
+
+// ---------------------------------------------------------------------------
+// Indexed records: the per-locale, per-route view a collision check needs.
+//
+// Two document shapes live in one Website content tree and they carry their
+// title in DIFFERENT places, so both are read here:
+//
+//   article  root `copy.<locale>.{title,seoTitle,publicSlug,bodyFile}`, routed by
+//            the `scopes` array (one route per scope -- an article carrying two
+//            scopes really is two indexable URLs).
+//   page     root `seo.<locale>.{title,description}` plus a root `slug` that is
+//            the FULL route ("serpent/compare/copado"), so the segment is its last
+//            path element and the route is everything before it.
+//
+// The effective title is `seoTitle || title` for an article and `seo.<loc>.title`
+// for a page: that is what the site actually renders into `<title>`. The URL
+// segment is `publicSlug || title` for an article -- the rule the Website content
+// loader itself applies -- and the slug's last element for a page.
+// ---------------------------------------------------------------------------
+
+// `<node>` read as a locale map: entries whose value is a plain object. Deliberately
+// NOT isLocaleMap(), which requires the BASE locale to be present -- a record that
+// omits `en` still publishes every other locale it defines, and skipping it would be
+// a silent false negative on exactly the multilingual records this check exists for.
+function localeEntries(node: unknown): [string, Record<string, unknown>][] {
+  if (typeof node !== 'object' || node === null || Array.isArray(node)) return [];
+  return Object.entries(node as Record<string, unknown>).filter(
+    (entry): entry is [string, Record<string, unknown>] =>
+      typeof entry[1] === 'object' && entry[1] !== null && !Array.isArray(entry[1]),
+  );
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
+}
+
+// Route keys are compared, never rendered as URLs, so they are canonicalized to one
+// shape: lower-case, no leading or trailing slash. Website writes the same route as
+// `serpent/blog` (a scope) and `/serpent/blog` (a slug); those are one route.
+function normalizeRoute(route: string): string {
+  return route.trim().replace(/^\/+|\/+$/g, '').toLowerCase();
+}
+
+// Where a record sits in the tree, as a route -- the fallback for a document that
+// declares neither `scopes` nor `slug`.
+function pathRoute(rootDir: string, contentDir: string, relativePath: string): string {
+  const rel = path.relative(path.resolve(rootDir, contentDir), path.resolve(rootDir, relativePath));
+  return normalizeRoute(path.dirname(rel).replace(/^\.$/, ''));
+}
+
+function articleTitles(copy: unknown, routes: string[]): IndexedTitle[] {
+  const out: IndexedTitle[] = [];
+  for (const [locale, block] of localeEntries(copy)) {
+    const editorial = nonEmptyString(block.title);
+    const override = nonEmptyString(block.seoTitle);
+    const publicSlug = nonEmptyString(block.publicSlug);
+    // `seoTitle || title` is the rendered <title>; `publicSlug || title` is the URL
+    // segment. They fall back to DIFFERENT things on purpose, and a record with
+    // neither publishes nothing this check can compare.
+    const title = override ?? editorial;
+    const segment = publicSlug ?? editorial;
+    if (!title && !segment) continue;
+    for (const route of routes) {
+      out.push({
+        locale,
+        route,
+        title: title ?? '',
+        titleField: `copy.${locale}.${override ? 'seoTitle' : 'title'}`,
+        segment: segment ?? '',
+        segmentField: `copy.${locale}.${publicSlug ? 'publicSlug' : 'title'}`,
+      });
+    }
+  }
+  return out;
+}
+
+function pageTitles(
+  seo: unknown,
+  where: { route: string; segment: string; segmentField: string },
+): IndexedTitle[] {
+  const out: IndexedTitle[] = [];
+  for (const [locale, block] of localeEntries(seo)) {
+    const title = nonEmptyString(block.title);
+    if (!title) continue;
+    out.push({ locale, title, titleField: `seo.${locale}.title`, ...where });
+  }
+  return out;
+}
+
+// Where a `seo`-shaped record publishes: its `slug` is the FULL route, so the last
+// element is the segment and the rest is the route. A record with no slug is routed
+// by its PATH, and its segment is the filename stem -- never the empty string, which
+// would make every slugless page in one directory read as one colliding URL.
+function pageLocation(
+  slug: string,
+  relativePath: string,
+  fallbackRoute: string,
+): { route: string; segment: string; segmentField: string } {
+  const parts = normalizeRoute(slug).split('/').filter(Boolean);
+  if (parts.length > 0) {
+    return { route: parts.slice(0, -1).join('/'), segment: parts[parts.length - 1], segmentField: 'slug' };
+  }
+  return {
+    route: fallbackRoute,
+    segment: path.basename(relativePath, '.json').toLowerCase(),
+    segmentField: 'filename',
+  };
+}
+
+// The per-locale, per-route index of one JSON record. A missing or unparseable file
+// yields an EMPTY record rather than throwing, exactly as loadJsonPage does: one bad
+// document must not abort a whole-tree scan.
+//
+// WHAT MAY ENTER THE INDEX is decided by `classifyParsedJsonDocument`, the same ruling
+// the changed-file gates classify through -- not by re-reading the raw keys here. An
+// index entry is one half of a COLLISION PAIR, and a pair built from a record whose
+// document-hood we never established is a finding no one can act on:
+//
+//   - `unreadable`     nothing was read, so nothing is indexed. (This is also the
+//                      deleted-file case: `safeReadJson` yields undefined for ENOENT.)
+//   - `not-a-document` config, navigation or a ledger. Empty, and NOT merely by
+//                      accident of it having no root `copy`/`seo`: `keyword` below is
+//                      resolved by a DEPTH-FIRST `findSeo`, so a ledger carrying a
+//                      nested `seo.<locale>.keyword` would otherwise contribute a
+//                      keyword and collide with a real page.
+//   - `base-locale-absent` INDEXED, and deliberately so. This is the one place the two
+//                      merged behaviours meet: the ruling is inconclusive only about
+//                      the BASE-LOCALE view, and this index is per-locale. An
+//                      Arabic-only article's `ar` title was read with full certainty;
+//                      dropping it would silently unpublish-from-checking every
+//                      non-English record, which is the exact false negative
+//                      `localeEntries` exists to prevent.
+export async function indexJsonRecord(
+  rootDir: string,
+  contentDir: string,
+  relativePath: string,
+  baseLocale: string = DEFAULT_BASE_LOCALE,
+): Promise<IndexedRecord> {
+  const parsed = await safeReadJson(path.resolve(rootDir, relativePath));
+  const ruling = classifyParsedJsonDocument(parsed, baseLocale);
+  if (ruling.kind === 'unreadable' || ruling.kind === 'not-a-document') {
+    return { relativePath, titles: [] };
+  }
+  const doc = parsed as Record<string, unknown>;
+  const fallbackRoute = pathRoute(rootDir, contentDir, relativePath);
+
+  const scopes = Array.isArray(doc.scopes)
+    ? doc.scopes.filter((s): s is string => typeof s === 'string').map(normalizeRoute)
+    : [];
+  const routes = scopes.length > 0 ? scopes : [fallbackRoute];
+  const slug = typeof doc.slug === 'string' ? doc.slug : '';
+
+  // Both shapes are read, never one-or-the-other: a document is free to carry a root
+  // `copy` AND a root `seo`, and picking one would drop half its surfaces.
+  const titles = [
+    ...articleTitles(doc.copy, routes),
+    ...pageTitles(doc.seo, pageLocation(slug, relativePath, fallbackRoute)),
+  ];
+
+  return {
+    relativePath,
+    status: nonEmptyString(doc.status),
+    keyword: nonEmptyString(findSeo(parsed, baseLocale)?.keyword),
+    titles,
+  };
 }
 
 // The locale-coverage view an i18n audit needs: every `copy`/`seo` locale map on

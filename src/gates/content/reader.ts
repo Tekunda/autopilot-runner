@@ -17,8 +17,17 @@ import path from 'node:path';
 
 import * as jsonImpl from './json.ts';
 
-import type { Frontmatter, Image, Link, Page, PageClassification } from './types.ts';
-export type { Frontmatter, Image, Link, Page, PageBody, PageClassification } from './types.ts';
+import type { Frontmatter, Image, IndexedRecord, Link, Page, PageClassification } from './types.ts';
+export type {
+  Frontmatter,
+  Image,
+  IndexedRecord,
+  IndexedTitle,
+  Link,
+  Page,
+  PageBody,
+  PageClassification,
+} from './types.ts';
 
 const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/;
 // Keys may carry the `og:image` / `twitter:card` colon convention, so `:` (along with `-` and
@@ -233,10 +242,43 @@ export interface ContentReader {
   bodyIsFragment(relativePath: string): boolean;
   /** The route the file serves, for diff-driven target derivation (visual-qa). */
   routeFor(relativePath: string): Promise<string>;
+  /**
+   * Every (locale, route) surface the record publishes -- its rendered title, the
+   * field that produced it, and the URL segment it occupies -- plus its publication
+   * status. What a cross-tree collision check needs, in one read per file.
+   *
+   * Distinct from `loadPage`, which is base-locale-only and carries the body: a
+   * duplicate `<title>` that exists in `de` and not in `en` is invisible through
+   * `loadPage`, and that is precisely the defect class this exists to expose.
+   */
+  indexRecord(relativePath: string): Promise<IndexedRecord>;
+}
+
+// A markdown page publishes ONE surface: markdown has no locale dimension and no
+// SEO-title override, so the frontmatter `title` is the rendered title and the
+// filename is the URL segment.
+function markdownIndexedRecord(page: Page, route: string, baseLocale: string): IndexedRecord {
+  const parts = route.split('/').filter(Boolean);
+  const title = page.frontmatter.title ?? '';
+  return {
+    relativePath: page.relativePath,
+    status: page.frontmatter.fields?.status,
+    keyword: page.frontmatter.keyword,
+    titles: [
+      {
+        locale: baseLocale,
+        route: parts.slice(0, -1).join('/').toLowerCase(),
+        title,
+        titleField: 'title',
+        segment: parts.length > 0 ? parts[parts.length - 1].toLowerCase() : '',
+        segmentField: 'filename',
+      },
+    ],
+  };
 }
 
 function createMarkdownReader(opts: ContentReaderOptions): ContentReader {
-  const { rootDir, contentDir } = opts;
+  const { rootDir, contentDir, baseLocale = jsonImpl.DEFAULT_BASE_LOCALE } = opts;
   return {
     isContentFile: (rel) => isContentFile(rootDir, contentDir, rel),
     classifyPage: async (rel) => classifyMarkdownPage(rel),
@@ -247,6 +289,12 @@ function createMarkdownReader(opts: ContentReaderOptions): ContentReader {
     extractH1s,
     bodyIsFragment: () => false,
     routeFor: async (rel) => markdownRoute(rootDir, contentDir, rel),
+    indexRecord: async (rel) =>
+      markdownIndexedRecord(
+        await loadPage(rootDir, rel),
+        markdownRoute(rootDir, contentDir, rel),
+        baseLocale,
+      ),
   };
 }
 
@@ -267,6 +315,7 @@ function createJsonReader(opts: ContentReaderOptions): ContentReader {
     extractH1s: jsonImpl.extractJsonH1s,
     bodyIsFragment: () => true,
     routeFor: (rel) => jsonImpl.jsonPageRoute(rootDir, contentDir, rel),
+    indexRecord: (rel) => jsonImpl.indexJsonRecord(rootDir, contentDir, rel, baseLocale),
   };
 }
 
@@ -287,6 +336,7 @@ function createAutoReader(opts: ContentReaderOptions): ContentReader {
     extractH1s: (body) => [...md.extractH1s(body), ...json.extractH1s(body)],
     bodyIsFragment: (rel) => readerFor(rel).bodyIsFragment(rel),
     routeFor: (rel) => readerFor(rel).routeFor(rel),
+    indexRecord: (rel) => readerFor(rel).indexRecord(rel),
   };
 }
 
