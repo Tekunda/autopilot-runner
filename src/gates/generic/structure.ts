@@ -32,6 +32,7 @@ import path from 'node:path';
 import { readGateConfig } from './config.ts';
 import { isShellTestFile } from './shell-test-scan.ts';
 import { detectTestIntegrityViolations, isScannableTestFile } from './test-integrity-detect.ts';
+import type { TestIntegrityKind } from './test-integrity-types.ts';
 import { deletedFilesSince, resolveBaseSha } from '../git.ts';
 import type { Gate, GateContext, GateResult } from '../types.ts';
 
@@ -343,25 +344,34 @@ function unscannedFinding(
 //
 // The ONE place that decision is made, so a rule that has to burn in is demoted by adding a clause
 // HERE rather than by growing a second bucket beside `integrityFindings` and a second branch on
-// every return below. A rule that is report-only in EVERY language it can fire in adds
-// `violation.kind` as a second parameter and one clause -- the demotion machinery it needs is
-// already the whole of this function and the `reportOnlyFindings` bucket.
+// every return below.
 //
-// Today's only demotion is a whole LANGUAGE burning in, and that is deliberately NOT spelled as a
-// kind test even though it looks like one. Shell raises `hard-disable`, `empty-content-skip` and
-// `no-assertion`, and those three ARE the shared vocabulary (./test-integrity-types.ts): the JS
-// and Python halves raise the same kinds and must keep blocking. Keying this on them would disarm
-// the check for every language at once, which is why the parameter is the FILE. (No empty
-// report-only KIND set sits here waiting for one, either: a rule that cannot fire is decoration,
-// and this file's whole subject is checks that assert nothing.)
+// TWO demotions sit here, keyed on different things because they ARE different things.
 //
-// Shell burns in because two of its three rules were found redding correct code, and the corpus
-// that measured them clean structurally could not contain either shape -- 100% of its shell suites
-// sat in `scripts/*.test.sh` and it had no `tests/**/*.sh` at all. A new judge that has never been
-// validated against the shapes it gets wrong prints first. See shell-test-scan.ts's header for
-// what has to be true before this clause is deleted.
-function isReportOnlyViolation(file: string): boolean {
-  return isShellTestFile(file);
+// Shell is a whole LANGUAGE burning in, and it is deliberately NOT spelled as a kind test even
+// though it looks like one. Shell raises `hard-disable`, `empty-content-skip` and `no-assertion`,
+// and those three ARE the shared vocabulary (./test-integrity-types.ts): the JS and Python halves
+// raise the same kinds and must keep blocking, so keying shell on them would disarm the check for
+// every language at once. It burns in because two of its three rules were found redding correct
+// code, and the corpus that measured them clean structurally could not contain either shape --
+// 100% of its shell suites sat in `scripts/*.test.sh` and it had no `tests/**/*.sh` at all. A new
+// judge that has never been validated against the shapes it gets wrong prints first. See
+// shell-test-scan.ts's header for what has to be true before that clause is deleted.
+//
+// `vacuous-guard` is the opposite shape and needs the opposite key. ./vacuous-guard.ts is the only
+// thing that raises it, it is report-only in EVERY language it can fire in, and no file test can
+// select it: it fires on the same `.ts`/`.mjs`/`.js` files whose `hard-disable` and
+// `empty-content-skip` findings must keep blocking. So the kind IS its identity, and the parameter
+// list carries both. It burns in because it is a JUDGEMENT about reachability rather than a
+// spelling lookup, and it is measured wrong roughly 1 finding in 8 on the corpus that built it,
+// and 1 in 5 once the file selection widens to test directories `isTestFile` does not currently
+// match. Blocking at that rate reds correct code, which is the failure a burn-in exists to catch
+// before a tenant pays for it. PROMOTION IS NOT A DATE: the clause comes out when the printed
+// findings on real diffs have held a clean hit list across a burn-in period -- no measured false
+// positive over that window -- exactly the evidence the shell clause owes. vacuous-guard.ts's
+// header lists the shapes it knowingly gets wrong; a promotion argument has to survive them.
+function isReportOnlyViolation(file: string, kind: TestIntegrityKind): boolean {
+  return isShellTestFile(file) || kind === 'vacuous-guard';
 }
 
 export function createStructureGate(): Gate {
@@ -416,7 +426,7 @@ export function createStructureGate(): Gate {
         }
         scanned += 1;
         for (const violation of detectTestIntegrityViolations(file, outcome.source)) {
-          const bucket = isReportOnlyViolation(file) ? reportOnlyFindings : integrityFindings;
+          const bucket = isReportOnlyViolation(file, violation.kind) ? reportOnlyFindings : integrityFindings;
           bucket.push(`${violation.file}:${violation.line} [${violation.kind}] ${violation.detail}`);
         }
       }
@@ -517,13 +527,16 @@ export function createStructureGate(): Gate {
       // Say what was actually examined, in numbers that cannot be conflated. "12 files, 3 test
       // files selected, 3 scanned" and "12 files, 0 test files selected" and "2 selected, 0
       // scanned" are three different facts; rendering them as one green check is what let two
-      // gates report `pass` for years while asserting nothing.
+      // gates report `pass` for years while asserting nothing. The scanner covers a fixed list of
+      // SHAPES, so the count says which shapes were looked for: "scanned for false-green tests"
+      // read as a clean bill of health on the whole file, which is the same over-claim one level
+      // up from the one this gate exists to remove.
       return {
         id: 'structure',
         status: 'pass',
         findings: [
           `structure examined ${ctx.changedFiles.length} changed file(s); ${selected.length} test file(s) ` +
-            `selected, ${scanned} scanned for false-green tests` +
+            `selected, ${scanned} scanned for the false-green shapes this check covers` +
             (removed > 0 ? `, ${removed} removed by this diff` : '') +
             (unsupported.length > 0
               ? `, ${unsupported.length} in a language this check cannot judge (${unsupported.slice(0, 5).join(', ')})`

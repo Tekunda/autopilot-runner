@@ -9,6 +9,9 @@
 // JavaScript/TypeScript test-runner spellings (Playwright, Jest, Vitest, node:test, mocha),
 // PYTHON's (pytest, unittest -- ./python-test-scan.ts), SHELL's (`.sh`/`.bash` --
 // ./shell-test-scan.ts), and APEX (`.cls`/`.trigger`, the section at the bottom of this file).
+// The JS/TS half's `vacuous-guard` rule is a leaf of its own (./vacuous-guard.ts), for the reason
+// python-test-scan.ts is one: it is a separate ANALYSIS over the same masked source, not another
+// pattern in the list below.
 // `isScannableTestFile` is the ONLY authority on what this detector
 // can judge, and structure.ts reports files it selected but could not judge separately from files
 // it scanned -- because "scanned a .rb file and found nothing" would be exactly the
@@ -34,6 +37,7 @@
 
 import { detectPythonTestIntegrityViolations } from './python-test-scan.ts';
 import { detectShellTestIntegrityViolations, isShellTestFile } from './shell-test-scan.ts';
+import { detectVacuousGuards } from './vacuous-guard.ts';
 import type { TestIntegrityViolation } from './test-integrity-types.ts';
 
 // The reported vocabulary lives in ./test-integrity-types.ts -- a leaf both this file and the
@@ -582,6 +586,9 @@ export function detectTestIntegrityViolations(file: string, source: string): Tes
     });
     break;
   }
+
+  const vacuous = detectVacuousGuards(file, code, inString);
+  if (vacuous) violations.push(vacuous);
 
   return violations;
 }

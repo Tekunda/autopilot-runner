@@ -16,7 +16,11 @@ export type TestIntegrityKind =
   | 'no-assertion'
   // Apex's other one: a test that reads the ORG'S EXISTING DATA (`SeeAllData=true`) instead of
   // building its own fixture, so it passes or fails on state no diff controls.
-  | 'org-data-dependency';
+  | 'org-data-dependency'
+  // The same false green as `empty-content-skip`, wearing an `if` instead of a skip: every
+  // assertion sits inside an existence guard on a value the code under test returned, so the block
+  // is skipped exactly when that code is broken and the test passes BECAUSE of the defect.
+  | 'vacuous-guard';
 
 export interface TestIntegrityViolation {
   file: string;
