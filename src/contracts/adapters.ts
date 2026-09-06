@@ -811,6 +811,18 @@ export interface DispatchStageOptions {
   // overlapping-revision hazard) and is refused however exactly its run-name matches; a run
   // that names this generation's token gets the generous stage-timeout bound instead.
   adoptSince?: string;
+
+  // Run ids this dispatch must NEVER bind to, however well they correlate. A run the control plane
+  // has already given up on and cancelled stays `in_progress` for as long as the host takes to
+  // honour the cancel, and inside that window it still matches by name and by token -- so the
+  // dispatch that REPLACES it would adopt the very run its own supersede just killed, and then
+  // wait on a corpse. Only the caller knows a run is dead; the listing does not say so yet.
+  //
+  // BIND, not merely adopt, and the distinction is the bug: one dispatch binds a run id twice
+  // over, by adoption and by the correlate behind it, and an implementation that honours this on
+  // one path leaves the same corpse bound by the other. TicketState.supersededRuns enumerates all
+  // four binds; do not restate the list here.
+  excludeRunIds?: readonly number[];
 }
 
 export interface CIRunner {
@@ -827,7 +839,11 @@ export interface CIRunner {
   // StageResult once the run completes, `outcome:'running'` while it is still in flight
   // (within the stage timeout), or `outcome:'error'` once the timeout (anchored on the run's
   // created_at, carried in `inFlight`) has passed without completion -- so a hung run escalates.
-  checkStage?(grant: ExecutionGrant, inFlight: InFlightStage): Promise<StageResult>;
+  //
+  // `excludeRunIds` is DispatchStageOptions.excludeRunIds again, for the branch that re-correlates
+  // a marker holding no run id yet -- which BINDS, so it needs the same refusal. See
+  // TicketState.supersededRuns.
+  checkStage?(grant: ExecutionGrant, inFlight: InFlightStage, excludeRunIds?: readonly number[]): Promise<StageResult>;
   // Stop a dispatched run the control plane has decided to ABANDON -- the branch it was
   // judging moved, or a replan discarded the plan it belonged to. Without this the run keeps
   // going to completion: it holds one of the tenant's concurrent AI runs, spends the model

@@ -1642,6 +1642,40 @@ export interface TicketState {
   // between those two points; the write that sets `inFlight` clears it in the same operation, so
   // the two are never both live for one stage. See DispatchIntent.
   dispatchIntent?: DispatchIntent;
+  // The runs this ticket's own supersedes CANCELLED, newest first, and when. Cancelling is not
+  // enough to stop a run being REUSED: the cancel is asynchronous, so the host keeps listing it as
+  // in flight for as long as teardown takes, and everything correlation keys on -- stage, ticket,
+  // run-name, token -- still matches it exactly. Only the caller knows it is dead.
+  //
+  // THE CANONICAL LIST OF BINDS. This is the one place the set is enumerated; every site below
+  // points here rather than restating it, because three review rounds each found a restatement
+  // incomplete. A run id reaching the marker SETTLES the stage -- later ticks fetch by that id,
+  // and a corpse that has concluded reads as `cancelled`, a terminal error against a head it
+  // never judged. Four paths write one, and each takes these ids as `excludeRunIds`:
+  //   1. adoption (adoptInFlightRun) -- returns an id without dispatching at all, reaching back a
+  //      whole stage timeout, so a corpse of ANY age qualifies;
+  //   2. the single-shot correlate right after the POST (listMatchingRun from dispatchStage);
+  //   3. the poll's re-correlate, for a marker holding no id yet (listMatchingRun from checkStage);
+  //   4. the crash-window recovery probe (settleDispatchIntent), which runs ABOVE the other three.
+  // 2-4 share one window, floored only RUN_CORRELATION_SLACK_MS behind the dispatch, so they reach
+  // a NARROWER corpse than adoption does -- one CREATED inside that slack, not merely cancelled
+  // shortly before. Narrower, and still a bind: pickCorrelatedRun takes the OLDEST match, so where
+  // the shape occurs the corpse wins. Honouring this on some of the four only defers the bind.
+  //
+  // DURABLE, not process memory, for the same concurrency `adoptInFlightRun` itself was written
+  // for: a rolling deploy runs two revisions at once, so the revision that cancels and the one
+  // that then dispatches are often not the same process, and neither can read the other's heap. A
+  // restart between the two is the same problem with one writer.
+  //
+  // A LIST, bounded by SUPERSEDED_RUN_EXCLUSION_MAX. Re-pushes arrive faster than teardown, so two
+  // supersedes routinely leave BOTH corpses listing and a single slot would drop the older one
+  // while it was still adoptable. The cap is what stops a push storm growing the ticket
+  // unboundedly; it drops the oldest, which is likeliest to have finished tearing down.
+  //
+  // Never cleared, only aged out (SUPERSEDED_RUN_EXCLUSION_MS, at the read) or pushed off the end.
+  // Run ids are never reused, so a stale entry excludes nothing, and clearing one on a successful
+  // dispatch would disarm exactly the re-dispatch that follows a bare-handle dispatch.
+  supersededRuns?: readonly { runId: number; at: string }[];
   // The deployment of this ticket's promoted change, once its promotion PR has
   // merged. A ticket is complete when its deployment is observed, not when its PR
   // merges (see deploy-watch.ts): while this is `pending`, the ticket stays in
