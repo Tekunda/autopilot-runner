@@ -1461,6 +1461,14 @@ export interface TicketState {
   // which is otherwise unrecorded -- with two branch lanes live, the ticket lane would otherwise
   // adopt and finalize the integration lane's run, charging an attempt and publishing its check
   // against a ref that run never touched.
+  //
+  // CLEARED WHEREVER THE COUNTER IS -- and unlike feedbackExhaustedSha below, this half is not
+  // provenance but a live ROUTING key, so a site that hands the counter back without it is not
+  // merely inert. recheckPromotion prefers `{ branch: this }` over the PR number when reconciling
+  // a conflict-fix marker and resolveConflict's marker-ownership test compares against it, so a
+  // name left over from an episode a recovery ended aims the NEXT conflict fix at a dead branch,
+  // charges the wrong counter, and blocks under a reason naming the wrong ref. The recovery lanes
+  // write the pair through freshBranchConflictBudget() so they cannot write one half of it.
   branchConflictTarget?: string;
   // The open FRESHNESS-HOLD episode on one of this ticket's branches: how many consecutive drive
   // cycles the freshness hold (control-plane.ts, holdOnStaleBranch) stopped the lane WITHOUT
