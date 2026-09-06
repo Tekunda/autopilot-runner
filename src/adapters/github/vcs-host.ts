@@ -1082,10 +1082,15 @@ export class GitHubVCSHost implements VCSHost {
     };
 
     let targetId = checkRunId;
-    // Deliberately excludes `cancelled`: a supersede only ever concludes the check-run id its
-    // own marker recorded. Hunting for a same-name pending run to cancel could conclude a
-    // check belonging to a stage that is genuinely still running.
-    if (targetId === undefined && (check.status !== 'pending' || check.skipped)) {
+    // `cancelled` qualifies too, and ONLY here, where the caller supplied no id. The supersede
+    // path always supplies the id its own marker recorded (it returns early without one), so
+    // excluding `cancelled` outright never protected that path -- it only bit a caller that LOST
+    // its id, whose alternative is strictly worse: POST a second run and leave the first one
+    // `in_progress` forever, which is the state that reads as BLOCKED on a PR and is only
+    // recovered by the orphan sweep, hours later. The candidate is bounded exactly as it is for
+    // a fail or a skip (same name, same commit, and still open), so this concludes no check that
+    // one of those would not have concluded.
+    if (targetId === undefined && (check.status !== 'pending' || check.skipped || check.cancelled)) {
       const latest = await this.latestCheckRunsByName(repoId, sha);
       const candidate = latest.get(check.name);
       // Only a STRAY PENDING run is fair game here -- a completed run past its own
