@@ -171,7 +171,8 @@ export interface GatePolicy {
 //     runner executes against the customer PR checkout, exit code -> pass/fail. Synthesized
 //     one-per-configured-gate from the tenant's PackConfig.commandGates (packs/registry.ts),
 //     so a tenant declaring `yarn lint`/`yarn build` gets a signed spec per command. `blocking`
-//     rides here so a report-only gate's failure never fails the grant (see GateStatus).
+//     rides here so a report-only gate's failure never fails the grant -- it degrades what the
+//     failure DOES, never what the gate says it saw (see GateStatus).
 export type GateSpec =
   | { kind: 'generic'; id: string; config?: Record<string, unknown>; blocking?: boolean }
   | { kind: 'prompt'; id: string; prompt: string }
@@ -1207,10 +1208,16 @@ export interface RecordedGateCheck {
   status: CheckStatus;
   skipped?: true;
   skipReason?: string;
-  // The gate RAN but only REPORTED (`warn`) -- see CheckResult.reportOnly. Banks no coverage and
+  // The gate RAN but only REPORTED -- see CheckResult.reportOnly. Banks no coverage and
   // stamps no real verdict, so a gate whose every result is report-only still fires
   // `gate_never_fired` instead of looking like a gate that has judged this branch.
   reportOnly?: true;
+  // The gate RAN and reached NO VERDICT -- see CheckResult.unjudged. It rides in on `status:'fail'`
+  // (it blocks), which is exactly why it needs its own flag here: without one the promotion banked
+  // "could not judge" as a real failing verdict, stamped `lastRealVerdictAt` off it, and suppressed
+  // `gate_never_fired` for a gate that has never judged anything. The third non-verdict, banked
+  // exactly like the two above: not at all.
+  unjudged?: true;
   // The bare gate id when `id` carries a per-site display suffix (e.g. id `seo-site-crawl
   // (marketing)`, baseId `seo-site-crawl`). The never-run/no-baseline ledger keys off this so a
   // multi-site tenant's URL-bound gates match the enabled-gate set instead of skipping the

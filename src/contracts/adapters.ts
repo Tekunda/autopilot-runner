@@ -761,27 +761,37 @@ export interface PrFeedback {
   threadId?: string;
 }
 
-// One Autopilot-authored check on a PR: the gate/stage name, its verdict, and a short
+// What a check-run SAYS, as one closed vocabulary. Every publish states exactly one of these
+// and a host derives its native conclusion from this and nothing else, so the four facts stay
+// four facts all the way to the wire:
+//
+//   'pending'      not terminal -- the stage is still executing.
+//   'pass'         JUDGED, and clean.
+//   'fail'         JUDGED, found a defect, and it blocks.
+//   'report-only'  JUDGED, found a defect, and it must NOT block. The finding is real and the
+//                  check says so; only its blocking-ness is degraded.
+//   'no-verdict'   COULD NOT JUDGE (never ran, or ran and judged nothing) and does not block.
+//   'unjudged'     COULD NOT JUDGE, and a human must act before this can merge.
+//   'cancelled'    stopped before it could reach any verdict at all.
+//
+// The non-verdicts are MEMBERS of this union, not booleans riding alongside a pass/fail/pending
+// triple, and that is the whole point: a producer must NAME what happened, and no host mapping
+// can reach a green conclusion from one of them because there is no branch that does. The
+// previous shape let "could not judge" and "judged and clean" reach the same exit, and every new
+// producer re-derived that mapping and got it wrong the same way.
+export type PublishedCheckStatus =
+  | CheckStatus
+  | 'report-only'
+  | 'no-verdict'
+  | 'unjudged'
+  | 'cancelled';
+
+// One Autopilot-authored check on a PR: the gate/stage name, what it says, and a short
 // human-readable summary. Deliberately smaller than any host's native check payload --
 // only what every host can represent.
 export interface PublishedCheck {
   name: string;
-  status: CheckStatus;
-  // The gate was enabled but never evaluated. CheckStatus has no `skip`, so a skip arrives
-  // here as `pending` (run-gate-stage toCheckStatus: "a skipped gate was never evaluated, not
-  // passed") -- which is the RIGHT internal answer, because a skip must never bank as coverage.
-  // But `pending` publishes to a host as a check-run that is still RUNNING, so a skipped gate
-  // left one hanging in_progress forever on the PR. This flag lets the adapter CONCLUDE it as
-  // skipped without changing the internal status the coverage ledger reads.
-  skipped?: boolean;
-  // The stage this check reported was SUPERSEDED -- replaced by a newer run, or abandoned
-  // when its subtask went terminal -- so its run was cancelled before it could report a
-  // verdict. Same shape as `skipped` (it rides in on a `pending` status, because internally
-  // there was no verdict), and for the same reason: without it the dispatch-time `pending`
-  // check-run stays in_progress forever with nothing running behind it. Distinct from
-  // `skipped` because a superseded stage DID start; the host concludes it `cancelled`, never
-  // `failure` -- it did not fail on the merits.
-  cancelled?: boolean;
+  status: PublishedCheckStatus;
   title?: string;
   summary?: string;
   detailsUrl?: string;

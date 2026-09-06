@@ -7,6 +7,7 @@ import type {
   PrFeedback,
   PrFeedbackReading,
   PublishedCheck,
+  PublishedCheckStatus,
   VCSHost,
 } from '../../contracts/adapters.ts';
 import { retryableHostMessage } from '../../contracts/adapters.ts';
@@ -229,6 +230,44 @@ export interface GitHubVCSHostConfig extends GitHubClientConfig {
 // The hard cap GitHub puts on the `files` array of one compare response. A full page means
 // there are more files than were returned, not that the diff is exactly this size.
 const COMPARE_FILE_PAGE_LIMIT = 300;
+
+/**
+ * THE conclusion chokepoint: the only place a GitHub check-run conclusion is decided.
+ *
+ * One total mapping off `PublishedCheckStatus`, so what a check SAYS and what the host records
+ * cannot drift apart, and -- the invariant this exists for -- nothing that did not judge has a
+ * branch to `success`. It is a table rather than a chain of ternaries because a chain is where
+ * the next author appends "and this new case behaves like a pass": `satisfies` makes a new
+ * member a compile error until it is given its own exit, and the four facts each keep one:
+ *
+ *   pass         -> success          judged, clean.
+ *   fail         -> failure          judged, found a defect, blocks.
+ *   report-only  -> neutral          judged, found a defect, does not block. NOT `success` with
+ *                                    a disappointed title: tooling reads `.conclusion`, so a
+ *                                    green conclusion under a failing title is the lie.
+ *   no-verdict   -> skipped          nothing judged this, and nothing is claimed about it.
+ *   unjudged     -> action_required  nothing judged this either, but a human must act -- a
+ *                                    distinct exit from `failure`, which asserts a defect was
+ *                                    found, and from `skipped`, which does not block.
+ *   cancelled    -> cancelled        stopped before any verdict: neither a green nor a red.
+ *
+ * `pending` has no entry BY CONSTRUCTION -- undefined means "do not conclude this run", the one
+ * state that stays `in_progress`. Everything else CONCLUDES, because an honest state that hangs
+ * a check-run in_progress forever is just a different outage (a PR once sat BLOCKED on an
+ * `Autopilot / gate` in_progress whose run had been cancelled).
+ */
+const CHECK_CONCLUSIONS = {
+  pass: 'success',
+  fail: 'failure',
+  'report-only': 'neutral',
+  'no-verdict': 'skipped',
+  unjudged: 'action_required',
+  cancelled: 'cancelled',
+} satisfies Record<Exclude<PublishedCheckStatus, 'pending'>, string>;
+
+export function checkConclusion(status: PublishedCheckStatus): string | undefined {
+  return status === 'pending' ? undefined : CHECK_CONCLUSIONS[status];
+}
 
 export class GitHubVCSHost implements VCSHost {
   private readonly client: GitHubClient;
@@ -1054,26 +1093,12 @@ export class GitHubVCSHost implements VCSHost {
   // older run's identity.
   async publishCheck(repoId: string, ref: string, check: PublishedCheck, checkRunId?: number): Promise<{ id: number }> {
     const sha = (await this.getBranchSha(repoId, ref)) ?? ref;
-    // A skipped gate is FINISHED, it just never ran, and a superseded stage is finished too --
-    // its run was cancelled before it could report. Both must be published `completed`; only a
-    // genuinely running stage stays in_progress, or it hangs on the PR forever (a PR once sat
-    // on an `Autopilot / gate` in_progress whose run had been cancelled, BLOCKED).
-    const completes = check.status !== 'pending' || check.skipped === true || check.cancelled === true;
+    const conclusion = checkConclusion(check.status);
     const payload = {
       name: check.name,
       head_sha: sha,
-      status: completes ? 'completed' : 'in_progress',
-      ...(completes
-        ? {
-            conclusion: check.cancelled
-              ? 'cancelled'
-              : check.skipped
-                ? 'skipped'
-                : check.status === 'pass'
-                  ? 'success'
-                  : 'failure',
-          }
-        : {}),
+      status: conclusion === undefined ? 'in_progress' : 'completed',
+      ...(conclusion === undefined ? {} : { conclusion }),
       ...(check.detailsUrl ? { details_url: check.detailsUrl } : {}),
       output: {
         title: check.title ?? check.name,
@@ -1082,15 +1107,15 @@ export class GitHubVCSHost implements VCSHost {
     };
 
     let targetId = checkRunId;
-    // `cancelled` qualifies too, and ONLY here, where the caller supplied no id. The supersede
-    // path always supplies the id its own marker recorded (it returns early without one), so
-    // excluding `cancelled` outright never protected that path -- it only bit a caller that LOST
-    // its id, whose alternative is strictly worse: POST a second run and leave the first one
-    // `in_progress` forever, which is the state that reads as BLOCKED on a PR and is only
-    // recovered by the orphan sweep, hours later. The candidate is bounded exactly as it is for
-    // a fail or a skip (same name, same commit, and still open), so this concludes no check that
-    // one of those would not have concluded.
-    if (targetId === undefined && (check.status !== 'pending' || check.skipped || check.cancelled)) {
+    // EVERY concluding publish qualifies, and only here, where the caller supplied no id. A
+    // cancellation used to be excluded outright; that exclusion was written for the supersede
+    // path, which always supplies the id its own marker recorded (it returns early without one),
+    // so it only ever bit a caller that LOST its id, whose alternative is strictly worse: POST a
+    // second run and leave the first one `in_progress` forever, which is the state that reads as
+    // BLOCKED on a PR and is only recovered by the orphan sweep, hours later. The candidate is
+    // bounded the same way for every state (same name, same commit, and still open), so this
+    // concludes no check that a plain fail would not have concluded.
+    if (targetId === undefined && conclusion !== undefined) {
       const latest = await this.latestCheckRunsByName(repoId, sha);
       const candidate = latest.get(check.name);
       // Only a STRAY PENDING run is fair game here -- a completed run past its own

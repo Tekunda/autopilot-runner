@@ -130,29 +130,32 @@ export interface RunGateStageDeps {
   loadPackGates?: (spec: PackBundleGrant) => Promise<Gate[]>;
 }
 
-// GateStatus has a `skip` a CheckStatus has no room for; the closest honest
-// mapping is `pending` -- a skipped gate was never evaluated, not passed. But a
-// not-yet-run `pending` and a skip must stay distinguishable downstream, so toChecks
-// also tags a skip `skipped:true` (+ skipReason) -- otherwise a gate that skips 100%
-// of the time is banked as coverage exactly like a pass. A
-// A `warn` is a report-only failure that must not fail the grant -- but whether it
-// publishes as a PASS depends on something `warn` alone does not say: did the gate
-// judge? Four of the five producers did (a non-blocking command that exited non-zero,
-// assertion-delta's `enforce:false`, structure's integrity findings, a site crawl that
-// found only sub-blocking warnings) and keep mapping to `pass`, because they DID reach
-// a verdict and publishing them as "never ran" would be its own lie -- one that also
-// drops the gate out of the coverage baseline, so its real disappearance could never
-// regress. The fifth, cve's staged rollout, reached NO VERDICT (the audit could not
-// run at all) and says so with `noVerdict`: that one maps to `pending` and toChecks
-// tags it `reportOnly:true`. It used to map to `pass` like the rest, which published a
-// GREEN check and -- carrying no flag -- was banked downstream as a real verdict, so a
-// tenant whose runner has no osv-scanner got a green `cve` on every PR while
-// `gate_never_fired` stayed suppressed: the silent-off hole audit-outcome.ts rejected
-// `skip` for, recreated with `warn` and one step worse, `pass` being greener than
-// `pending`. See gates/types.ts for the producer-by-producer list. An `unjudged` gate
-// RAN but reached no verdict AND still blocks -- it must NOT read as a pass, so it maps
-// to `fail` (and toChecks tags the check `unjudged:true` so the fix loop escalates it
-// to a human instead of burning fix rounds no edit can resolve).
+// GateStatus has a `skip` a CheckStatus has no room for; the closest honest mapping is `pending`
+// -- a skipped gate was never evaluated, not passed. `pending` alone is ambiguous (a not-yet-run
+// check is also pending), so toChecks tags each non-verdict with WHICH one it is: `skipped`
+// (+ skipReason), `reportOnly` or `unjudged`. Those tags are what stop a gate that never judged
+// from being banked as coverage, and they are what the publish hop turns into a conclusion that
+// is not green (control-plane/subtask-pipeline.ts publishedStatusFor).
+//
+// A `warn` is a sub-blocking FINDING: the gate judged, and what it found is below its own
+// blocking bar (assertion-delta's `enforce:false`, structure's integrity findings, a site crawl
+// with only sub-blocking warnings). That is a real verdict, so it publishes `pass` -- reporting
+// it as "never ran" would be its own lie, and would drop the gate out of the coverage baseline
+// so its real disappearance could never regress. `noVerdict` marks the one producer that reached
+// NO verdict at all (cve's staged rollout, where the audit could not run): that maps to `pending`
+// + `reportOnly` and banks nothing.
+//
+// A `warn` is NOT how a report-only gate reports a REAL failure. A command gate used to rewrite
+// its own `fail` into a `warn` when `blocking:false`, which landed here as a green `pass` under
+// the title `unit-tests: pass -- \`yarn test\` exited 1` and was banked as coverage, suppressing
+// `gate_never_fired` while a suite stayed red for days. Report-only degrades the BLOCKING-ness of
+// a finding (nonBlockingIds, below), never its truth: the gate reports `fail`, and the check says
+// fail.
+//
+// An `unjudged` gate RAN but reached no verdict AND still blocks -- it must NOT read as a pass,
+// so it maps to `fail` and is tagged `unjudged:true` so the fix loop escalates it to a human
+// instead of burning fix rounds no edit can resolve.
+//
 // Exported so a gate's own tests can assert the status that actually REACHES THE MERGE GATE, not
 // just the internal GateStatus it returned. The two differ for exactly the case the tiered SEO
 // gates depend on (a judged `warn` publishes a green `pass`), and a test that re-implemented this
@@ -165,7 +168,11 @@ export function toCheckStatus(result: GateResult): CheckStatus {
   return 'pass';
 }
 
-function toChecks(results: GateResult[], nameSuffix = ''): CheckResult[] {
+// `nonBlockingIds` is the gate ids whose FINDINGS do not block this stage. A `fail` from one of
+// them is a real, judged failure that must still say so -- it is tagged `reportOnly` here, which
+// makes the publish hop conclude it `neutral` rather than red, and keeps it out of the coverage
+// record because a report-only gate banks no verdict that could excuse its own disappearance.
+function toChecks(results: GateResult[], nameSuffix = '', nonBlockingIds: ReadonlySet<string> = new Set()): CheckResult[] {
   return results.map((result) => ({
     name: `${result.id}${nameSuffix}`,
     // A per-site suffix makes `name` differ from the gate's bare id; keep the base id so the
@@ -180,10 +187,15 @@ function toChecks(results: GateResult[], nameSuffix = ''): CheckResult[] {
       ? { skipped: true as const, ...(result.skipReason ? { skipReason: result.skipReason } : {}) }
       : {}),
     // Kept separate from `skipped`: this gate RAN, it just banked nothing. The promotion ledger
-    // excuses a skip on the gate's own history and must not excuse this one the same way.
-    // Keyed on `noVerdict`, NEVER on `warn` alone -- a warn that judged is a real verdict and
-    // tagging it here would drop a working gate out of the coverage baseline and alarm on it.
-    ...(result.status === 'warn' && result.noVerdict === true ? { reportOnly: true as const } : {}),
+    // excuses a skip on the gate's own history and must not excuse this one the same way. Two
+    // populations, one flag, and both are things this gate DID rather than things it skipped: a
+    // `warn` that reached no verdict at all (`noVerdict`), and a real `fail` from a gate whose
+    // findings are configured not to block. Never `warn` alone -- a warn that judged is a real
+    // verdict, and tagging it would drop a working gate out of the coverage baseline.
+    ...((result.status === 'warn' && result.noVerdict === true) ||
+    (result.status === 'fail' && nonBlockingIds.has(result.id))
+      ? { reportOnly: true as const }
+      : {}),
     ...(result.findings?.length ? { findings: result.findings } : {}),
     ...(result.detailsUrl ? { detailsUrl: result.detailsUrl } : {}),
   }));
@@ -570,13 +582,13 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
           },
         ];
   const results = [...gateResults, ...collisionResults];
-  // Report-only generic gates (`blocking:false`, from PackConfig.gateConfig[id]) still publish
-  // their per-gate check (toChecks below is unchanged), but their `fail` is excluded from the
-  // stage's blocking verdict -- advisory, not merge-blocking. Command gates already degrade
-  // fail->warn inside createCommandGate; this is the generic-gate equivalent, applied here
-  // because the runner keeps the gate's honest `fail` status in the check it publishes.
+  // Report-only gates (`blocking:false`, from PackConfig.gateConfig[id] for a generic gate or
+  // PackConfig.commandGates for a command one) still publish their per-gate check with its honest
+  // `fail`, but that fail is excluded from the stage's blocking verdict -- advisory, not
+  // merge-blocking. ONE set covering BOTH spec kinds, deliberately: command gates used to rewrite
+  // their own verdict to `warn` instead, which published green over a red command.
   const nonBlockingIds = new Set(
-    genericSpecs.filter((spec) => spec.blocking === false).map((spec) => spec.id),
+    specs.filter((spec) => spec.kind !== 'prompt' && spec.blocking === false).map((spec) => spec.id),
   );
   // An `unjudged` gate ALWAYS blocks -- report-only (`blocking:false`) can excuse a *finding*
   // fail (the gate judged and reported a defect it's non-blocking about), but NEVER a gate that
@@ -624,7 +636,7 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
   return {
     grantId: grantId(grant),
     result: ok ? 'pass' : 'fail',
-    checks: toChecks(results, deps.checkNameSuffix),
+    checks: toChecks(results, deps.checkNameSuffix, nonBlockingIds),
     // Rendered lines, not the raw profiles: the gate report is read by people (and pasted into
     // tickets), and "node: yarn-classic (pinned yarn@1.22.22) — detected from package.json,
     // yarn.lock" is legible where a nested JSON blob is not. Carries no verdict -- it is the
