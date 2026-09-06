@@ -139,6 +139,40 @@ const MERGE_VERIFY_TIMEOUT_MS = 5_000;
 // commit. Making it explicit only removes the repository setting's ability to change it silently.
 const MERGE_METHOD = 'merge';
 
+// A git ref spliced into a REST PATH, encoded per SEGMENT.
+//
+// Encoding matters because a ref name is not always ours: a ticket can declare the branch its work
+// is based on, so `?`, `#` or a stray `%` reaching an unencoded path would change which API call is
+// made rather than which ref is asked about.
+//
+// Per segment, and not encodeURIComponent on the whole string, because these paths are
+// `/git/ref/heads/<ref>` -- the `/` in `integration/<stem>` is a real path separator that names the
+// ref, and encoding it to `%2F` would ask about a branch that does not exist. That is why this
+// differs from listOpenPRs/aheadBy, which put the ref in a QUERY value where nothing is structural.
+//
+// DOT SEGMENTS ARE REFUSED, not encoded, because encoding cannot reach them: `encodeURIComponent`
+// leaves `.` alone by design, so `..` survives intact and the URL parser then RESOLVES it --
+// `a/../b` asks about `b`, and `../../../../user/repos` walks clean out of `/repos/<owner>/<repo>`
+// onto a different endpoint. This is the chokepoint every ref-in-a-path read goes through
+// (createBranch, getBranchSha, deleteBranch), so it holds on its own rather than on a caller's
+// allowlist happening to run first -- the ticket-declared base is refused for BOTH dot segments
+// upstream in coverage.ts, and a chokepoint that is only safe while that stays true is not one.
+//
+// That upstream refusal is what keeps this a BACKSTOP. A dot segment the allowlist admits does not
+// reach a safer outcome here, it reaches a different one: this throw has no `.status`, so
+// isTransientDriveFault does not recognise it, resolveDeclaredBaseBranch does not catch it, and the
+// ticket is blocked with a `tick error` instead of the refusal written to name the missing branch.
+//
+// Exported for the test that walks that seam -- every name baseBranchShapeError ACCEPTS must
+// survive this function. Production reaches it through the three ref reads above.
+export function encodeRefPath(ref: string): string {
+  const segments = ref.split('/');
+  if (segments.some((segment) => segment === '.' || segment === '..')) {
+    throw new Error(`refusing a ref with a path segment that traverses: ${ref}`);
+  }
+  return segments.map((segment) => encodeURIComponent(segment)).join('/');
+}
+
 // The merge methods a 409's already-running request may report that this adapter must NOT adopt,
 // each with the reason it cannot be. These are the only values that justify refusing an
 // already-running asynchronous merge; everything else is adopted. Compared lowercased and
@@ -322,7 +356,7 @@ export class GitHubVCSHost implements VCSHost {
   }
 
   async createBranch(repoId: string, name: string, fromRef: string): Promise<void> {
-    const ref = await this.client.request<GhRef>('GET', `/repos/${repoId}/git/ref/heads/${fromRef}`);
+    const ref = await this.client.request<GhRef>('GET', `/repos/${repoId}/git/ref/heads/${encodeRefPath(fromRef)}`);
     if (!ref) throw new Error(`unknown ref: ${fromRef} in ${repoId}`);
 
     await this.client.request('POST', `/repos/${repoId}/git/refs`, {
@@ -993,7 +1027,7 @@ export class GitHubVCSHost implements VCSHost {
   }
 
   async getBranchSha(repoId: string, branch: string): Promise<string | undefined> {
-    const ref = await this.client.requestOptional<GhRef>('GET', `/repos/${repoId}/git/ref/heads/${branch}`);
+    const ref = await this.client.requestOptional<GhRef>('GET', `/repos/${repoId}/git/ref/heads/${encodeRefPath(branch)}`);
     return ref?.object.sha;
   }
 
@@ -1074,7 +1108,7 @@ export class GitHubVCSHost implements VCSHost {
   // A branch that's already gone is the desired end state, so a 404 from the delete is
   // success, not an error (requestOptional swallows it).
   async deleteBranch(repoId: string, branch: string): Promise<void> {
-    await this.client.requestOptional('DELETE', `/repos/${repoId}/git/refs/heads/${branch}`);
+    await this.client.requestOptional('DELETE', `/repos/${repoId}/git/refs/heads/${encodeRefPath(branch)}`);
   }
 
   // Publishes a check-run on the ref's head commit. Needs the App's `checks: write`

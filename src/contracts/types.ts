@@ -1364,6 +1364,17 @@ export interface TicketState {
   // no exclusions (then the reviewer prompt is byte-identical to what it was before this field
   // existed).
   ticketExclusions?: string[];
+  // The branch THIS ticket declared its work must be based on and promoted onto, parsed out of the
+  // spec text (control-plane/coverage.ts parseTicketBaseBranch) whenever the architect reads the
+  // description, and stamped only after the name passed the shape allowlist AND was proven to
+  // exist as a branch on the remote.
+  //
+  // Undefined means the ticket declared nothing, and then the configured default stands -- the
+  // behaviour every ticket had before this field existed. Undefined NEVER means "a declaration was
+  // read and could not be used": that case blocks the ticket instead, because quietly falling back
+  // to the default would run a whole ticket against a branch its author did not ask for and report
+  // green about it.
+  baseBranch?: string;
   // How many times the assembled review (acceptance walk, now the three-lens review
   // round) found the branch UNMET and the control plane dispatched a repair build before
   // re-reviewing. Bounds the review -> repair -> re-review self-heal so a
