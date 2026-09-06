@@ -29,7 +29,7 @@ import { boundedCapture } from '../gates/output-capture.ts';
 import { registerHeavyGatesForSpecs } from './gate-registry.ts';
 import { SITE_SCOPED_GATE_IDS, URL_BOUND_HEAVY_GATE_IDS } from './heavy-gate-ids.ts';
 import { digestFor, grantId, rejectedTelemetry } from './prepare-stage.ts';
-import { runGateStage, type RunGateStageDeps } from './run-gate-stage.ts';
+import { runGateStage, siteCheckNameSuffix, type RunGateStageDeps } from './run-gate-stage.ts';
 
 // The serve recipe (install/build/start/baseUrl) and the multi-site recipe are signed grant
 // fields -- see ServeConfig / SiteConfig and ExecutionGrant.serve / .sites in
@@ -730,7 +730,7 @@ async function runPerSiteHeavyGates(
         configOverlay,
         onlyGateIds: siteScopedIds,
         changedFilesOverride: files,
-        checkNameSuffix: ` (${site.name})`,
+        checkNameSuffix: siteCheckNameSuffix(site.name),
       });
       absorb(withNotes(telemetry, runNotes, configNotes));
     }
@@ -783,7 +783,7 @@ async function runPerSiteHeavyGates(
             workspaceRoot,
             configOverlay,
             onlyGateIds: urlBoundIds,
-            checkNameSuffix: ` (${site.name})`,
+            checkNameSuffix: siteCheckNameSuffix(site.name),
           }),
         );
       } finally {

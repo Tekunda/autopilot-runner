@@ -88,9 +88,10 @@ export interface PythonToolGateSpec {
   // The gate id AND the check name it reports under. Deliberately names the TOOL (`python-ruff`,
   // not `python-lint`): the first question asked of a red Python check is "which tool said that",
   // and it also keeps these ids clear of the `python-lint`/`python-tests` command-gate names the
-  // Python tenant runbook proposes, so a tenant that already hand-wrote those does not collide
-  // with these (run-gate-stage skips a command spec whose id is already registered -- a silent
-  // swallow this naming avoids rather than relies on).
+  // Python tenant runbook proposes, so a hand-written command gate does not collide with these.
+  // A collision is no longer silent -- these are generic gates, so run-gate-stage refuses the
+  // colliding command spec and publishes a blocking `gate-spec-collision` check -- but a naming
+  // scheme that never collides is still better than a red stage that explains one.
   id: string;
   tool: PythonTool;
   // The console script pip installs into `<venv>/bin`. Invoked by ABSOLUTE PATH, never as

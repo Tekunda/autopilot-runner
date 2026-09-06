@@ -224,6 +224,45 @@ function grantPRNumber(grant: ExecutionGrant): number | undefined {
  *  reads it on the PR and the fix loop classifies on it. */
 export const PACK_BUNDLE_GATE_ID = 'pack-bundle';
 
+/** The id of the synthetic check a reserved-name collision publishes. Stable for the same reason
+ *  PACK_BUNDLE_GATE_ID is: a human reads it on the PR and the fix loop classifies on it. */
+export const GATE_SPEC_COLLISION_GATE_ID = 'gate-spec-collision';
+
+/**
+ * How a per-site heavy run disambiguates the check names it publishes (`seo-site-crawl (docs)`).
+ *
+ * Exported as the ONE formatter because two things have to agree on it, and a second spelling
+ * would be a hole rather than a cosmetic drift: serve-and-gate.ts passes it as `checkNameSuffix`,
+ * and reservedCheckNames below has to enumerate the names a run can publish in order to defend
+ * them. Both derive from here.
+ */
+export function siteCheckNameSuffix(siteName: string): string {
+  return ` (${siteName})`;
+}
+
+/**
+ * Every check name a signed or synthetic gate can publish under this grant: the namespace a
+ * tenant-authored command gate may not enter.
+ *
+ * NAMES, not gate ids, because a check's NAME is its identity everywhere downstream: the durable
+ * per-gate record is keyed on it (`recordedGateChecks`, control-plane/subtask-pipeline.ts) and the
+ * promotion's coverage aggregation keeps the first record banked under it. A gate id is only half
+ * of that namespace -- `toChecks` publishes `<id>` on the once-only lanes and `<id><suffix>` on the
+ * per-site ones -- so the whole namespace is what has to be reserved, and both halves are derived
+ * here from one formatter rather than restated.
+ *
+ * The two synthetic ids are in the set for the sharpest version of the same reason: a report a
+ * tenant-authored string could publish under reports nothing.
+ */
+export function reservedCheckNames(genericIds: Iterable<string>, siteNames: Iterable<string>): Set<string> {
+  const suffixes = ['', ...[...siteNames].map(siteCheckNameSuffix)];
+  const names = new Set<string>();
+  for (const id of [...genericIds, PACK_BUNDLE_GATE_ID, GATE_SPEC_COLLISION_GATE_ID]) {
+    for (const suffix of suffixes) names.add(`${id}${suffix}`);
+  }
+  return names;
+}
+
 // Which bundle failures a bare re-run could plausibly clear, and which are settled facts.
 //
 // The distinction decides what the control plane DOES with the failure, so it is not
@@ -333,6 +372,38 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
   const genericSpecs = specs.filter(isGenericSpec);
   const commandSpecs = specs.filter(isCommandSpec);
 
+  // A `{kind:'generic'}` spec and a `{kind:'command'}` spec are not equally trusted, though one
+  // signature covers both. A generic spec names OUR code -- the runner's bundled catalog, or a pack
+  // gate fetched and checksum-verified against the signed digest. A command spec carries a shell
+  // line from the tenant's own PackConfig.commandGates, which the control plane signs without
+  // reading. The signature establishes who SENT the grant, never who authored the string.
+  //
+  // THE INVARIANT: a signed gate's published check name belongs to the signed gate. A command spec
+  // that lands on one is refused -- it does not run, it is not registered, and it never reports.
+  // It may neither speak as a signed gate nor silence one.
+  //
+  // Reserved by NAME, not by gate id, because a check's name is its identity everywhere downstream
+  // (see reservedCheckNames) and the per-site lanes publish suffixed names. Site names come from
+  // the SIGNED `grant.sites`, so the reserved set is not tenant-shaped at run time.
+  //
+  // Refused rather than silently dropped: preferring the signed gate WITHOUT saying so is the same
+  // failure mirrored -- a command gate could be deleted by naming it after a signed one, and the
+  // stage would read as a clean pass. The refusal publishes its own blocking `unjudged` check
+  // below, and the signed gate still runs, so the report carries both the trusted verdict and the
+  // fact that something stood on its name.
+  //
+  // Detected on the SPECS, not on "is this name already in the registry". The registry cannot tell
+  // a bundled gate from a command gate an earlier call registered over the same registry (the heavy
+  // stage makes several), and it covers nothing extra: generic gates are unconditional in
+  // enabledGateSpecs, so an id naming a bundled gate always arrives with a generic spec beside it.
+  const reserved = reservedCheckNames(
+    genericSpecs.map((spec) => spec.id),
+    (grant.sites ?? []).map((site) => site.name),
+  );
+  // Deduped: two command specs may name the SAME reserved check, and the report says the name is
+  // taken once, not once per entry that tried.
+  const displacedNames = [...new Set(commandSpecs.map((spec) => spec.id).filter((id) => reserved.has(id)))];
+
   // A generic spec's signed `config` is authorization-adjacent policy (severity thresholds,
   // forbidden-path lists, ...) -- it overrides the runner-supplied, unsigned
   // GateTarget.config for that same gate id, never the other way around.
@@ -398,6 +469,9 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
   // the SAME registry (deterministic gates once, URL-bound gates once per site), so a command
   // gate already built on a prior call must not be re-registered (GateRegistry.register throws).
   for (const spec of commandSpecs) {
+    // A signed or synthetic check owns this name (see the invariant above): the command never
+    // runs, so it is never registered under a name it may not answer to.
+    if (reserved.has(spec.id)) continue;
     if (deps.registry.get(spec.id)) continue;
     deps.registry.register(
       createCommandGate(
@@ -418,7 +492,16 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
   // `onlyGateIds` narrows the signed set to the gates THIS call runs (the heavy stage's per-site
   // split). It never widens: an id absent from the signed specs still can't run.
   const runnable = (id: string): boolean => !deps.onlyGateIds || deps.onlyGateIds.has(id);
-  const enabledIds = [...genericSpecs.map((spec) => spec.id), ...commandSpecs.map((spec) => spec.id)].filter(runnable);
+  //
+  // A REFUSED command spec (displacedNames) is not enabled: it is not going to run, so counting it
+  // here would make the stage demand a gate for a name nothing will ever supply -- resolvePackGates
+  // would read it as a signed id waiting on the bundle and fail the stage with a bundle diagnosis,
+  // and the `missing` backstop would report it as NOT RUN. Both would be describing the refusal in
+  // the wrong words, and both would drown the collision check that describes it in the right ones.
+  const enabledIds = [
+    ...genericSpecs.map((spec) => spec.id),
+    ...commandSpecs.map((spec) => spec.id).filter((id) => !reserved.has(id)),
+  ].filter(runnable);
 
   // Resolve every enabled id to an executable Gate BEFORE running anything, fetching the
   // private pack bundle when that is what an id is waiting on.
@@ -450,9 +533,43 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
   // When `onlyGateIds` restricts the call, drop the `skip` results the registry emits for every
   // OTHER registered gate -- otherwise each per-site call would republish the deterministic gates'
   // checks (and the sites' checks would collide across calls). Absent -> report every result.
-  const results = deps.onlyGateIds
+  const gateResults = deps.onlyGateIds
     ? genericReport.results.filter((result) => deps.onlyGateIds!.has(result.id))
     : genericReport.results;
+
+  // The refused command specs, reported. `unjudged` with NO `unjudgedReason`, deliberately: the
+  // gate the tenant declared reached no verdict (it was never allowed to run), which must never
+  // read as a pass, and a reason-less unjudged is the non-revertable classification -- worth zero
+  // fix rounds and escalated straight to a human, which is right for a config fault no edit to
+  // the PR's own diff can clear.
+  //
+  // Narrowed to `runnable` and suffixed like every other check, so the heavy stage's per-lane and
+  // per-site calls publish this once, under a unique name, on the one lane the colliding name
+  // belongs to -- the same treatment the pack-bundle failure gets.
+  //
+  // ONE-TIME COVERAGE ALARM, on the promotion AFTER a collision is fixed. This check is published
+  // only while a collision exists, so `gate:gate-spec-collision` enters promotionCoverageSet on the
+  // promotion where one fires and is absent from the next -- which the coverage diff reads as a
+  // regression. It is notifier-only and self-heals once that promotion stores the new baseline, and
+  // it fires on the GOOD news (somebody fixed the config), so it is an expected alarm rather than a
+  // real one. Same class as the `baseId` flip documented in adapters/github-actions/ci-runner.ts.
+  const collidedHere = displacedNames.filter(runnable);
+  const collisionResults: GateResult[] =
+    collidedHere.length === 0
+      ? []
+      : [
+          {
+            id: GATE_SPEC_COLLISION_GATE_ID,
+            status: 'unjudged',
+            findings: collidedHere.map(
+              (id) =>
+                `a command gate spec claims the reserved check name "${id}". That name belongs to a signed ` +
+                'gate, which keeps it and its own check; the command gate was REFUSED and did not run. ' +
+                'Rename the command gate in the repo\'s gate configuration.',
+            ),
+          },
+        ];
+  const results = [...gateResults, ...collisionResults];
   // Report-only generic gates (`blocking:false`, from PackConfig.gateConfig[id]) still publish
   // their per-gate check (toChecks below is unchanged), but their `fail` is excluded from the
   // stage's blocking verdict -- advisory, not merge-blocking. Command gates already degrade
