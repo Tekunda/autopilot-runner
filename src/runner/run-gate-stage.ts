@@ -526,16 +526,23 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
   // the fetch, not the refusal.
   const packBundleFailure = await resolvePackGates(grant, deps, genericSpecs, enabledIds);
   if (packBundleFailure) {
+    // The signed note rides along on the failure's own check rather than being dropped: "the
+    // bundle would not load" and "the bundle you are pinned to is not the current one" are
+    // different facts, and the second is often the explanation of the first. Appended, so the
+    // failure's own diagnosis stays the first thing read, and the status is untouched.
+    const withNote = grant.packBundle?.note
+      ? { ...packBundleFailure, findings: [...(packBundleFailure.findings ?? []), grant.packBundle.note] }
+      : packBundleFailure;
     // Say it in the job log too. The check's findings are what an operator reads on the PR, but
     // a stage that resolved nothing must not be silent in the Actions log either -- the same
     // reason the per-gate lines further down exist.
-    for (const finding of packBundleFailure.findings ?? []) {
+    for (const finding of withNote.findings ?? []) {
       process.stdout.write(`[gate] ${PACK_BUNDLE_GATE_ID}: ${finding}\n`);
     }
     return {
       grantId: grantId(grant),
       result: 'fail',
-      checks: toChecks([packBundleFailure], deps.checkNameSuffix),
+      checks: toChecks([withNote], deps.checkNameSuffix),
       logDigest: digestFor(grant.repoId, grant.ticketId, grant.stage, PACK_BUNDLE_GATE_ID),
     };
   }
@@ -581,7 +588,37 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
             ),
           },
         ];
-  const results = [...gateResults, ...collisionResults];
+  // The signed pack-bundle note, published beside the verdicts and NEVER as one.
+  //
+  // `warn` + `noVerdict` is this file's own shape for "it ran and banked nothing": toCheckStatus
+  // maps it to `pending`, toChecks tags it `reportOnly`, and the `ok` computation below cannot key
+  // on it. NOT `pass`. A pass is equally unable to change the stage's outcome, but it is BANKED --
+  // recordedGateChecks stores it, executionCoverageResults maps it to a real result, and
+  // promotionCoverageSet writes `gate:pack-bundle` into the tenant's coverage baseline. The next
+  // revision that carries no note (a rollback, or a deployment that stamps no expected digest)
+  // would then drop that id and trip `coverage_regression` naming a gate that never gated
+  // anything. An annotation must not enter the coverage record at all.
+  //
+  // The note says how the bundle this run was pinned to relates to the one the control plane's own
+  // build produces, a comparison the runner structurally cannot make for itself: it holds bytes and
+  // a signed digest that agree, and no notion of "current". So this is annotation carried in, not
+  // judgment reached here, and no branch below may key a verdict on it.
+  //
+  // Published on the SAME id a bundle FAILURE publishes under, deliberately: one name for one
+  // subject, so a human reading the PR finds the bundle's story in one place. The two cannot
+  // collide, because a failure returns from this function long before here.
+  //
+  // ONCE PER GRANT, on the unsuffixed lane only. serve-and-gate.ts's runPerSiteHeavyGates splits
+  // one grant across up to 1 + 2N calls of this function, and the note is a property of the GRANT
+  // rather than of any lane -- so publishing it from every call would emit N+1 copies of one
+  // sentence, two of which would share a name (`pack-bundle (<site>)`, from the site-scoped loop
+  // and the url-bound one). That is the exact collision the reserved-name check above exists to
+  // prevent, so the note gets the same treatment: one lane, one name.
+  const bundleNote = deps.checkNameSuffix ? undefined : grant.packBundle?.note;
+  const noteResults: GateResult[] = bundleNote
+    ? [{ id: PACK_BUNDLE_GATE_ID, status: 'warn', noVerdict: true, findings: [bundleNote] }]
+    : [];
+  const results = [...gateResults, ...collisionResults, ...noteResults];
   // Report-only gates (`blocking:false`, from PackConfig.gateConfig[id] for a generic gate or
   // PackConfig.commandGates for a command one) still publish their per-gate check with its honest
   // `fail`, but that fail is excluded from the stage's blocking verdict -- advisory, not

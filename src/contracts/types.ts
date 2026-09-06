@@ -238,11 +238,19 @@ export interface PluginGrant {
 //             (a workflow_dispatch input is visible to anyone with read access to the run).
 //   - `tokenExpiresAt` when the token dies. Checked runner-side BEFORE the fetch so an
 //             expired token fails with its own message instead of an opaque 401.
+//   - `note`   PROSE, never a verdict. Signed like the rest so it cannot be edited or invented
+//             on the way to the runner, but the gate stage publishes it beside the pack-bundle
+//             check's status and NEVER derives a status from it. It says how the bundle this
+//             grant points at relates to the one the control plane's own build produces --
+//             including "that could not be determined", which is deliberately not the same
+//             sentence as "current". The runner cannot work this out for itself: it holds
+//             bytes and a digest that match, and no notion of whether they are the latest.
 export interface PackBundleGrant {
   url: string;
   sha256: string;
   token?: string;
   tokenExpiresAt?: string; // ISO 8601
+  note?: string;
 }
 
 // The tenant-supplied recipe for bringing the customer site up in the dedicated heavy gate
