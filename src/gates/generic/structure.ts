@@ -30,6 +30,7 @@ import { lstat, readFile, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 import { readGateConfig } from './config.ts';
+import { isShellTestFile } from './shell-test-scan.ts';
 import { detectTestIntegrityViolations, isScannableTestFile } from './test-integrity-detect.ts';
 import { deletedFilesSince, resolveBaseSha } from '../git.ts';
 import type { Gate, GateContext, GateResult } from '../types.ts';
@@ -103,14 +104,19 @@ export const DEFAULT_STRUCTURE_CONFIG: StructureGateConfig = {
   // `Contest.cls`: the prefix arm fails, and the suffix arm is case-sensitive.
   testFileMarkers: ['.test.', '.spec.', '_test.', 'test_', 'Test.', 'Test'],
   testFileDirs: ['tests/', '__tests__/', 'e2e/', 'spec/'],
-  // `.py`, `.cls` and `.trigger` are here ONLY because test-integrity-detect.ts can judge those
-  // languages (generic/python-test-scan.ts and the Apex patterns). The order matters and is not
-  // interchangeable: widening selection first would have produced a loud, permanently-skipping
-  // `unjudgeable-language` gate, while judging first and selecting second is what actually turns
-  // test-integrity enforcement ON for those repos. Without `.py` the false-green ban was silently
-  // inert on 100% of a Python tenant's tests -- a real latent bug, not a gap (see the Python
-  // tenant runbook).
-  testFileExtensions: ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.cls', '.trigger'],
+  // `.py`, `.sh`/`.bash`, `.cls` and `.trigger` are here ONLY because test-integrity-detect.ts can
+  // judge those languages (generic/python-test-scan.ts, generic/shell-test-scan.ts and the Apex
+  // patterns). The order matters and is not interchangeable: widening selection first would have
+  // produced a loud, permanently-skipping `unjudgeable-language` gate, while judging first and
+  // selecting second is what actually turns test-integrity enforcement ON for those repos. Without
+  // `.py` the false-green ban was silently inert on 100% of a Python tenant's tests -- a real
+  // latent bug, not a gap (see the Python tenant runbook), and `.sh` was the same bug for every
+  // pipeline repo whose suite is a directory of shell scripts.
+  //
+  // The two shell entries do NOT behave like the rest of this list: `isTestFile` narrows them to a
+  // suite-shaped filename (`SHELL_SUITE_MARKERS`), and their findings are report-only while the
+  // shell rules burn in. Both reasons are in shell-test-scan.ts's header.
+  testFileExtensions: ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.sh', '.bash', '.cls', '.trigger'],
   enforceTestIntegrity: true,
   maxTestFileBytes: 2_000_000,
 };
@@ -154,8 +160,43 @@ export function effectiveStructureConfig(specConfig?: Record<string, unknown>): 
   };
 }
 
+// Shell is selected by a SUITE-SHAPED FILENAME only -- never by `testFileDirs`, and never by the
+// Apex `Test.`/`Test` markers. Every other language this gate judges has a "does this file define
+// tests at all?" precondition inside the judge: `no-assertion` is a property of a test FUNCTION in
+// the JS and Python halves, so `tests/conftest.py` and `tests/helpers.ts` are selected, scanned and
+// cleanly pass. Shell has no function-level equivalent -- a suite is just a script -- so selection
+// is the ONLY place the distinction can be made, and leaving it to `testFileDirs` graded ordinary
+// infrastructure as test suites: `tests/setup.sh`, `tests/helpers.bash`, `ci/e2e/up.sh`,
+// `spec/seed.sh`. Measured over 32 real non-suite shell scripts relocated under `tests/`, `e2e/`
+// and `spec/`: 15 of them (47%) produced a finding while directory membership selected them, and
+// 0 of the 96 relocations are selected at all once selection reads the FILENAME.
+//
+// `_spec.` is here for the same reason `_test.` is, and it is not a hypothetical separator
+// permutation: `spec/*_spec.sh` is SHELLSPEC's canonical layout, and ShellSpec is a mainstream
+// shell test framework -- the header names `.bats` as the deselection that costs a whole repo its
+// coverage, and `_spec.` was sitting in exactly that position while `_test.` beside it was
+// selected. A suite is a suite whichever of the four separator/word pairings its author chose.
+//
+// WHAT THIS LIST STILL GETS WRONG, stated because it is the sort of narrowing an operator would
+// never suspect: `test_` is a PREFIX shape (matchesTestMarker), so it selects `test_totals.sh` --
+// and equally `test_helper.bash` (the canonical bats helper name), `test_helpers.sh` and
+// `test_common.sh`, which are infrastructure and measure `no-assertion`. They are NOT excluded.
+// Naming them out would be enumerating instances of an open class, and on a report-only gate a
+// printed false positive on a shape the burn-in is explicitly hunting for (shell-test-scan.ts's
+// header) is evidence, not damage. The residual DESELECTIONS are stated in that header too.
+//
+// Deliberately NOT intersected with `config.testFileMarkers`, which is what it used to be. A
+// tenant adding `-test.` there got a silent green `0 selected` on every shell suite, because the
+// intersection dropped any marker this list does not carry -- a config knob that reads as honoured
+// and is not. Shell selection is a fixed suite-shape whitelist; the tenant knob that still governs
+// it is `testFileExtensions` (drop `.sh` and no shell file is selected at all).
+const SHELL_SUITE_MARKERS: readonly string[] = ['.test.', '.spec.', '_test.', '-test.', '_spec.', 'test_'];
+
 export function isTestFile(file: string, config: StructureGateConfig): boolean {
   if (!config.testFileExtensions.some((ext) => file.endsWith(ext))) return false;
+  if (isShellTestFile(file)) {
+    return SHELL_SUITE_MARKERS.some((marker) => matchesTestMarker(file, marker));
+  }
   return (
     config.testFileMarkers.some((marker) => matchesTestMarker(file, marker)) ||
     config.testFileDirs.some((dir) => file.includes(dir))
@@ -298,6 +339,31 @@ function unscannedFinding(
   );
 }
 
+// Is this violation report-only -- printed, but never counted as a blocker?
+//
+// The ONE place that decision is made, so a rule that has to burn in is demoted by adding a clause
+// HERE rather than by growing a second bucket beside `integrityFindings` and a second branch on
+// every return below. A rule that is report-only in EVERY language it can fire in adds
+// `violation.kind` as a second parameter and one clause -- the demotion machinery it needs is
+// already the whole of this function and the `reportOnlyFindings` bucket.
+//
+// Today's only demotion is a whole LANGUAGE burning in, and that is deliberately NOT spelled as a
+// kind test even though it looks like one. Shell raises `hard-disable`, `empty-content-skip` and
+// `no-assertion`, and those three ARE the shared vocabulary (./test-integrity-types.ts): the JS
+// and Python halves raise the same kinds and must keep blocking. Keying this on them would disarm
+// the check for every language at once, which is why the parameter is the FILE. (No empty
+// report-only KIND set sits here waiting for one, either: a rule that cannot fire is decoration,
+// and this file's whole subject is checks that assert nothing.)
+//
+// Shell burns in because two of its three rules were found redding correct code, and the corpus
+// that measured them clean structurally could not contain either shape -- 100% of its shell suites
+// sat in `scripts/*.test.sh` and it had no `tests/**/*.sh` at all. A new judge that has never been
+// validated against the shapes it gets wrong prints first. See shell-test-scan.ts's header for
+// what has to be true before this clause is deleted.
+function isReportOnlyViolation(file: string): boolean {
+  return isShellTestFile(file);
+}
+
 export function createStructureGate(): Gate {
   return {
     id: 'structure',
@@ -334,6 +400,12 @@ export function createStructureGate(): Gate {
       const unsupported = selected.filter((file) => !isScannableTestFile(file));
       const unreadable: string[] = [];
       const integrityFindings: string[] = [];
+      // Findings from a rule that is still burning in. REPORT-ONLY means PRINTED AND NON-BLOCKING:
+      // they never decide the status, and they are carried on every return below so that a
+      // co-occurring failure cannot swallow them. A demotion that also dropped the finding would
+      // be the silent no-op this whole gate exists to ban -- and the burn-in reads the printed
+      // findings, so dropping them is what makes the promotion criteria unmeetable.
+      const reportOnlyFindings: string[] = [];
       let scanned = 0;
 
       for (const file of scannable) {
@@ -344,7 +416,8 @@ export function createStructureGate(): Gate {
         }
         scanned += 1;
         for (const violation of detectTestIntegrityViolations(file, outcome.source)) {
-          integrityFindings.push(`${violation.file}:${violation.line} [${violation.kind}] ${violation.detail}`);
+          const bucket = isReportOnlyViolation(file) ? reportOnlyFindings : integrityFindings;
+          bucket.push(`${violation.file}:${violation.line} [${violation.kind}] ${violation.detail}`);
         }
       }
 
@@ -363,22 +436,37 @@ export function createStructureGate(): Gate {
         removed = unreadable.length - unexplained.length;
       }
 
+      // Report-only findings are PRINTED on every path and count toward NO status. They ride each
+      // return below exactly the way `unscannedFinding` does: a demotion that also DROPPED the
+      // finding would be the silent no-op this gate exists to ban, and it is the shape the drop
+      // took that made it invisible -- a shell finding survived alone but vanished the moment any
+      // blocking finding or any unreadable file appeared in the same diff.
+      //
+      // They still never move the status into `fail`. That is what `enforceTestIntegrity: false`
+      // and the shell burn-in each asked for, and it is why they are appended rather than folded
+      // into `blocking`: the fix loop reads a failing check's findings, and a report-only line
+      // there is context, not an instruction.
+      const demoted = config.enforceTestIntegrity
+        ? reportOnlyFindings
+        : [...integrityFindings, ...reportOnlyFindings];
+
       // Blocking findings decide the status, and they OUTRANK the unjudged escalation below.
       // A forbidden path or an oversized diff is a verdict this gate did reach, on a defect the
       // author can fix; routing it to an infra escalation because some OTHER file was
       // unreadable throws away the fixable finding and hands the fix loop nothing. The
       // unreadable specs ride along in the same report so neither fact is lost.
-      //
-      // A tenant that demoted the integrity check keeps its findings on the `warn` path ONLY:
-      // folding them into a `fail` would put report-only findings into the fix brief and count
-      // them toward the revertable-policy cap, which is the opposite of what
-      // `enforceTestIntegrity: false` asked for.
       const blocking = [...findings, ...(config.enforceTestIntegrity ? integrityFindings : [])];
       if (blocking.length > 0) {
         return {
           id: 'structure',
           status: 'fail',
-          findings: unexplained.length > 0 ? [...blocking, unscannedFinding(ctx, selected, unexplained, scanned, diffStatusReadable)] : blocking,
+          findings: [
+            ...blocking,
+            ...(unexplained.length > 0
+              ? [unscannedFinding(ctx, selected, unexplained, scanned, diffStatusReadable)]
+              : []),
+            ...demoted,
+          ],
         };
       }
 
@@ -391,25 +479,25 @@ export function createStructureGate(): Gate {
           id: 'structure',
           status: 'unjudged',
           unjudgedReason: 'infra',
-          findings: [unscannedFinding(ctx, selected, unexplained, scanned, diffStatusReadable)],
+          findings: [unscannedFinding(ctx, selected, unexplained, scanned, diffStatusReadable), ...demoted],
         };
       }
 
-      if (integrityFindings.length > 0) {
-        return { id: 'structure', status: 'warn', findings: integrityFindings };
+      if (demoted.length > 0) {
+        return { id: 'structure', status: 'warn', findings: demoted };
       }
 
       // Every test file this diff touched is in a language the detector has no patterns for,
       // so the gate's only real assertion did not run at all. A tenant who configures
-      // `testFileExtensions: ['.sh']` would otherwise get a permanent green from a check that
+      // `testFileExtensions: ['.rb']` would otherwise get a permanent green from a check that
       // cannot fire -- this file's own defect, reintroduced through config.
       //
       // `unjudgeable-language`, NOT `invalid-config`: this branch is decided by the DIFF
       // (`selected`/`scannable` are both derived from ctx.changedFiles), so a polyglot tenant
-      // configured `['.ts', '.sh']` lands here on a .sh-only PR and judges the very next .ts PR
+      // configured `['.ts', '.rb']` lands here on a .rb-only PR and judges the very next .ts PR
       // normally, with nothing edited. `invalid-config` promises the control plane a permanent,
       // config-determined fault (gates/types.ts), and claiming it here made the ledger tell an
-      // operator that a working gate had "stopped enforcing" on every .sh-only promotion. Still
+      // operator that a working gate had "stopped enforcing" on every unjudgeable promotion. Still
       // non-benign, so #358's intent is intact: excluded from coverage, and a gate that NEVER
       // gets a judgeable file still raises gate_never_fired.
       if (selected.length > 0 && scannable.length === 0) {

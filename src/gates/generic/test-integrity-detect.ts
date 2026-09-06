@@ -7,8 +7,9 @@
 //
 // SCOPE, stated so the gate cannot quietly claim more than it does: this file covers
 // JavaScript/TypeScript test-runner spellings (Playwright, Jest, Vitest, node:test, mocha),
-// PYTHON's (pytest, unittest -- ./python-test-scan.ts), and APEX (`.cls`/`.trigger`, the section
-// at the bottom of this file). `isScannableTestFile` is the ONLY authority on what this detector
+// PYTHON's (pytest, unittest -- ./python-test-scan.ts), SHELL's (`.sh`/`.bash` --
+// ./shell-test-scan.ts), and APEX (`.cls`/`.trigger`, the section at the bottom of this file).
+// `isScannableTestFile` is the ONLY authority on what this detector
 // can judge, and structure.ts reports files it selected but could not judge separately from files
 // it scanned -- because "scanned a .rb file and found nothing" would be exactly the
 // examined-nothing-and-reported-green defect this whole change removes, one level down.
@@ -32,6 +33,7 @@
 // than a pattern list, and only the decorator spellings are regexes.
 
 import { detectPythonTestIntegrityViolations } from './python-test-scan.ts';
+import { detectShellTestIntegrityViolations, isShellTestFile } from './shell-test-scan.ts';
 import type { TestIntegrityViolation } from './test-integrity-types.ts';
 
 // The reported vocabulary lives in ./test-integrity-types.ts -- a leaf both this file and the
@@ -53,7 +55,7 @@ function isApexFile(file: string): boolean {
 }
 
 export function isScannableTestFile(file: string): boolean {
-  return SCANNABLE_EXTENSIONS.some((ext) => file.endsWith(ext)) || isApexFile(file);
+  return SCANNABLE_EXTENSIONS.some((ext) => file.endsWith(ext)) || isApexFile(file) || isShellTestFile(file);
 }
 
 const PYTHON_EXTENSIONS: readonly string[] = ['.py'];
@@ -536,12 +538,14 @@ function detectApexViolations(file: string, source: string): TestIntegrityViolat
 export function detectTestIntegrityViolations(file: string, source: string): TestIntegrityViolation[] {
   // Dispatch on the file's LANGUAGE, never on content sniffing: each pattern set judges nothing
   // in another language's file, so running the wrong one returns a clean scan of a file that was
-  // never actually examined. Python and Apex are different GRAMMARS, not different pattern lists
-  // -- Python's disables are decorators and its "asserts nothing" is a property of a function
-  // body; Apex has no `skip` at all -- neither of which the JS comment/string scanner below
-  // models. Routed on the file's own extension, which `isScannableTestFile` has already vouched
-  // for.
+  // never actually examined. Python, shell and Apex are different GRAMMARS, not different pattern
+  // lists -- Python's disables are decorators and its "asserts nothing" is a property of a
+  // function body; shell's comments are `#`, its here-doc bodies are data, and its backtick is a
+  // command substitution rather than a template literal; Apex has no `skip` at all -- none of
+  // which the JS comment/string scanner below models. Routed on the file's own extension, which
+  // `isScannableTestFile` has already vouched for.
   if (isPythonTestFile(file)) return detectPythonTestIntegrityViolations(file, source);
+  if (isShellTestFile(file)) return detectShellTestIntegrityViolations(file, source);
   if (isApexFile(file)) return detectApexViolations(file, source);
 
   const { code, inString } = scanSource(source);
