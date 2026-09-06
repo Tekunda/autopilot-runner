@@ -1734,6 +1734,10 @@ export interface TicketState {
   // The two lanes SCOPE it differently: in the external-PR lane it is head-scoped (a new head
   // resets it -- see externalQaExhaustedSha below), while in the promotion lane it is
   // ticket-lifetime and never reset, so a promotion ticket that spends it stays spent.
+  // That asymmetry is deliberate and is not the external lane's bug repeated: head-scoping the
+  // PROMOTION counter would be a RUNAWAY, not a recovery. That head is Autopilot's OWN branch and
+  // our own fix pushes move it, so every round would hand back the round that bought it. The
+  // external head belongs to a contributor, which is exactly why a push there is new work.
   externalQaFixAttempts?: number;
   // How many times QA was auto-retried after a CLEAN run wrote no verdict (plan.json missing)
   // -- an infra/agent-behavior flake, not a content defect. Kept SEPARATE from
@@ -1752,13 +1756,61 @@ export interface TicketState {
   // Cleared the moment any dispatch on this ticket reaches a model (clearProviderBackoff,
   // fix-loop.ts) -- a streak never survives a run that actually ran.
   providerBackoff?: { rejections: number; firstRejectedAt: string; notBefore: string; escalatedAt?: string };
-  // The PR head sha the EXHAUSTED external-QA budget above was charged against, stamped once
-  // the budget is spent. externalQaFixAttempts only ratchets up, so without this a PR that
-  // spent it was terminal forever: every later tick re-stamped the same qa=fail without
-  // running QA, even after the author pushed exactly what the gate asked for. A head that no
-  // longer matches this sha is somebody else's push -- new work, and it gets a fresh budget.
-  // Only meaningful while the budget is spent; the reset clears it.
+  // The PR head sha the EXHAUSTED external-QA budget above was charged against, stamped by
+  // whichever branch DECLARES the exhaustion. externalQaFixAttempts only ratchets up, so without
+  // this a PR that spent it was terminal forever: every later tick re-stamped the same qa=fail
+  // without running QA, even after the author pushed exactly what the gate asked for. A head that
+  // no longer matches this sha is somebody else's push -- new work, and it gets a fresh budget.
+  //
+  // This stamp, not the counter, is what the reset reads, because exhaustion is not always
+  // declared at the configured cap: a set of failing checks can earn a NARROWER allowance than
+  // fix.maxFixRounds (one sighted round for purely policy findings, none at all for findings no
+  // edit can revert). A reset keyed on the counter reaching the flat cap therefore never ran for
+  // those, and a PR that spent a narrowed allowance was charged it again on every head it ever
+  // grew. Set where the exhaustion is stated, cleared by a head that differs from it: the same
+  // predicate in both directions.
+  //
+  // Cleared WITH the counter, always and everywhere. A counter back at zero beside a standing
+  // stamp is inert until the counter climbs back to its cap, and then it compares against a head
+  // the fix rounds have moved, differs, and hands the budget back for free. That pairing is why
+  // both halves are written from ONE place (external-qa-budget.ts) rather than re-typed at the
+  // five sites that move them.
+  //
+  // Written only for a budget that was actually CHARGED. A zero-round allowance (a CVE, a
+  // diff-size count, a crashed gate) declares "exhausted" on the first tick of every head with the
+  // counter still at zero, and a stamp beside a zeroed counter is precisely the state the
+  // paragraph above forbids -- so that case records nothing. It loses nothing either: there is no
+  // spent budget to hand back, and the next head re-declares its own verdict from its own findings.
+  //
+  // EVENTUAL TARGET, so the next author does not re-derive it: this field and the counter are one
+  // concept split in two, as feedbackFixAttempts/feedbackExhaustedSha are. `blockRevalidation?:
+  // { attempts, baseSha }` below is the shape that does it right -- counter and sha in a SINGLE
+  // field, unable to desync, cleared whole by one `undefined`. Merging them needs a persisted-state
+  // migration of every live ticket, so it is named here rather than attempted piecemeal.
   externalQaExhaustedSha?: string;
+  // How many CONSECUTIVE ticks the host has refused to describe this pseudo-ticket's PR, and
+  // whether the one escalation that streak earns has actually been DELIVERED to a human.
+  //
+  // An unreadable PR is UNKNOWN, not gone, so driveExternalPr defers the whole tick rather than
+  // retiring the ticket and destroying its budgets (see the comment there). Deferring is right, and
+  // deferring FOREVER in silence is not: nothing else escalates a pseudo-ticket -- the watchdog
+  // skips them -- so a host that stays broken would print one line per tick per PR and tell no
+  // human. This pair is what turns that into exactly one escalation, and the whole field is cleared
+  // by the first successful read, so a blip never accumulates toward it.
+  //
+  // `escalatedAt` is the DURABLE gate, and `ticks` is only a threshold the streak must REACH (the
+  // drive tests `>=`, never `===`). The two are what they are because the counter is banked by a
+  // recompute against a fresh read while the escalation is decided from the drive's own earlier
+  // read: a peer replica's bump landing between them steps the counter OVER an equality gate, and
+  // nobody is ever told. And the stamp is written only on a notice that landed, because the
+  // notifier fails on the same outage as the read it is reporting -- so a refused notice costs one
+  // repeated attempt rather than permanent silence.
+  //
+  // ONE field, not a counter and a sibling stamp: this is providerBackoff's shape, and the shape
+  // the paragraph above (externalQaExhaustedSha) names as the eventual target for every pair like
+  // it here. Cleared whole by a single `undefined`, so a clear can never drop the counter and
+  // strand a stamp that would silence the NEXT episode.
+  externalPrUnreadable?: { ticks: number; escalatedAt?: string };
   // The DETERMINISTIC gate stage's verdict for one external-PR head. The `accept` judgment above
   // is a model reading the diff with a shell; this is the tenant's own entitled pack gates
   // (seo-site-crawl, the command gates, ...) run under a real `gate` grant on the same PR --

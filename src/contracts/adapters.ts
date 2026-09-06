@@ -904,6 +904,12 @@ export interface NotifyFields {
   gateIds?: string[];
 }
 
+// A notice is an EFFECT, and the returned promise is the only report of whether it happened, so
+// an implementation MUST reject when the notice was not delivered and MUST NOT resolve on a
+// swallowed send. Callers are allowed to treat resolution as delivery: some gate a durable
+// state transition on it, so that one notice is offered again later rather than counted as given
+// and never repeated. A best-effort implementation that resolves regardless turns "tell a human"
+// into permanent silence with nothing left to observe it.
 export interface Notifier {
   notify(event: string, plainText: string, fields?: NotifyFields): Promise<void>;
 }
