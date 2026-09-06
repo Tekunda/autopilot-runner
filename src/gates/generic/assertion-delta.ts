@@ -12,6 +12,7 @@
 // a thrown gate is recorded as a fail check that never clears and wedges the fix loop.
 
 import {
+  carriesAssertionVocabulary,
   DEFAULT_ASSERTION_DELTA_CONFIG,
   detectWeakenings,
   normalizeAssertionDeltaConfig,
@@ -60,6 +61,21 @@ export const DEFAULT_ASSERTION_DELTA_GATE_CONFIG: AssertionDeltaGateConfig = {
     '.cs',
     '.swift',
     '.php',
+    // Shell. A test harness written in shell is still a test suite, and leaving these out is not
+    // a narrower scope but a SILENT one: a change made entirely of `*.test.sh` files matched no
+    // extension, so the gate whose subject is a weakened assertion reported
+    // `skip(no-matching-files)` over a diff that was nothing but tests.
+    //
+    // Selecting them is only half the job, and the dangerous half on its own. A shell suite
+    // asserts through helpers it defines itself, not through a framework, so NONE of the
+    // cross-framework `assertionKeywords` reaches it -- measured over the 48 `*.test.sh` suites
+    // in the reference shell corpus, 47 carry not one of them. Selecting `.sh` without a judge
+    // for it would have turned an honest `skip(no-matching-files)` into a `pass` over a diff that
+    // deleted assertions, which is a worse outcome than the miss it was fixing. The vocabulary
+    // that reads them is `shellAssertionKeywords` (assertion-delta-detect.ts), scoped to these
+    // two extensions; their `#` comments are masked by the same file's `commentSyntaxFor`.
+    '.sh',
+    '.bash',
   ],
   enforce: false,
 };
@@ -125,8 +141,26 @@ export function createAssertionDeltaGate(): Gate {
       try {
         const base = await resolveBaseSha(ctx.baseRef, ctx.workspaceRoot);
         const rawDiff = await unifiedDiffForFiles(base, testFiles, ctx.workspaceRoot);
-        const weakenings = detectWeakenings(splitUnifiedDiffByFile(rawDiff), config);
-        if (weakenings.length === 0) return { id: 'assertion-delta', status: 'pass' };
+        const diffsByFile = splitUnifiedDiffByFile(rawDiff);
+        const weakenings = detectWeakenings(diffsByFile, config);
+        if (weakenings.length === 0) {
+          // Nothing found is two different facts, and `pass` used to serve both. If not one
+          // changed line carried a word this detector knows, the diff was not judged CLEAN -- it
+          // was not judged at all, and a green check would bank coverage for a gate that read
+          // nothing. Asked AFTER detectWeakenings, never instead of it: the numeric-bound step
+          // uses no vocabulary, so a diff can carry a real finding and no keyword.
+          if (!carriesAssertionVocabulary(diffsByFile, config)) {
+            return {
+              id: 'assertion-delta',
+              status: 'skip',
+              skipReason: 'unjudgeable-language',
+              findings: [
+                'the changed test files carried no assertion, skip or test-declaration keyword this gate knows, so no assertion delta was judged',
+              ],
+            };
+          }
+          return { id: 'assertion-delta', status: 'pass' };
+        }
 
         const findings = weakenings.map(
           (w) => `${w.file}${w.line !== undefined ? `:${w.line}` : ''} [${w.kind}] ${w.detail}`,

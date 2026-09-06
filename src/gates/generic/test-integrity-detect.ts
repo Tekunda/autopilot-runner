@@ -119,6 +119,14 @@ export interface ScannedSource {
   inString: boolean[];
 }
 
+// Which spelling opens a comment. `c-style` is the JS/TS/Apex/Go/Java family (`//`, `/* */`);
+// `hash` is the shell/Python/Ruby family, where `#` runs to the end of the line and a backtick
+// is a command substitution rather than a template literal. The default is `c-style` because
+// this file's own callers are all in that family; `hash` exists for the callers that select
+// shell and Python test files (./assertion-delta-detect.ts), so there is one masker rather than
+// one per language family.
+export type CommentSyntax = 'c-style' | 'hash';
+
 // ONE left-to-right pass that tracks comment state and string state TOGETHER. Doing it in two
 // passes is wrong in both orders, and both orders were tried: strip comments first and a `//`
 // or `/*` inside a string literal blanks real code after it (`const a = "x /* y"; xit("REAL")`
@@ -144,9 +152,12 @@ export interface ScannedSource {
 // the gate crying wolf on exactly the shape the mask exists to protect, on a blocking gate
 // whose only escape hatch lives in a container-app secret. Interpolations are tracked with
 // brace depth so `${...}` is treated as the CODE it is, and its own nested strings as strings.
-export function scanSource(source: string, allowTemplates = true): ScannedSource {
+export function scanSource(source: string, allowTemplates = true, syntax: CommentSyntax = 'c-style'): ScannedSource {
   const code: string[] = new Array<string>(source.length);
   const inString = new Array<boolean>(source.length).fill(false);
+  // A backtick is a template literal only in the C-style family. In shell it opens a command
+  // substitution, whose contents are CODE, so treating it as a quote would mask a real call.
+  const templates = allowTemplates && syntax === 'c-style';
   // Bottom-to-top: each `template` frame is an open backtick; each `interp` frame is an open
   // `${` inside one, carrying the brace depth that decides which `}` closes it.
   type Frame = { kind: 'template' } | { kind: 'interp'; braces: number };
@@ -184,17 +195,25 @@ export function scanSource(source: string, allowTemplates = true): ScannedSource
     }
 
     if (state === 'code') {
-      if (ch === '/' && next === '/') {
+      // A `#` opens a comment only at the START OF A WORD. `$#`, `${var#prefix}` and `${#arr[@]}`
+      // are ordinary shell, and blanking from there would hide the rest of a real line -- the
+      // same whole-line loss the unterminated-template fallback below exists to avoid.
+      if (syntax === 'hash' && ch === '#' && (i === 0 || /\s/.test(source[i - 1]!))) {
         state = 'line-comment';
         code[i] = ' ';
         continue;
       }
-      if (ch === '/' && next === '*') {
+      if (syntax === 'c-style' && ch === '/' && next === '/') {
+        state = 'line-comment';
+        code[i] = ' ';
+        continue;
+      }
+      if (syntax === 'c-style' && ch === '/' && next === '*') {
         state = 'block-comment';
         code[i] = ' ';
         continue;
       }
-      if (ch === '`' && allowTemplates) {
+      if (ch === '`' && templates) {
         stack.push({ kind: 'template' });
         code[i] = ch;
         continue;
@@ -259,9 +278,24 @@ export function scanSource(source: string, allowTemplates = true): ScannedSource
   // in JSX text). Left alone it masks EVERYTHING after it -- a whole-file false negative,
   // which on this gate is worse than a false positive. Reinterpret the file once with
   // backticks as ordinary characters rather than trusting a parse that cannot be right.
-  if (stack.length > 0 && allowTemplates) return scanSource(source, false);
+  if (stack.length > 0 && templates) return scanSource(source, false, syntax);
 
   return { code: code.join(''), inString };
+}
+
+// The scan projected onto a plain string: comments blanked, string BODIES blanked, every other
+// offset (newlines included) preserved so line N of the mask is line N of the source. Callers
+// that only need to know "is this text really code" take this instead of re-deriving the answer
+// -- `scanSource` above is the single implementation of that rule, and a second one would be the
+// defect this whole surface exists to catch, one level down.
+export function maskCommentsAndStrings(source: string, syntax: CommentSyntax = 'c-style'): string {
+  const { code, inString } = scanSource(source, true, syntax);
+  const out: string[] = new Array<string>(code.length);
+  for (let i = 0; i < code.length; i += 1) {
+    const ch = code[i]!;
+    out[i] = ch === '\n' ? '\n' : inString[i] ? ' ' : ch;
+  }
+  return out.join('');
 }
 
 function lineOf(source: string, index: number): number {
