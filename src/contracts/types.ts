@@ -1374,19 +1374,42 @@ export interface TicketState {
   // dispatched feedback fix TERMINATES, pass or fail -- never while one is in flight, so a
   // multi-minute run can't burn the budget one tick at a time.
   //
-  // NEVER reset, unlike conflictFixAttempts -- this is a whole-lifetime budget for the ticket's
-  // promotion PR, and deliberately so. (An earlier version of this comment claimed a reset "when
-  // the ticket's promotion merges, alongside conflictFixAttempts", which never existed in code
-  // and could not: conflictFixAttempts is reset at the ROLLUP merge, which happens BEFORE the
-  // promotion PR is even opened, and the promotion merge is the ticket's terminal event -- this
-  // lane never runs again after it, so a reset there would bound nothing at all.)
+  // SCOPED like externalQaFixAttempts, and for the same reason. In the PROMOTION lane it is a
+  // whole-lifetime budget for the ticket's promotion PR: nothing on that lane's own path hands it
+  // back, deliberately so. The writers that clear it are the block-recovery lanes -- a human reply
+  // and a redrive, and ALSO the automatic resumes (a gate version that changed since the block was
+  // written, a base branch that advanced, a dependency wake once every blocker shipped), which
+  // hand back a fresh budget with no person involved because the plan they resume is being
+  // re-driven against a tree that has moved. In the EXTERNAL-PR lane it is
+  // head-scoped, because there the exhaustion BLOCKS a pseudo-ticket
+  // that no recovery lane sweeps (blocked-recovery skips them) and the block sits ABOVE the gate
+  // dispatch, so a spent budget made the PR permanently ungateable -- see feedbackExhaustedSha.
+  // (An earlier version of this comment claimed a reset "when the ticket's promotion merges,
+  // alongside conflictFixAttempts", which never existed in code and could not: conflictFixAttempts
+  // is reset at the ROLLUP merge, which happens BEFORE the promotion PR is even opened, and the
+  // promotion merge is the ticket's terminal event -- this lane never runs again after it, so a
+  // reset there would bound nothing at all.)
   //
-  // The consequence is real and intended: two rounds spent on an early nit leave fewer for a P1
-  // that arrives hours later, and the ticket then blocks for a human. That is the honest end
-  // state -- the fixer has had its rounds on this PR and a finding still stands -- and the knob
-  // for "a reviewer-heavy PR needs more rounds" is fix.maxFixRounds, not a reset that would let
-  // an unfixable finding loop forever by re-earning its budget.
+  // In the promotion lane the consequence is real and intended: two rounds spent on an early nit
+  // leave fewer for a P1 that arrives hours later, and the ticket then blocks for a human. That is
+  // the honest end state -- the fixer has had its rounds on this PR and a finding still stands --
+  // and the knob for "a reviewer-heavy PR needs more rounds" is fix.maxFixRounds, not a reset that
+  // would let an unfixable finding loop forever by re-earning its budget. What makes the external
+  // lane different is not appetite for retries: there the same block cannot be recovered by anyone
+  // at all, so "blocks for a human" was a state no human could see or clear.
   feedbackFixAttempts?: number;
+  // The PR head sha the EXHAUSTED feedback budget above was charged against, stamped once the
+  // budget is spent -- externalQaExhaustedSha's twin, for the other counter, and written by the
+  // same external-PR drive. A head that no longer matches it is new code, which has not had its
+  // rounds: the budget resets and the block the exhaustion wrote is lifted. Only meaningful while
+  // the budget is spent. Never stamped in the promotion lane, whose copy of this budget is
+  // whole-lifetime on its own path.
+  //
+  // CLEARED WHEREVER THE COUNTER IS. Not a convention -- the pair IS the mechanism. A counter back
+  // at zero with this still standing is inert until the counter reaches its cap again, and then it
+  // is compared against a head the fix rounds have moved, differs, and hands the budget back on
+  // every tick. Every writer of the counter clears this beside it.
+  feedbackExhaustedSha?: string;
   // How many times a `fix` stage has been dispatched to auto-resolve a merge conflict on
   // this ticket's PR. Bounds the conflict self-heal so a genuinely unresolvable conflict
   // blocks for a human instead of looping. Reset once the PR merges.
