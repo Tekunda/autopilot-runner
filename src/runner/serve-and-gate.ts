@@ -29,7 +29,13 @@ import { boundedCapture } from '../gates/output-capture.ts';
 import { registerHeavyGatesForSpecs } from './gate-registry.ts';
 import { SITE_SCOPED_GATE_IDS, URL_BOUND_HEAVY_GATE_IDS } from './heavy-gate-ids.ts';
 import { digestFor, grantId, rejectedTelemetry } from './prepare-stage.ts';
-import { runGateStage, siteCheckNameSuffix, type RunGateStageDeps } from './run-gate-stage.ts';
+import {
+  packBundleNoteCheck,
+  PACK_BUNDLE_GATE_ID,
+  runGateStage,
+  siteCheckNameSuffix,
+  type RunGateStageDeps,
+} from './run-gate-stage.ts';
 
 // The serve recipe (install/build/start/baseUrl) and the multi-site recipe are signed grant
 // fields -- see ServeConfig / SiteConfig and ExecutionGrant.serve / .sites in
@@ -666,6 +672,28 @@ async function runPerSiteHeavyGates(
 
   if (restIds.size > 0) {
     absorb(await runGateStage(grant, { ...deps, workspaceRoot, onlyGateIds: restIds }));
+  } else if (grant.packBundle?.note) {
+    // The signed note rides the UNSUFFIXED lane (run-gate-stage.ts publishes it there and nowhere
+    // else, so one sentence lands once under one name). That lane is the `if` above -- so when the
+    // grant names nothing outside the two per-site lanes, the note has no lane to ride and the PR
+    // that gated with the bundle is told nothing about it.
+    //
+    // Unreachable with today's catalog rather than impossible: every pack carries deterministic
+    // gates neither per-site lane takes, so `restIds` is never empty. That is a property of the
+    // catalog, not an invariant anything here enforces, and a pack assembled purely from url-bound
+    // and site-scoped gates would go silent -- which is the exact failure this whole annotation
+    // exists to remove. So publish it directly instead of relying on a lane that may not run.
+    //
+    // Pushed into `checks`, never through `absorb`: it is an annotation, so it may not move `ok`.
+    //
+    // And said in the JOB LOG as well as on the PR, in the same line the bundle-FAILURE path writes
+    // (run-gate-stage.ts) -- the two are the only producers of this sentence that do not pass
+    // through the per-gate log loop, so they have to print it themselves or the Actions run says
+    // nothing about the bundle at all. A lane added to break silence on the PR that stays silent in
+    // the log has only moved the blind spot: log-first triage is the path an operator takes before
+    // they ever open the checks tab.
+    process.stdout.write(`[gate] ${PACK_BUNDLE_GATE_ID}: ${grant.packBundle.note}\n`);
+    checks.push(packBundleNoteCheck(grant.packBundle.note));
   }
 
   // Stranded per-site config, worked out for every site BEFORE the lane guard below. The guard is

@@ -241,6 +241,29 @@ export const PACK_BUNDLE_GATE_ID = 'pack-bundle';
 export const GATE_SPEC_COLLISION_GATE_ID = 'gate-spec-collision';
 
 /**
+ * The signed pack-bundle note as a result, and as the check that result becomes.
+ *
+ * ONE producer for a shape whose every field is load-bearing. `warn` + `noVerdict` is this file's
+ * shape for "it ran and banked nothing": it publishes `pending`, it is tagged `reportOnly`, and it
+ * stays out of the coverage baseline a later promotion diffs against. A `pass` would be equally
+ * unable to fail a stage and would still be BANKED, so the first revision carrying no note would
+ * drop the id and trip a coverage regression over a gate that never gated anything.
+ *
+ * Two callers because the note has two ways to reach a PR. The stage below publishes it on its
+ * unsuffixed lane, which is where it belongs; serve-and-gate.ts needs the finished check for the
+ * multi-site case where no unsuffixed lane runs at all. Only that second form is exported -- the
+ * result feeds this file's own pipeline and nothing outside it has a lane to put one on.
+ */
+function packBundleNoteResult(note: string): GateResult {
+  return { id: PACK_BUNDLE_GATE_ID, status: 'warn', noVerdict: true, findings: [note] };
+}
+
+/** The same note, already mapped through the real toChecks -- never a second hand-built shape. */
+export function packBundleNoteCheck(note: string): CheckResult {
+  return toChecks([packBundleNoteResult(note)])[0];
+}
+
+/**
  * How a per-site heavy run disambiguates the check names it publishes (`seo-site-crawl (docs)`).
  *
  * Exported as the ONE formatter because two things have to agree on it, and a second spelling
@@ -615,9 +638,7 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
   // and the url-bound one). That is the exact collision the reserved-name check above exists to
   // prevent, so the note gets the same treatment: one lane, one name.
   const bundleNote = deps.checkNameSuffix ? undefined : grant.packBundle?.note;
-  const noteResults: GateResult[] = bundleNote
-    ? [{ id: PACK_BUNDLE_GATE_ID, status: 'warn', noVerdict: true, findings: [bundleNote] }]
-    : [];
+  const noteResults: GateResult[] = bundleNote ? [packBundleNoteResult(bundleNote)] : [];
   const results = [...gateResults, ...collisionResults, ...noteResults];
   // Report-only gates (`blocking:false`, from PackConfig.gateConfig[id] for a generic gate or
   // PackConfig.commandGates for a command one) still publish their per-gate check with its honest
