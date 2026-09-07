@@ -482,8 +482,9 @@ export type ExecutionGrant = {
   //
   // Signed like every other field because the whole payload is, but nothing TRUSTS it: it is
   // reported, never branched on. The strings are built by control-plane/pack-bundle-resolver.ts
-  // from statuses, urls and error messages -- its `listReleases` throws with the response STATUS
-  // and never the body, which is what keeps a release API error body out of a build log.
+  // from statuses, error messages and its own fixed prose -- NOTHING an upstream record supplied:
+  // `listReleases` throws with the response STATUS and never the body, and `selectRelease` reports
+  // an unusable asset url's TYPE and never its value. A new producer here owes the same.
   packBundleUnresolvedReason?: string;
   // The per-tenant MCP-server access every agent stage (planner/architect/build/fix/qa/
   // accept) runs with -- resolved server-side from the tenant's config (never from
