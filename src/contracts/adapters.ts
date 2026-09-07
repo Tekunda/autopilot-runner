@@ -869,7 +869,16 @@ export interface CIRunner {
   // rather than a recorded run id. A round discarded seconds after dispatch has markers whose
   // run ids were never correlated, so id-based cancellation silently does nothing there --
   // which is exactly when a superseded round is most likely to still be running. Optional.
-  cancelStagesFor?(repoId: string, opts: { stage: Stage; shortId: string }): Promise<number>;
+  //
+  // `runTokens` scopes the sweep to ONE generation: stage+shortId alone is the same name for
+  // every round a ticket ever ran, so a discarded round's sweep would also cancel the runs of
+  // the round that replaced it (two control-plane revisions of a rolling deploy both driving
+  // one ticket). Pass the tokens the caller's own generation dispatched under (reviewRunToken,
+  // one per lens) and a run whose name carries a DIFFERENT token is left alone. A run naming no
+  // token is still cancelled: it is either a pre-token runner.yml or a stage that renders none,
+  // and refusing those would turn this into a cancel that never fires. Omit for a caller with
+  // no generation to name -- the sweep is then exactly as broad as it was.
+  cancelStagesFor?(repoId: string, opts: { stage: Stage; shortId: string; runTokens?: readonly string[] }): Promise<number>;
   // Read one dispatched run's liveness WITHOUT issuing a grant: has it finished, and what did
   // it conclude (see RunLiveness). checkStage answers a much richer question -- it downloads the
   // verdict artifact and maps it to a StageResult -- and needs a signed grant for the stage,
