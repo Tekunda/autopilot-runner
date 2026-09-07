@@ -26,8 +26,11 @@ export function slugify(text: string, maxLen = 48): string {
 // contribution while the gate waved the same branch through as an ordinary one. A prefix leaves
 // this list only once nothing treats branches under it as the pipeline's.
 export const TICKET_BRANCH_PREFIX = 'ticket/';
-// Not exported: the class below is the only consumer today. Export it when a second one appears.
-const INTEGRATION_BRANCH_PREFIX = 'integration/';
+// `integration/* -> deploy` is the pipeline's one LEGITIMATE promotion shape into a protected
+// branch, so the external-PR sweep needs this prefix by name to tell a promotion (leave it to the
+// promotion lane) from any other managed head that reached a deploy branch without the pipeline --
+// isPipelinePromotionHead (drive-faults.ts) is the second consumer.
+export const INTEGRATION_BRANCH_PREFIX = 'integration/';
 
 /** The prefixes a CODING stage's work lands on -- the head of a subtask PR. */
 export const BUILD_BRANCH_PREFIXES: readonly string[] = ['autopilot/', 'build/'];
