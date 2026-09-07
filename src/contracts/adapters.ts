@@ -303,6 +303,22 @@ export interface VCSHost {
    */
   merge(repoId: string, prNumber: number): Promise<void>;
   setLabel(repoId: string, target: number, label: string): Promise<void>;
+  /**
+   * The checks on `ref`, latest run per name.
+   *
+   * REJECTS for a ref the host cannot resolve. It is the one obligation this signature cannot
+   * state on its own: `CheckResult[]` has no arm for "could not be read", so an implementation
+   * that answers a ref naming no commit hands back a listing indistinguishable from a genuinely
+   * empty one -- and every caller here reads an empty listing as "no check blocks this", which is
+   * the could-not-be-computed / genuinely-empty collapse `listOpenCheckRuns` below is written at
+   * length to avoid. Where that method has an `undefined` arm to put the fault on, this one has
+   * only a throw, so a throw is what it owes.
+   *
+   * A CALLER may still choose to degrade a refusal to a default, and some do -- but that is a
+   * decision taken with the fault in hand, which is exactly what a host that swallows it removes.
+   *
+   * Enforced across implementations by the conformance harness, not by convention.
+   */
   listChecks(repoId: string, ref: string): Promise<CheckResult[]>;
   reviewDecision(repoId: string, prNumber: number): Promise<'approved' | 'changes_requested' | 'pending'>;
   protectedRules(repoId: string, branch: string): Promise<{ requiredChecks: string[]; requiresReview: boolean }>;
