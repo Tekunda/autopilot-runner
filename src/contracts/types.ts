@@ -1405,6 +1405,17 @@ export interface TicketState {
   // re-reviewing. Bounds the review -> repair -> re-review self-heal so a
   // genuinely-unbuildable ticket blocks for a human instead of looping.
   acceptRepairAttempts?: number;
+  // Repair-convergence tracking (paired, see fix.maxRepairStall). `repairBlockerKeys` is the sorted
+  // unique findingKey set the LAST dispatched review-repair was meant to clear; `repairStallStreak`
+  // is how many consecutive rounds a key from that set has still been blocking (a repair that failed
+  // to clear a specific finding). When the streak reaches fix.maxRepairStall the loop stops
+  // re-attempting and escalates, instead of re-running a fix that is not converging. Both reset on
+  // exactly the events that clear acceptRepairAttempts -- a green round, a replan, a redrive, or a
+  // human reply (a fresh repair window each gets its own streak) -- and, like acceptRepairAttempts,
+  // deliberately SURVIVE an auto base-advance re-gate, so the same stalled finding cannot buy a
+  // fresh convergence window just because the base moved.
+  repairBlockerKeys?: string[];
+  repairStallStreak?: number;
   // Highest PR review/comment ids the control plane has already acted on, per source, so
   // corrective feedback (a Codex or human `changes_requested`/comment) drives a fix exactly
   // once. Persisted so a control-plane restart doesn't re-fix already-handled feedback.
