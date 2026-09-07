@@ -125,13 +125,106 @@ export interface ScannedSource {
   inString: boolean[];
 }
 
-// Which spelling opens a comment. `c-style` is the JS/TS/Apex/Go/Java family (`//`, `/* */`);
-// `hash` is the shell/Python/Ruby family, where `#` runs to the end of the line and a backtick
-// is a command substitution rather than a template literal. The default is `c-style` because
-// this file's own callers are all in that family; `hash` exists for the callers that select
-// shell and Python test files (./assertion-delta-detect.ts), so there is one masker rather than
-// one per language family.
-export type CommentSyntax = 'c-style' | 'hash';
+// Which spelling opens a comment, and which literals the language has. `c-style` is the
+// JS/TS/Apex/Go/Java family (`//`, `/* */`); `hash` is the shell/Python/Ruby family, where `#`
+// runs to the end of the line and a backtick is a command substitution rather than a template
+// literal. The default is `c-style` because this file's own callers are all in that family;
+// `hash` exists for the callers that select shell and Python test files
+// (./assertion-delta-detect.ts), so there is one masker rather than one per language family.
+//
+// `js` is `c-style` PLUS the regex literal, which only JavaScript and TypeScript have. Java, Go,
+// C#, Kotlin, Swift, PHP, Rust and Apex all spell a pattern as a string, so for them the regex
+// branch has no true positive to find and can only ever mask a `/` that was division or a path.
+// Splitting the value is how that branch is kept off them; it is not a second comment grammar.
+//
+// It is a reduction of surface rather than a fix for an observed miss -- no VALID Java or Go puts
+// a `/` straight after a member of `REGEX_CAN_START_AFTER` below. That is not a reason to leave it
+// ungraded, though, because the masker's input is arbitrary DIFF TEXT and not valid source: a
+// `.java` fragment that would be mis-masked is constructible, and assertion-delta-lexical.test.ts
+// constructs one.
+//
+// Known inconsistency, in the safe direction: `.mts` and `.cts` take `c-style`, so a regex there
+// is not lexed. Neither extension is selected by this gate or by assertion-delta's
+// `testFileExtensions`, so no file reaches the scan by that name today.
+export type CommentSyntax = 'c-style' | 'js' | 'hash';
+
+
+// A `/` opens a regex literal only where a value cannot already have ended, because everywhere
+// else it is division. The membership rule is one grammar fact: no character here can be the last
+// character of a value-ending token. `a , / `, `a = / `, `a ? / ` and the rest are not expressions
+// in any reading, so the `/` after them cannot be division. `!` is the ONE member that can also
+// end a value -- TypeScript's non-null assertion is postfix -- and it carries an extra guard in
+// `regexLiteralEnd` rather than an exception to the sentence above.
+//
+// The two directions cost very differently, which is why the rule is that narrow:
+//
+//   ADMITTING one wrongly is expensive. The `/` then masks out to the NEXT `/` on its line, so
+//   real code between them stops being scanned -- on `assertion-delta` a lost `assertion-removed`,
+//   and on `structure`, which shares this scanner, a lost `hard-disable`. That is not old
+//   behaviour; it is a new way to hide `it.only(` from the check whose subject is people hiding
+//   things. Two characters are out for exactly this, each pinned by a test that reds if it is put
+//   back: `<`, because `</p>` puts a `/` straight after it, so
+//   `render(<p>x</p>); expect(s).toMatch(/ok/);` masked its own assertion and a SECOND closing tag
+//   made the detector report LESS; and `+`, via the postfix `i++ / 2`, which is why `-` is absent
+//   too. `passed! / all` is the same shape a third time, and is what the `!` guard exists for.
+//
+//   OMITTING one is not free either, and that is the part a recovery count does not show. A `/`
+//   this class does not admit is read as it was before -- but the pattern it should have opened
+//   then leaks its contents into the scan, and a backtick among them flips the file's parity.
+//   Measured over this repo's tracked JS/TS sources, dropping `>` costs SEVEN real assertions in
+//   one file: `=> /^\`[^\`]+\`$/.test(l)` goes unlexed, its three backticks are loose, and the
+//   odd count opens a template over every line below it. `>` is in for that, not for `=> /re/`
+//   being common. Both facts come from the same measurement, which counts lines GAINED and lines
+//   LOST, and splits the losses into the ones that are a needle genuinely inside a pattern
+//   (correct) and the ones carried in from another line (not).
+//
+// Knowingly unclaimed, because each needs the token before the character rather than the
+// character: `)`, `]` and `}` (`(a+b)/2`, `x[i]/2`, `{...}/2` are divisions, and telling them from
+// `if (a) /re/.test(b)` needs a tokenizer this file is not) and keywords such as `return /re/`.
+const REGEX_CAN_START_AFTER = /[(,=:[!&|?{;>]/;
+
+// What can END a value, which is what makes a following `/` division. Only `!` needs it: see the
+// postfix rule in `regexLiteralEnd`.
+const VALUE_END = /[\w$)\]]/;
+
+// The index of the last non-space character at or before `from`, or -1.
+function previousSignificant(source: string, from: number): number {
+  let i = from;
+  while (i >= 0 && (source[i] === ' ' || source[i] === '\t')) i -= 1;
+  return i;
+}
+
+// The end index of the regex literal opening at `at`, or -1 if none does. Bounded by the language:
+// a regex literal may not contain an unescaped newline, so a wrong guess reaches the end of ONE
+// line and can never change the comment/string state of the lines below it. `[...]` is tracked
+// because a `/` inside a character class is literal and does not close the literal.
+function regexLiteralEnd(source: string, at: number): number {
+  const before = previousSignificant(source, at - 1);
+  // Start of input reads as `''`, which the class does not match: a fragment beginning mid-line is
+  // exactly where the token before is unknown, so it is the one place to stay off.
+  if (!REGEX_CAN_START_AFTER.test(source[before] ?? '')) return -1;
+  // `!` is the one member of that class that can ALSO end a value, because TypeScript's non-null
+  // assertion is postfix -- `passed! / all` is a division, structurally the `i++ / 2` that keeps
+  // `+` out. So `!` is admitted only where it is the PREFIX operator, which is exactly where the
+  // character before IT cannot end a value either (`if (!/^a/.test(x))`, `ok(!/x/.test(s))`).
+  if (source[before] === '!' && VALUE_END.test(source[previousSignificant(source, before - 1)] ?? '')) return -1;
+  let inClass = false;
+  for (let i = at + 1; i < source.length; i += 1) {
+    const ch = source[i]!;
+    if (ch === '\n') return -1;
+    if (ch === '\\') {
+      i += 1;
+      continue;
+    }
+    if (inClass) {
+      if (ch === ']') inClass = false;
+      continue;
+    }
+    if (ch === '[') inClass = true;
+    else if (ch === '/') return i;
+  }
+  return -1;
+}
 
 // ONE left-to-right pass that tracks comment state and string state TOGETHER. Doing it in two
 // passes is wrong in both orders, and both orders were tried: strip comments first and a `//`
@@ -149,8 +242,18 @@ export type CommentSyntax = 'c-style' | 'hash';
 // that reds a PR for quoting the pattern it bans gets switched off, and then it enforces
 // nothing.
 //
-// Known limit, which can only COST a finding and never invent one: a regex literal whose body
-// starts `//` or `/*` is read as a comment.
+// Regex literals are lexed (`regexLiteralEnd`) rather than left to the comment and template
+// branches, because a `/.../` body is data exactly as a string's is AND because misreading one
+// is not a local error: `/^https?:\/\//` read as a line comment blanks the rest of its line,
+// `/\/*.ts/` read as an unterminated BLOCK comment blanks every line after it, and a backtick
+// inside a regex opens a template that runs to the next backtick anywhere below. The last two
+// delete findings from lines that are not themselves unusual, which is why they are lexed here
+// and not written off as a limit.
+//
+// Remaining limit, stated because it is the same shape and is NOT fixed: a backtick in JSX text
+// (`<p>` + backtick + `</p>`) still opens a template. An odd number of those is caught by the
+// EOF fallback below; an even number closes itself and silently masks everything between. JSX
+// text is not distinguishable from an expression without parsing JSX, so it stays.
 //
 // Template literals need a STACK, not a single open-quote char. With one char, the inner
 // backtick of a nested template CLOSES the outer one and everything after it is scanned as
@@ -163,7 +266,7 @@ export function scanSource(source: string, allowTemplates = true, syntax: Commen
   const inString = new Array<boolean>(source.length).fill(false);
   // A backtick is a template literal only in the C-style family. In shell it opens a command
   // substitution, whose contents are CODE, so treating it as a quote would mask a real call.
-  const templates = allowTemplates && syntax === 'c-style';
+  const templates = allowTemplates && syntax !== 'hash';
   // Bottom-to-top: each `template` frame is an open backtick; each `interp` frame is an open
   // `${` inside one, carrying the brace depth that decides which `}` closes it.
   type Frame = { kind: 'template' } | { kind: 'interp'; braces: number };
@@ -209,15 +312,30 @@ export function scanSource(source: string, allowTemplates = true, syntax: Commen
         code[i] = ' ';
         continue;
       }
-      if (syntax === 'c-style' && ch === '/' && next === '/') {
+      if (syntax !== 'hash' && ch === '/' && next === '/') {
         state = 'line-comment';
         code[i] = ' ';
         continue;
       }
-      if (syntax === 'c-style' && ch === '/' && next === '*') {
+      if (syntax !== 'hash' && ch === '/' && next === '*') {
         state = 'block-comment';
         code[i] = ' ';
         continue;
+      }
+      // After both comment branches, so `//` and `/*` keep winning: neither can begin a regex
+      // literal (an empty one is unspellable, and `*` is not a valid first quantifier).
+      if (syntax === 'js' && ch === '/') {
+        const end = regexLiteralEnd(source, i);
+        if (end !== -1) {
+          for (let j = i; j <= end; j += 1) {
+            code[j] = source[j]!;
+            // Delimiters read like a string's: the opener is code, the body and the closer are
+            // masked, so a needle spelled inside a pattern counts as the data it is.
+            inString[j] = j > i;
+          }
+          i = end;
+          continue;
+        }
       }
       if (ch === '`' && templates) {
         stack.push({ kind: 'template' });
@@ -552,7 +670,9 @@ export function detectTestIntegrityViolations(file: string, source: string): Tes
   if (isShellTestFile(file)) return detectShellTestIntegrityViolations(file, source);
   if (isApexFile(file)) return detectApexViolations(file, source);
 
-  const { code, inString } = scanSource(source);
+  // `js`: everything above this line has been routed to Python, shell or Apex, so what reaches
+  // here is one of SCANNABLE_EXTENSIONS -- the only family with a regex literal to lex.
+  const { code, inString } = scanSource(source, true, 'js');
   const violations: TestIntegrityViolation[] = [];
 
   for (const basePattern of HARD_DISABLE_PATTERNS) {

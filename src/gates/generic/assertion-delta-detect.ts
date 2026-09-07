@@ -268,10 +268,27 @@ function parseChangedLines(diff: string, syntax: CommentSyntax): { dels: DiffLin
 // matching a needle in either is the same false positive as matching one in a JS comment.
 const HASH_COMMENT_EXTENSIONS: readonly string[] = ['.py', '.sh', '.bash', '.rb'];
 
+// The only family with a regex literal. Everything else in the c-style family (`.java`, `.go`,
+// `.cs`, `.kt`, `.swift`, `.php`, `.rs`, Apex) spells a pattern as a string, so lexing one there
+// has no true positive to find and could only mask a `/` that was division or a path.
+const JS_EXTENSIONS: readonly string[] = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'];
+
 // Known limit, which can only COST a finding and never invent one: a Python triple-quoted
 // docstring is read as three ordinary quotes, so its body is scanned as code.
+//
+// Known limit that INVENTS one, stated separately because the direction is the dangerous one: a
+// shell here-doc body is read as code, so a suite that writes a stub with `cat > bin/gh <<'EOF'
+// ... EOF` reports an `assertion-removed` per assertion-shaped line when the fixture is deleted.
+// ./shell-test-scan.ts lexes here-docs already (`heredocOpener`/`consumeHeredocs`), but it lexes a
+// WHOLE FILE: its strings and here-doc bodies run across newlines, and a hunk side is a fragment
+// git cuts wherever it likes. Routing this mask there was tried and reverted -- a fragment that
+// BEGINS inside a `"$( ... )"` reads that construct's closing quote as an opener, which inverts
+// which side of every later quote is data and blanks the suite's own `&& ok || bad` checks while
+// keeping their messages. A newline-bounded mask resynchronizes on every line; a file-scoped one
+// carries a wrong start state through the whole fragment.
 function commentSyntaxFor(file: string): CommentSyntax {
-  return HASH_COMMENT_EXTENSIONS.some((ext) => file.endsWith(ext)) ? 'hash' : 'c-style';
+  if (HASH_COMMENT_EXTENSIONS.some((ext) => file.endsWith(ext))) return 'hash';
+  return JS_EXTENSIONS.some((ext) => file.endsWith(ext)) ? 'js' : 'c-style';
 }
 
 // A numeric-normalized, skip-marker-stripped, whitespace-collapsed skeleton of a line: two
