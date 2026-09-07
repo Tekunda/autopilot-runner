@@ -21,11 +21,12 @@ import type { StackProfile } from './stack-profile.ts';
 // verdict publishes `pending` + `reportOnly` and banks no coverage. Conflating the
 // two is a live defect in both directions -- a non-verdict banked as a pass hides a
 // gate that never ran, and a real verdict published as a non-verdict hides a gate
-// that did. THE FIVE PRODUCERS, and which they mean:
+// that did. THE SIX PRODUCERS, and which they mean:
 //
 //   JUDGED (publishes `pass`, banks coverage, stamps a real verdict):
 //     - command/command-gate.ts        a `blocking:false` command that exited non-zero
 //     - generic/assertion-delta.ts     weakened assertions found, `enforce:false`
+//     - generic/pipeline-topology.ts   a PR targeting the wrong branch, `enforce:false`
 //     - generic/structure.ts           repo-integrity findings
 //     - packs/seo/site-crawl.ts        the crawl ran and found only sub-blocking warnings
 //
@@ -46,9 +47,9 @@ import type { StackProfile } from './stack-profile.ts';
 // banks no coverage, and alarms `gate_never_fired`. Neither is acceptable, and the
 // default protects you from neither. What protects you is that each producer's own
 // test pins its answer -- `assert.equal('noVerdict' in result, false)` in
-// structure.test.ts, assertion-delta.test.ts, command-gate.test.ts and
-// site-crawl.test.ts, and `assert.equal(result.noVerdict, true)` in cve-osv.test.ts.
-// All five, because a default cannot decide this for you.
+// structure.test.ts, assertion-delta.test.ts, pipeline-topology.test.ts, command-gate.test.ts
+// and site-crawl.test.ts, and `assert.equal(result.noVerdict, true)` in cve-osv.test.ts.
+// All six, because a default cannot decide this for you.
 //
 // `unjudged` is the gate that EXECUTED but reached no verdict (a declared Python tool that is
 // not importable, a heavy-serve whose build died, a pack bundle that would not verify). It is

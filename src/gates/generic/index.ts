@@ -18,6 +18,7 @@ import { salesforceGates } from '../salesforce/index.ts';
 import type { Gate } from '../types.ts';
 import { createAssertionDeltaGate } from './assertion-delta.ts';
 import { createCveGate } from './cve.ts';
+import { createPipelineTopologyGate } from './pipeline-topology.ts';
 import { createRiskGate } from './risk.ts';
 import { createStructureGate } from './structure.ts';
 import { createTestPolicyGate } from './test-policy.ts';
@@ -35,6 +36,7 @@ export function genericGates(): Gate[] {
     createRiskGate(),
     createTestPolicyGate(),
     createAssertionDeltaGate(),
+    createPipelineTopologyGate(),
     // Always-on, self-selecting; see the header. On a repo of another language each returns
     // `skip`/`no-config`, which is benign in the verdict ledger (gate-verdict-ledger.ts
     // SKIP_CLASSES) and can never be mistaken for a pass.
@@ -52,6 +54,7 @@ export function registerGenericGates(registry: GateRegistry): void {
 export * from './assertion-delta.ts';
 export * from './assertion-delta-detect.ts';
 export * from './cve.ts';
+export * from './pipeline-topology.ts';
 export * from './risk.ts';
 export * from './test-integrity-detect.ts';
 export * from './test-integrity-types.ts';

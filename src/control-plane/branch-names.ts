@@ -16,6 +16,29 @@ export function slugify(text: string, maxLen = 48): string {
     .replace(/-+$/g, '');
 }
 
+// The head-branch prefixes the ticket pipeline owns, as ONE list because three consumers key on
+// it and a private copy in any of them is silent when it drifts: the external-PR sweep skips these
+// heads (isAutopilotManagedBranch, drive-faults.ts), the control plane builds the middle two
+// itself, and the `pipeline-topology` gate grades the ones a coding stage pushes to.
+//
+// `build/` has no producer in this source today and stays anyway: a branch under it is still
+// CLAIMED by the pipeline, so dropping it would have the sweep adopt one as an outside
+// contribution while the gate waved the same branch through as an ordinary one. A prefix leaves
+// this list only once nothing treats branches under it as the pipeline's.
+export const TICKET_BRANCH_PREFIX = 'ticket/';
+// Not exported: the class below is the only consumer today. Export it when a second one appears.
+const INTEGRATION_BRANCH_PREFIX = 'integration/';
+
+/** The prefixes a CODING stage's work lands on -- the head of a subtask PR. */
+export const BUILD_BRANCH_PREFIXES: readonly string[] = ['autopilot/', 'build/'];
+
+/** Every prefix the pipeline owns: the build heads plus the two branches per ticket. */
+export const PIPELINE_BRANCH_PREFIXES: readonly string[] = [
+  ...BUILD_BRANCH_PREFIXES,
+  TICKET_BRANCH_PREFIX,
+  INTEGRATION_BRANCH_PREFIX,
+];
+
 // A stable, ref-safe key derived from a ticket id -- the FULL id, dashless and
 // lowercased. Must be the full id, never a prefix: trackers like Notion issue ids
 // sequentially, so a batch of tickets created together shares a long leading run
