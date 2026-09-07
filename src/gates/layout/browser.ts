@@ -60,6 +60,8 @@ export interface DomElement {
   children: ArrayLike<DomElement>;
   parentElement: DomElement | null;
   closest(selector: string): DomElement | null;
+  scrollWidth: number;
+  clientWidth: number;
 }
 export interface DomDocument {
   querySelectorAll(selector: string): ArrayLike<DomElement>;
@@ -92,6 +94,9 @@ export function measureInPage(
         // element that also matches `within`) never measures itself as its own ancestor.
         const ancestor = el.parentElement ? el.parentElement.closest(query.ancestorSelector) : null;
         match.ancestor = ancestor ? rectOf(ancestor) : null;
+      }
+      if (query.overflow) {
+        match.overflow = { scrollWidth: el.scrollWidth, clientWidth: el.clientWidth };
       }
       return match;
     }),

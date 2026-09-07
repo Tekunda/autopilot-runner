@@ -34,7 +34,22 @@
 // `pass`. The aggregation at the bottom of `run` says why the rate-limit arm is a skip rather than
 // the merge-blocking `unjudged` it used to be.
 
-import { asGateNotes, createContentReader, selectPages, type ContentFormat } from '../content/reader.ts';
+import {
+  asGateNotes,
+  createContentReader,
+  selectPages,
+  type ContentFormat,
+  type ContentReader,
+} from '../content/reader.ts';
+import {
+  appRouteFor,
+  DEFAULT_GLOBAL_PATTERNS,
+  DEFAULT_REPRESENTATIVE_ROUTES,
+  isGlobalAsset,
+  isWrapperRouteFile,
+  matchesAnyGlob,
+  normalizeRoute,
+} from '../content/route-targets.ts';
 import type { Gate, GateContext, GateResult } from '../types.ts';
 import { createPlaywrightBrowser, type ScreenshotBrowser } from './browser.ts';
 import {
@@ -79,6 +94,20 @@ export interface VisualQaConfig {
   // (a guessed route that 404s would just fail closed); a tenant extends it with its key pages.
   // Default `['/']`.
   representativeRoutes?: string[];
+  // The app-router source ROOT (relative to the checkout root) under which route directories live,
+  // e.g. `apps/<app>/app/[locale]`. Set -> a changed route source file (a Next.js route file or a
+  // colocated i18n dictionary) under it derives the route of its own directory
+  // (`.../products/<product>/page.jsx` -> `/products/<product>`), so a changed UI component page
+  // maps to a route even when its copy lives in the app i18n dictionary rather than a content
+  // record. Unset -> path derivation is off and only content records / global-asset fanout map
+  // files (backward compatible), mirroring layout-rules.
+  appDir?: string;
+  // Globs (checkout-root-relative, `*`/`?` wildcards) matching SHARED source files that back
+  // specific routes but sit OUTSIDE a route dir (a shared section component). A change to one fans
+  // out to `representativeRoutes`, same as a global asset -- so a bounded, config-declared set of
+  // shared components triggers the configured routes without per-file route derivation. Mirrors
+  // layout-rules.
+  sharedSourceGlobs?: string[];
   // Routes ALWAYS screenshotted regardless of the diff -- an override, not a substitute: the
   // default behavior remains diff-driven when this is unset/empty.
   alwaysCheck?: string[];
@@ -104,8 +133,6 @@ export interface VisualQaDeps {
 
 const DEFAULT_VIEWPORTS: VisualQaViewport[] = [{ width: 1280, height: 800, name: 'desktop' }];
 const DEFAULT_CONTENT_DIR = 'content';
-const DEFAULT_GLOBAL_PATTERNS = ['.css', '.scss', '.sass', 'layout', 'theme', 'global'];
-const DEFAULT_REPRESENTATIVE_ROUTES = ['/'];
 
 // A route to render, plus WHY the diff selected it (logged so a run is self-describing about the
 // pages it chose -- especially the representative sample a global change fans out to).
@@ -119,16 +146,46 @@ function resolveConfig(ctx: GateContext): VisualQaConfig | undefined {
   return raw && typeof raw === 'object' ? raw : undefined;
 }
 
+// A changed app-router source file (page/layout/i18n) under `appDir` maps to the route of its own
+// directory -- so a changed UI component page is screenshotted even when it has no content record.
+// A file inside the content tree that is not a page is skipped: inventing a route from its directory
+// would be wrong (mirrors layout-rules' diffRoutes). Empty when `appDir` is unset (backward compat).
+function appSourceTargets(
+  ctx: GateContext,
+  config: VisualQaConfig,
+  contentPages: Set<string>,
+  reader: ContentReader,
+): { route: string; file: string }[] {
+  if (!config.appDir) return [];
+  const out: { route: string; file: string }[] = [];
+  for (const file of ctx.changedFiles) {
+    if (contentPages.has(file) || reader.isContentFile(file)) continue;
+    const route = appRouteFor(file, config.appDir);
+    if (route) out.push({ route, file });
+  }
+  return out;
+}
+
+// Whether a changed file fans out to `representativeRoutes` rather than a single page: a shared/
+// global asset, a config-declared shared source file, or a wrapper layout/template that wraps a
+// subtree. Matches layout-rules' fanout trigger.
+function triggersFanout(
+  file: string,
+  config: VisualQaConfig,
+  globalPatterns: string[],
+  sharedSourceGlobs: string[],
+): boolean {
+  return (
+    isGlobalAsset(file, globalPatterns) ||
+    matchesAnyGlob(file, sharedSourceGlobs) ||
+    // Truthiness, matching the `if (!config.appDir) return []` derivation guard so an empty
+    // `appDir` reads as "unset" everywhere.
+    (config.appDir ? isWrapperRouteFile(file, config.appDir) : false)
+  );
+}
+
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
-}
-
-function normalizeRoute(route: string): string {
-  return route.startsWith('/') ? route : `/${route}`;
-}
-
-function isGlobalAsset(file: string, patterns: string[]): boolean {
-  return patterns.some((pattern) => file.includes(pattern));
 }
 
 // Turn the diff into the SET of routes to screenshot, deduped by path (first reason wins). A
@@ -146,6 +203,7 @@ async function deriveTargets(
     ...(config.baseLocale ? { baseLocale: config.baseLocale } : {}),
   });
   const globalPatterns = config.globalPatterns ?? DEFAULT_GLOBAL_PATTERNS;
+  const sharedSourceGlobs = config.sharedSourceGlobs ?? [];
   const representativeRoutes =
     config.representativeRoutes && config.representativeRoutes.length > 0
       ? config.representativeRoutes
@@ -160,14 +218,21 @@ async function deriveTargets(
   for (const route of config.alwaysCheck ?? []) add(route, 'alwaysCheck override');
 
   const { pages, notes } = await selectPages(reader, ctx.changedFiles);
+  const contentPages = new Set(pages);
   for (const file of pages) {
     add(await reader.routeFor(file), `changed page ${file}`);
   }
   selectionNotes.push(...notes);
 
-  const globalHits = ctx.changedFiles.filter((file) => isGlobalAsset(file, globalPatterns));
-  if (globalHits.length > 0) {
-    const reason = `shared asset changed (${globalHits.join(', ')})`;
+  for (const { route, file } of appSourceTargets(ctx, config, contentPages, reader)) {
+    add(route, `changed route source ${file}`);
+  }
+
+  const fanoutHits = ctx.changedFiles.filter((file) =>
+    triggersFanout(file, config, globalPatterns, sharedSourceGlobs),
+  );
+  if (fanoutHits.length > 0) {
+    const reason = `shared asset changed (${fanoutHits.join(', ')})`;
     for (const route of representativeRoutes) add(route, reason);
   }
 

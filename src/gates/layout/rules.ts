@@ -22,12 +22,14 @@ export interface Box {
 }
 
 // The geometry the in-page routine collected for ONE element matching a rule's primary selector:
-// its own box, optionally its direct children's boxes (row/gap rules) and its nearest matching
-// ancestor's box (ratio rule). Absent optional fields mean the rule did not ask for them.
+// its own box, optionally its direct children's boxes (row/gap rules), its nearest matching
+// ancestor's box (ratio rule) and its scroll/client widths (overflow rule). Absent optional fields
+// mean the rule did not ask for them.
 export interface MatchGeometry {
   box: Box;
   children?: Box[];
   ancestor?: Box | null;
+  overflow?: { scrollWidth: number; clientWidth: number };
 }
 
 // All matches for one rule's primary selector on one route+viewport. An empty `matches` means the
@@ -47,6 +49,7 @@ export interface MeasureQuery {
   selector: string;
   children?: boolean;
   ancestorSelector?: string;
+  overflow?: boolean;
 }
 
 export type MeasureSpec = MeasureQuery[];
@@ -93,17 +96,42 @@ export interface SectionHeightRule {
   viewports?: number[];
 }
 
+// Any element matching `selector` whose scrollWidth exceeds its clientWidth by more than
+// `tolerance_px` (default 1) fails: its content overflows its own viewport-clipped width -- the
+// horizontal-scroll / cut-off-header class of bug. A pure width comparison, no row grouping.
+export interface HorizontalOverflowRule {
+  type: 'horizontal_overflow';
+  selector: string;
+  tolerance_px?: number;
+  viewports?: number[];
+}
+
+// Within each `within` match, the direct children must share a single visual row (one common top
+// within tolerance). Children spread across two or more rows -> they wrapped -> fail. Reuses the
+// same row grouping as sibling_height_delta.
+export interface NoWrapRule {
+  type: 'no_wrap';
+  within: string;
+  viewports?: number[];
+}
+
 export type LayoutRule =
   | SiblingHeightDeltaRule
   | ContentWidthRatioRule
   | LargestEmptyRegionRule
-  | SectionHeightRule;
+  | SectionHeightRule
+  | HorizontalOverflowRule
+  | NoWrapRule;
 
 export const DEFAULT_SECTION_SELECTOR = 'section[id]';
 
 // Two child boxes belong to the same visual row when their tops agree to within this many pixels.
 // A small tolerance absorbs sub-pixel/border rounding without merging genuinely stacked rows.
 const ROW_TOP_TOLERANCE_PX = 4;
+
+// Default slack for horizontal_overflow: scrollWidth may exceed clientWidth by a sub-pixel/rounding
+// margin without real overflow. Only a value strictly past clientWidth + tolerance fails.
+const DEFAULT_OVERFLOW_TOLERANCE_PX = 1;
 
 // A finding the evaluator emits. `fail` blocks (a real geometry violation); `na` is informational
 // (the rule's selector matched nothing / had no ancestor to measure against) and never blocks.
@@ -147,10 +175,32 @@ function withViewports<T extends LayoutRule>(rule: T, body: Record<string, unkno
   return viewports ? { ...rule, viewports } : rule;
 }
 
+// Build the overflow/no-wrap family of rules (the selector- or `within`-scoped flow rules), or
+// `undefined` when `type` is not one of them so the caller falls through to the rest. `null` still
+// means a recognized type whose required fields were missing/mistyped.
+function buildFlowRule(type: string, body: Record<string, unknown>): LayoutRule | null | undefined {
+  switch (type) {
+    case 'horizontal_overflow': {
+      const selector = asString(body.selector);
+      if (selector === undefined) return null;
+      const tolerance_px = asNumber(body.tolerance_px);
+      return withViewports(tolerance_px !== undefined ? { type, selector, tolerance_px } : { type, selector }, body);
+    }
+    case 'no_wrap': {
+      const within = asString(body.within);
+      return within !== undefined ? withViewports({ type, within }, body) : null;
+    }
+    default:
+      return undefined;
+  }
+}
+
 // Build a typed rule from an already-flattened `{ type, ...fields }` object, or null if a required
 // field is missing/mistyped. Returning null (rather than throwing) keeps a single malformed rule
 // from wedging the whole gate -- it simply does not run.
 function buildRule(type: string, body: Record<string, unknown>): LayoutRule | null {
+  const flowRule = buildFlowRule(type, body);
+  if (flowRule !== undefined) return flowRule;
   switch (type) {
     case 'sibling_height_delta': {
       const within = asString(body.within);
@@ -186,6 +236,8 @@ const RULE_TYPES = new Set([
   'content_width_ratio',
   'largest_empty_region',
   'section_height',
+  'horizontal_overflow',
+  'no_wrap',
 ]);
 
 const MALFORMED_FIELD_REASON = 'missing or malformed required field';
@@ -275,6 +327,10 @@ export function measureSpecFor(rules: readonly LayoutRule[]): MeasureSpec {
         return { selector: rule.within, children: true };
       case 'section_height':
         return { selector: rule.selector ?? DEFAULT_SECTION_SELECTOR };
+      case 'horizontal_overflow':
+        return { selector: rule.selector, overflow: true };
+      case 'no_wrap':
+        return { selector: rule.within, children: true };
     }
   });
 }
@@ -291,10 +347,9 @@ function naFinding(rule: LayoutRule, selector: string): LayoutFinding {
   };
 }
 
-// Group direct children into visual rows by shared top, then report the worst intra-row height
-// delta. Children are sorted by top; a child opens a new row once its top clears the current row's
-// top by more than the tolerance.
-function rowHeightDeltas(children: readonly Box[]): Array<{ delta: number; minH: number; maxH: number }> {
+// Group direct children into visual rows by shared top. Children are sorted by top; a child opens a
+// new row once its top clears the current row's top by more than the tolerance.
+function groupIntoRows(children: readonly Box[]): Box[][] {
   const sorted = [...children].sort((a, b) => a.top - b.top);
   const rows: Box[][] = [];
   let rowTop = Number.NEGATIVE_INFINITY;
@@ -306,7 +361,13 @@ function rowHeightDeltas(children: readonly Box[]): Array<{ delta: number; minH:
       rows[rows.length - 1]!.push(child);
     }
   }
-  return rows
+  return rows;
+}
+
+// Group direct children into visual rows by shared top, then report the worst intra-row height
+// delta.
+function rowHeightDeltas(children: readonly Box[]): Array<{ delta: number; minH: number; maxH: number }> {
+  return groupIntoRows(children)
     .filter((row) => row.length > 1)
     .map((row) => {
       const heights = row.map((box) => box.height);
@@ -421,6 +482,53 @@ function evaluateSectionHeight(rule: SectionHeightRule, geometry: RuleGeometry):
   ];
 }
 
+function evaluateHorizontalOverflow(rule: HorizontalOverflowRule, geometry: RuleGeometry): LayoutFinding[] {
+  if (geometry.matches.length === 0) return [naFinding(rule, rule.selector)];
+  const tolerance = rule.tolerance_px ?? DEFAULT_OVERFLOW_TOLERANCE_PX;
+  const violations: Array<{ overflow: number; scrollWidth: number; clientWidth: number }> = [];
+  let measured = 0;
+  for (const match of geometry.matches) {
+    const overflow = match.overflow;
+    if (!overflow) continue;
+    measured += 1;
+    const excess = overflow.scrollWidth - overflow.clientWidth;
+    if (excess > tolerance) {
+      violations.push({ overflow: excess, scrollWidth: overflow.scrollWidth, clientWidth: overflow.clientWidth });
+    }
+  }
+  // Matches existed but none carried overflow geometry -> the gate could not measure this rule.
+  // That is N/A ("could not measure"), NOT a clean pass -- same distinction the other rules draw
+  // between "no matches" and "measured and passed".
+  if (measured === 0) return [naFinding(rule, rule.selector)];
+  if (violations.length === 0) return [];
+  const worst = violations.reduce((a, b) => (b.overflow > a.overflow ? b : a));
+  const els = `${violations.length} element${violations.length === 1 ? '' : 's'}`;
+  return [
+    {
+      ruleType: rule.type,
+      status: 'fail',
+      message: `horizontal_overflow '${rule.selector}': ${els} overflow by more than ${px(tolerance)}; worst ${px(worst.overflow)} (${px(worst.scrollWidth)} scroll vs ${px(worst.clientWidth)} client)`,
+    },
+  ];
+}
+
+function evaluateNoWrap(rule: NoWrapRule, geometry: RuleGeometry): LayoutFinding[] {
+  if (geometry.matches.length === 0) return [naFinding(rule, rule.within)];
+  const violations = geometry.matches
+    .map((match) => groupIntoRows(match.children ?? []).length)
+    .filter((rows) => rows > 1);
+  if (violations.length === 0) return [];
+  const worst = Math.max(...violations);
+  const els = `${violations.length} container${violations.length === 1 ? '' : 's'}`;
+  return [
+    {
+      ruleType: rule.type,
+      status: 'fail',
+      message: `no_wrap within '${rule.within}': ${els} wrapped onto multiple rows; worst ${worst} rows`,
+    },
+  ];
+}
+
 // Evaluate every rule against the measurements collected for it (aligned by index) and return the
 // findings: `fail` for a real violation, `na` for a rule that had nothing to measure. A passing rule
 // contributes no finding. This is the whole verdict surface -- the gate blocks iff any `fail` exists.
@@ -440,6 +548,12 @@ export function evaluateRules(rules: readonly LayoutRule[], measurements: RawMea
         break;
       case 'section_height':
         findings.push(...evaluateSectionHeight(rule, geometry));
+        break;
+      case 'horizontal_overflow':
+        findings.push(...evaluateHorizontalOverflow(rule, geometry));
+        break;
+      case 'no_wrap':
+        findings.push(...evaluateNoWrap(rule, geometry));
         break;
     }
   });

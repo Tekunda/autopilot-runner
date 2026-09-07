@@ -1188,6 +1188,11 @@ export interface SubtaskState {
   // "was the last round a refusal" fact those lanes read before charging their own counter.
   // Reset by any dispatch that reaches a model, pass or fail.
   providerRejections?: number;
+  // The render gates' verdicts (visual-qa / layout-rules, per-site matrix variants included) from
+  // this subtask's final gate report. Captured so the ticket-level assembled review can see render
+  // evidence the code-only reviewer cannot. Rolled up into TicketState.renderVerdicts. Absent when
+  // this subtask's gate report named no render gate.
+  renderVerdicts?: RenderVerdict[];
 }
 
 // WHICH gate implementation produced the findings that blocked a subtask (and, rolled up, its
@@ -1248,6 +1253,19 @@ export interface RecordedGateCheck {
   // multi-site tenant's URL-bound gates match the enabled-gate set instead of skipping the
   // diagnostic entirely. Absent (== `id`) for a single-run gate.
   baseId?: string;
+}
+
+// A render gate's verdict (visual-qa / layout-rules), distilled from its gate-stage CheckResult
+// and carried up to the ticket-level assembled review. The per-subtask fix loop already acts on
+// these, but the 3-lens reviewer that decides "PLAN KEPT" judges by reading code alone -- so a
+// render failure it cannot see still gets stamped done. This is that missing evidence, threaded
+// into the primary reviewer's prompt: the gate name and status are trusted framing, while each
+// finding body is wrapped untrusted (it can echo model text about an author-controlled page).
+// `gate` is the check's display name INCLUDING any per-site matrix suffix (e.g. `visual-qa (<site>)`).
+export interface RenderVerdict {
+  gate: string;
+  status: CheckStatus;
+  findings: string[];
 }
 
 // One enabled lens's finalized telemetry within a review round: the run outcome plus the
@@ -1368,6 +1386,11 @@ export interface TicketState {
   // verifies each against the built code -- an unmet claim is a blocking `PLAN NOT KEPT`
   // finding. Undefined for a plan that declared none.
   planClaims?: string[];
+  // The render gates' verdicts rolled up from every subtask's final gate report (visual-qa /
+  // layout-rules, per-site matrix variants included). Forwarded as TRUSTED evidence into the
+  // assembled-branch primary reviewer's prompt so a render failure the code-only reviewer cannot
+  // see still gets weighed before "PLAN KEPT". Undefined when no subtask reported a render gate.
+  renderVerdicts?: RenderVerdict[];
   // The rendering surfaces the architect plan deletes/hides (plan.json `removals`), in user
   // terms. Persisted alongside planClaims for the record; each removal must carry a paired
   // preservation claim (the deterministic preservation gate) and, under
