@@ -354,10 +354,31 @@ async function resolvePackGates(
     findings: [finding],
   });
 
+  // INFRA, not a reason-less unjudged, and that classification is the whole difference between
+  // this clearing itself and a human being paged. A grant reaches here with no bundle only when
+  // the control plane could not RESOLVE one -- the release carrying the digest this deployment
+  // builds is not published yet (the routine case: the deploy and the publish fire on the same
+  // push, so an image can be live minutes before its release exists), the releases API could not
+  // be read, or the deployment stamps no expected digest at all. Not one of those is anything a
+  // fix round could edit, and the first two stop being true on their own, which is exactly what
+  // `infra` means here: no fix stage, but a bounded retry of the gate before escalating
+  // (isInfraUnjudgedOnly / isGateInfraFault, control-plane/fix-loop.ts).
+  //
+  // The permanent cause -- a deployment that stamps no digest -- still reaches a human; it spends
+  // the retry budget first and escalates as an infra block naming this check. That is the right
+  // trade: the cost of being wrong this way is a few gate re-runs, and the cost of being wrong
+  // the other way is a red required check and a manual re-run on every gated PR of every pack
+  // tenant for the length of a publish race.
   if (!grant.packBundle) {
+    // The plane's own reason, appended verbatim. Without it every cause -- the publish race that
+    // needs nothing, a 403 that needs a credential, a deployment that stamps no digest -- arrives
+    // as the same fixed sentence, and this sentence is what the PR check shows and what the
+    // escalation quotes. Absent (an older plane) leaves the refusal exactly as it was.
+    const because = grant.packBundleUnresolvedReason ? ` -- ${grant.packBundleUnresolvedReason}` : '';
     return failure(
       `gate stage cannot run: the grant's signed gateSpecs name ${unresolved().join(', ')}, which the runner ` +
-        'cannot execute and which no signed packBundle was provided to supply',
+        `cannot execute and which no signed packBundle was provided to supply${because}`,
+      true,
     );
   }
 
@@ -549,10 +570,11 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
   // the fetch, not the refusal.
   const packBundleFailure = await resolvePackGates(grant, deps, genericSpecs, enabledIds);
   if (packBundleFailure) {
-    // The signed note rides along on the failure's own check rather than being dropped: "the
-    // bundle would not load" and "the bundle you are pinned to is not the current one" are
-    // different facts, and the second is often the explanation of the first. Appended, so the
-    // failure's own diagnosis stays the first thing read, and the status is untouched.
+    // The signed note rides along on the failure's own check rather than being dropped. The note
+    // the plane signs today says a ROLLBACK OVERRIDE is in force, and beside a load failure that is
+    // not an aside: an override is a url and a digest a human typed, so it is the likeliest CAUSE
+    // of the failure above it. Appended rather than merged, so the failure's own diagnosis stays
+    // the first thing read, and the status is untouched.
     const withNote = grant.packBundle?.note
       ? { ...packBundleFailure, findings: [...(packBundleFailure.findings ?? []), grant.packBundle.note] }
       : packBundleFailure;
@@ -617,15 +639,17 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
   // maps it to `pending`, toChecks tags it `reportOnly`, and the `ok` computation below cannot key
   // on it. NOT `pass`. A pass is equally unable to change the stage's outcome, but it is BANKED --
   // recordedGateChecks stores it, executionCoverageResults maps it to a real result, and
-  // promotionCoverageSet writes `gate:pack-bundle` into the tenant's coverage baseline. The next
-  // revision that carries no note (a rollback, or a deployment that stamps no expected digest)
-  // would then drop that id and trip `coverage_regression` naming a gate that never gated
-  // anything. An annotation must not enter the coverage record at all.
+  // promotionCoverageSet writes `gate:pack-bundle` into the tenant's coverage baseline. The note is
+  // published only while a rollback override is set, so the revision AFTER the override is removed
+  // carries no note, drops that id, and trips `coverage_regression` naming a gate that never gated
+  // anything -- on the good news that a tenant went back to tracking the build. An annotation must
+  // not enter the coverage record at all.
   //
-  // The note says how the bundle this run was pinned to relates to the one the control plane's own
-  // build produces, a comparison the runner structurally cannot make for itself: it holds bytes and
-  // a signed digest that agree, and no notion of "current". So this is annotation carried in, not
-  // judgment reached here, and no branch below may key a verdict on it.
+  // The note says that this tenant is held on a bundle a human chose rather than the one the
+  // deployed control-plane build produces -- a fact about issuance that the runner structurally
+  // cannot derive for itself: it holds bytes and a signed digest that agree, and no notion of what
+  // else was on offer. So this is annotation carried in, not judgment reached here, and no branch
+  // below may key a verdict on it.
   //
   // Published on the SAME id a bundle FAILURE publishes under, deliberately: one name for one
   // subject, so a human reading the PR finds the bundle's story in one place. The two cannot

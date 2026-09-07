@@ -469,6 +469,22 @@ export type ExecutionGrant = {
   // instantiate and no bundle is here to supply it, the gate stage fails closed rather than
   // reporting green over a gate that never ran (run-gate-stage.ts).
   packBundle?: PackBundleGrant;
+  // WHY there is no `packBundle`, in the words of whoever decided there would not be. Present
+  // only when `packBundle` is absent: the control plane could not resolve which published release
+  // carries the bundle this image builds, and this says which of the several very different
+  // reasons it was -- the publish race that clears itself in minutes, an API that answered 403,
+  // a release list too long to search, or a deployment that stamps no expected digest at all.
+  //
+  // The runner appends it to the refusal it publishes on the `pack-bundle` check, which is the
+  // sentence a human reads on the PR and the one the escalation quotes. Without it every one of
+  // those causes arrives as the same fixed sentence, and an operator cannot tell the one that
+  // needs nothing from the one that needs them.
+  //
+  // Signed like every other field because the whole payload is, but nothing TRUSTS it: it is
+  // reported, never branched on. The strings are built by control-plane/pack-bundle-resolver.ts
+  // from statuses, urls and error messages -- its `listReleases` throws with the response STATUS
+  // and never the body, which is what keeps a release API error body out of a build log.
+  packBundleUnresolvedReason?: string;
   // The per-tenant MCP-server access every agent stage (planner/architect/build/fix/qa/
   // accept) runs with -- resolved server-side from the tenant's config (never from
   // ticket/tracker input). Part of the signed payload like every other field;
