@@ -98,6 +98,15 @@ export interface GatePolicy {
   // one opened under Autopilot's own identity wedges the promotion it is driving. See
   // publishFindingsToPr.
   publishReviewFindingsToPr?: boolean;
+  // Escalate a review-loop differential-render FAIL (visual-qa / layout-rules run on the assembled
+  // branch during the review/repair loop) into a BLOCKING review finding. The render gates are
+  // deliberately advisory at the subtask stage (blocking:false), so without this a rendered FAIL
+  // reaches the primary reviewer only as "untrusted evidence to verify" and a round can still go
+  // green and promote unrepaired. When true, each render verdict with status:'fail' is synthesized
+  // into a `blocker` ReviewFinding and merged into the round's blocking set, so it flows through the
+  // ordinary repair loop. Scoped to the ASSEMBLED review only -- subtask-stage blocking:false is
+  // untouched. Optional; defaults to FALSE (no tenant behaviour changes unless it opts in).
+  reviewRenderBlocking?: boolean;
   // When the bounded repair loop is spent, REPLAN instead of blocking for a human: discard
   // the recorded plan and re-architect with every finding forwarded into the ticket, so the
   // gaps come back as properly scoped subtasks with their own budgets instead of one repair
@@ -1390,7 +1399,24 @@ export interface TicketState {
   // layout-rules, per-site matrix variants included). Forwarded as TRUSTED evidence into the
   // assembled-branch primary reviewer's prompt so a render failure the code-only reviewer cannot
   // see still gets weighed before "PLAN KEPT". Undefined when no subtask reported a render gate.
+  //
+  // OWNED BY THE ROLLUP: driveDecomposedTicket recomputes this from the subtasks' verdicts on EVERY
+  // tick, so the review/repair loop's OWN render (of the assembled branch) must NOT write here -- it
+  // would be clobbered before the round aggregates. That render lands on reviewRenderVerdicts below.
   renderVerdicts?: RenderVerdict[];
+  // The review/repair loop's OWN differential render of the ASSEMBLED integration branch (visual-qa
+  // / layout-rules, driveAssembledAccept). This is fresher, integrated evidence than the per-subtask
+  // renderVerdicts above (which predate assembly), so the reviewer, the fixer and the render-blocking
+  // escalation all read `reviewRenderVerdicts ?? renderVerdicts` -- the loop render when it exists,
+  // the subtask rollup otherwise (byte-identical to before this field existed when it is absent). A
+  // SEPARATE field precisely because the rollup owns and overwrites renderVerdicts every tick.
+  // Undefined until the loop renders a head, or when the tenant is not render-entitled.
+  reviewRenderVerdicts?: RenderVerdict[];
+  // The integration-branch head sha the review/repair loop last ran its OWN differential render
+  // against (paired with reviewRenderVerdicts). This is the once-per-head bound: a live review round
+  // or a re-poll tick never re-renders the same commit, and it is written BEFORE the loop returns so
+  // a crash-replay does not re-dispatch a 13-16 min render. Undefined until the loop renders a head.
+  renderJudgedSha?: string;
   // The rendering surfaces the architect plan deletes/hides (plan.json `removals`), in user
   // terms. Persisted alongside planClaims for the record; each removal must carry a paired
   // preservation claim (the deterministic preservation gate) and, under
@@ -1439,6 +1465,17 @@ export interface TicketState {
   // fresh convergence window just because the base moved.
   repairBlockerKeys?: string[];
   repairStallStreak?: number;
+  // The CUMULATIVE union of every findingKey ever dispatched to a review-repair for this ticket
+  // (distinct from repairBlockerKeys, which is only the LAST round's set). A blocker key that has
+  // never appeared here is genuinely new, and gets its own repair even after the ordinary budget
+  // (fix.maxBuildRetries) is spent -- bounded separately by newBlockerRepairs / fix.maxNewBlockerRepairs
+  // so a late-surfacing blocker is not silently dropped while a same-key stall still terminates.
+  // Reset on exactly the events that clear acceptRepairAttempts.
+  repairSeenBlockerKeys?: string[];
+  // How many EXTRA repairs were granted specifically for never-before-seen blocker keys after the
+  // ordinary repair budget was already spent. Bounded by fix.maxNewBlockerRepairs. Reset with
+  // acceptRepairAttempts.
+  newBlockerRepairs?: number;
   // Highest PR review/comment ids the control plane has already acted on, per source, so
   // corrective feedback (a Codex or human `changes_requested`/comment) drives a fix exactly
   // once. Persisted so a control-plane restart doesn't re-fix already-handled feedback.
