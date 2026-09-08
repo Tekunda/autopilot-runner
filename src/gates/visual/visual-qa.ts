@@ -55,9 +55,12 @@ import { createPlaywrightBrowser, type ScreenshotBrowser } from './browser.ts';
 import {
   createAnthropicVisionJudge,
   VisionRateLimitError,
+  viewportLabelFor,
   type ExecutorCredential,
+  type JudgeShot,
   type VisionJudge,
 } from './judge.ts';
+import type { Screenshot } from './browser.ts';
 
 export const VISUAL_QA_GATE_ID = 'visual-qa';
 
@@ -111,7 +114,13 @@ export interface VisualQaConfig {
   // Routes ALWAYS screenshotted regardless of the diff -- an override, not a substitute: the
   // default behavior remains diff-driven when this is unset/empty.
   alwaysCheck?: string[];
-  // Defaults to a single 1280x800 desktop viewport when unset.
+  // The responsive viewport sweep to render each route at. Defaults to DEFAULT_SWEEP -- both phone
+  // orientations, both tablet orientations, and desktop -- so a size that is wrong RELATIVE to the
+  // sizes that look right (a header fine in portrait but broken in landscape, a link that wraps
+  // only at tablet width) is caught. A tenant overrides it with its own list. Cost scales with the
+  // viewport count, but the judge is BATCHED to ONE call per route (all of a route's shots go in a
+  // single differential call), so the marginal cost of another viewport is one more image, not one
+  // more model call.
   viewports?: VisualQaViewport[];
   // Gate-wide judging rubric. Falls back to the judge's DEFAULT_CRITERIA when unset.
   criteria?: string[];
@@ -131,7 +140,17 @@ export interface VisualQaDeps {
   createBrowser?: () => Promise<ScreenshotBrowser>;
 }
 
-const DEFAULT_VIEWPORTS: VisualQaViewport[] = [{ width: 1280, height: 800, name: 'desktop' }];
+// The responsive default sweep, used when a tenant sets no `viewports`. Covers both phone
+// orientations, both tablet orientations, and desktop, so the differential judge sees the same
+// route across the breakpoints where responsive layout typically diverges. Dimensions are the
+// engine's documented defaults (no tenant/route/brand meaning); a tenant overrides via `viewports`.
+export const DEFAULT_SWEEP: VisualQaViewport[] = [
+  { width: 393, height: 852, name: 'phone-portrait' },
+  { width: 852, height: 393, name: 'phone-landscape' },
+  { width: 768, height: 1024, name: 'tablet-portrait' },
+  { width: 1024, height: 768, name: 'tablet-landscape' },
+  { width: 1280, height: 800, name: 'desktop' },
+];
 const DEFAULT_CONTENT_DIR = 'content';
 
 // A route to render, plus WHY the diff selected it (logged so a run is self-describing about the
@@ -271,7 +290,7 @@ export function createVisualQaGate(deps: VisualQaDeps = {}): Gate {
       }
 
       const baseUrl = config.baseUrl.replace(/\/$/, '') + '/';
-      const viewports = config.viewports && config.viewports.length > 0 ? config.viewports : DEFAULT_VIEWPORTS;
+      const viewports = config.viewports && config.viewports.length > 0 ? config.viewports : DEFAULT_SWEEP;
       const criteria = config.criteria ?? [];
 
       const injectedBrowser = deps.browser;
@@ -297,25 +316,51 @@ export function createVisualQaGate(deps: VisualQaDeps = {}): Gate {
       try {
         for (const target of targets) {
           const url = new URL(target.path, baseUrl).toString();
+
+          // First render every viewport for this route. A screenshot that itself fails to capture is
+          // a page we cannot verify -> fail closed (unchanged from before); it is dropped from the
+          // batch so the surviving shots are still judged.
+          const shots: JudgeShot[] = [];
           for (const viewport of viewports) {
-            const label = viewportLabel(target, viewport);
             try {
-              const screenshot = await browser.screenshot(url, viewport);
-              const verdict = await judge.judge(screenshot, { url, viewport, criteria });
-              if (!verdict.pass) {
+              const screenshot: Screenshot = await browser.screenshot(url, viewport);
+              shots.push({ viewport, screenshot });
+            } catch (err) {
+              failures.push(`${viewportLabel(target, viewport)}: could not verify (${errMsg(err)})`);
+            }
+          }
+          if (shots.length === 0) continue;
+
+          // Then ONE differential judge call carrying all of the route's shots. The per-viewport
+          // verdicts drive the SAME failures/inconclusive collections as before, one finding per
+          // viewport, keyed back to each shot by its label.
+          try {
+            const verdicts = await judge.judge({ url, shots, criteria });
+            for (const shot of shots) {
+              const label = viewportLabel(target, shot.viewport);
+              const verdict = verdicts.find((v) => v.viewport === viewportLabelFor(shot.viewport));
+              if (!verdict) {
+                // parseVerdict guarantees a verdict for every requested viewport, so this only trips
+                // on an injected fake that under-reports -- still never a silent pass.
+                failures.push(`${label}: could not verify (judge returned no verdict for this viewport)`);
+              } else if (!verdict.pass) {
                 failures.push(`${label}: ${verdict.reason || 'visual-qa verdict: fail'}`);
               }
-            } catch (err) {
-              if (err instanceof VisionRateLimitError) {
-                // Rate-limited past the retry budget -> inconclusive, not a defect. Labeled so a
-                // reader (and the aggregation) can tell it apart from a real visual failure.
+            }
+          } catch (err) {
+            if (err instanceof VisionRateLimitError) {
+              // Rate-limited past the retry budget -> inconclusive, not a defect. The whole route's
+              // batch could not be judged, so every viewport is labeled inconclusive.
+              for (const shot of shots) {
                 inconclusive.push(
-                  `${label}: could not verify -- model API rate-limited (${err.status}); transient infra issue, not a visual defect`,
+                  `${viewportLabel(target, shot.viewport)}: could not verify -- model API rate-limited (${err.status}); transient infra issue, not a visual defect`,
                 );
-              } else {
-                // Could not render or could not judge for a non-transient reason -> fail closed. A
-                // page we cannot verify is NOT a pass (the judge is never stubbed to pass); report why.
-                failures.push(`${label}: could not verify (${errMsg(err)})`);
+              }
+            } else {
+              // Could not judge for a non-transient reason -> fail closed. A page we cannot verify is
+              // NOT a pass (the judge is never stubbed to pass); report why, per viewport.
+              for (const shot of shots) {
+                failures.push(`${viewportLabel(target, shot.viewport)}: could not verify (${errMsg(err)})`);
               }
             }
           }

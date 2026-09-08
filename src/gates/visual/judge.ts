@@ -17,23 +17,47 @@
 
 import type { Screenshot, Viewport } from './browser.ts';
 
+// One viewport's verdict. `viewport` is the exact label (viewportLabelFor) the judge was asked to
+// score, so the gate can map each verdict back to the shot it belongs to; `pass`/`reason` are the
+// per-size result. The judge is DIFFERENTIAL: a size is judged against the sizes that look right,
+// not against a static ideal, so a verdict names the viewport it concerns.
 export interface VisionVerdict {
+  viewport: string;
   pass: boolean;
   reason: string;
 }
 
-export interface JudgeInput {
-  url: string;
+// One rendered size of the SAME route: the viewport it was rendered at plus its screenshot. A
+// route's shots are sent together so the judge can compare sizes.
+export interface JudgeShot {
   viewport: Viewport;
-  // The judging rubric for this page -- global gate criteria plus any per-target ones.
-  criteria: string[];
+  screenshot: Screenshot;
 }
 
-// Scores one screenshot against its criteria. The default calls a Claude vision model; a test
-// injects a fake. A thrown error means "could not judge" (API/parse failure) and the gate fails
-// closed rather than passing an unscored page.
+export interface JudgeInput {
+  url: string;
+  // The SAME route rendered at several viewports, in the order the prompt lists them.
+  shots: JudgeShot[];
+  // The judging rubric for this page -- global gate criteria plus any per-target ones. Optional;
+  // empty/absent falls back to DEFAULT_CRITERIA.
+  criteria?: string[];
+}
+
+// Scores a route's shots against its criteria in ONE call, returning a per-viewport verdict array
+// (one entry per requested viewport). The default calls a Claude vision model; a test injects a
+// fake. A thrown error means "could not judge" (API/parse failure) and the gate fails closed
+// rather than passing an unscored page.
 export interface VisionJudge {
-  judge(screenshot: Screenshot, input: JudgeInput): Promise<VisionVerdict>;
+  judge(input: JudgeInput): Promise<VisionVerdict[]>;
+}
+
+// The canonical label for a viewport: `name (WxH)` when named, else `WxH`. Shared by the prompt,
+// the per-image text blocks, and parseVerdict's validation so all three agree on what a verdict's
+// `viewport` string must be.
+export function viewportLabelFor(viewport: Viewport): string {
+  return viewport.name
+    ? `${viewport.name} (${viewport.width}x${viewport.height})`
+    : `${viewport.width}x${viewport.height}`;
 }
 
 // The Opus tier this repo already resolves for deep model work (src/config/model-tiers.ts).
@@ -114,21 +138,35 @@ function authHeaders(credential: ExecutorCredential): Record<string, string> {
     : { 'x-api-key': credential.apiKey };
 }
 
-// The rubric prompt: the model must answer with a strict JSON verdict so the gate can parse a
-// deterministic pass/fail out of a probabilistic model. The criteria are the tenant's, injected.
+// The DIFFERENTIAL rubric prompt: the model is shown the SAME route rendered at several sizes and
+// must answer with a strict per-viewport JSON verdict, so the gate can parse a deterministic
+// pass/fail per size out of a probabilistic model. The criteria are the tenant's, injected.
 export function buildJudgePrompt(input: JudgeInput): string {
-  const criteria = input.criteria.length > 0 ? input.criteria : DEFAULT_CRITERIA;
-  const viewportLabel = input.viewport.name
-    ? `${input.viewport.name} (${input.viewport.width}x${input.viewport.height})`
-    : `${input.viewport.width}x${input.viewport.height}`;
+  const criteria = input.criteria && input.criteria.length > 0 ? input.criteria : DEFAULT_CRITERIA;
+  const labels = input.shots.map((s) => viewportLabelFor(s.viewport));
   return [
-    `You are a visual QA judge reviewing a full-page screenshot of ${input.url} rendered at ${viewportLabel}.`,
-    'Judge the screenshot against these criteria:',
+    `You are a visual QA judge reviewing the SAME page (${input.url}) rendered at ${labels.length} viewport sizes.`,
+    'The screenshots are provided in this order, each immediately preceded by its viewport label:',
+    ...labels.map((label, i) => `${i + 1}. ${label}`),
+    '',
+    'Judge EACH viewport on TWO independent tests, and mark the size a FAIL if EITHER applies:',
+    'TEST 1 (absolute) -- the layout at this size violates any of these criteria, regardless of how',
+    'the other sizes look (so a defect present at EVERY size is still a fail at every size):',
     ...criteria.map((c) => `- ${c}`),
+    'TEST 2 (differential) -- compare the sizes against one another, treat the sizes that look',
+    'correct as the reference for the intended design, and flag where this size diverges from them:',
+    '- misaligned or overlapping elements',
+    '- text wrapping onto extra lines it should not',
+    '- content overflow or clipping',
+    '- large unintended dead space',
+    '',
+    'Mark a viewport as a FAIL only on a CLEAR divergence, never a subjective nitpick -- a false',
+    'fail blocks a merge.',
     '',
     'Respond with ONLY a single JSON object and nothing else, in this exact shape:',
-    '{"verdict": "pass" | "fail", "reason": "<one concise sentence>"}',
-    'Fail if ANY criterion is violated. When you fail, name the specific problem in the reason.',
+    '{"verdicts": [{"viewport": "<label>", "pass": true, "reason": "<one concise sentence>"}]}',
+    'Include exactly one entry for EVERY viewport listed above, using its exact label. When a',
+    'viewport fails, name the specific problem in its reason.',
   ].join('\n');
 }
 
@@ -138,17 +176,30 @@ export const DEFAULT_CRITERIA = [
   'No obviously missing images, icons, or CSS (no unstyled/raw HTML, no broken-image placeholders).',
 ];
 
-// Pull the verdict out of the model's reply. The prompt demands strict JSON, but a model may
-// wrap it in prose or a code fence, so we extract the first JSON object. A reply we cannot parse
-// into a verdict is a judging FAILURE (throw), not a silent pass.
-export function parseVerdict(text: string): VisionVerdict {
+// Pull the per-viewport verdict array out of the model's reply. The prompt demands strict JSON,
+// but a model may wrap it in prose or a code fence, so we extract the first JSON object. The reply
+// must carry a well-formed verdict for EVERY requested viewport label -- each with a boolean `pass`
+// and a string `reason`; a reply missing a viewport, or malformed in any way, is a judging FAILURE
+// (throw), NEVER a silent pass. The returned array is ordered to match `expectedLabels`.
+export function parseVerdict(text: string, expectedLabels: string[]): VisionVerdict[] {
   const match = text.match(/\{[\s\S]*\}/);
   if (match) {
     try {
-      const parsed = JSON.parse(match[0]) as { verdict?: unknown; reason?: unknown };
-      const verdict = typeof parsed.verdict === 'string' ? parsed.verdict.toLowerCase() : undefined;
-      if (verdict === 'pass' || verdict === 'fail') {
-        return { pass: verdict === 'pass', reason: typeof parsed.reason === 'string' ? parsed.reason : '' };
+      const parsed = JSON.parse(match[0]) as { verdicts?: unknown };
+      const verdicts = parsed.verdicts;
+      if (Array.isArray(verdicts)) {
+        const byLabel = new Map<string, VisionVerdict>();
+        for (const entry of verdicts) {
+          if (entry && typeof entry === 'object') {
+            const { viewport, pass, reason } = entry as Record<string, unknown>;
+            if (typeof viewport === 'string' && typeof pass === 'boolean' && typeof reason === 'string') {
+              byLabel.set(viewport, { viewport, pass, reason });
+            }
+          }
+        }
+        if (expectedLabels.every((label) => byLabel.has(label))) {
+          return expectedLabels.map((label) => byLabel.get(label)!);
+        }
       }
     } catch {
       // fall through to the error below
@@ -186,7 +237,7 @@ export function createAnthropicVisionJudge(opts: AnthropicVisionJudgeOptions = {
   const sleep = opts.sleepImpl ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
 
   return {
-    async judge(screenshot: Screenshot, input: JudgeInput): Promise<VisionVerdict> {
+    async judge(input: JudgeInput): Promise<VisionVerdict[]> {
       const credential = resolveCredential(opts);
       if (!credential) {
         throw new Error(
@@ -194,21 +245,22 @@ export function createAnthropicVisionJudge(opts: AnthropicVisionJudgeOptions = {
         );
       }
 
+      // One image block per shot, each IMMEDIATELY preceded by a text block naming its viewport,
+      // in the same order the prompt lists them; the rubric prompt goes last.
+      const content: Array<Record<string, unknown>> = [];
+      for (const shot of input.shots) {
+        content.push({ type: 'text', text: `Viewport: ${viewportLabelFor(shot.viewport)}` });
+        content.push({
+          type: 'image',
+          source: { type: 'base64', media_type: shot.screenshot.mediaType, data: shot.screenshot.base64 },
+        });
+      }
+      content.push({ type: 'text', text: buildJudgePrompt(input) });
+
       const body = {
         model,
         max_tokens: maxTokens,
-        messages: [
-          {
-            role: 'user',
-            content: [
-              {
-                type: 'image',
-                source: { type: 'base64', media_type: screenshot.mediaType, data: screenshot.base64 },
-              },
-              { type: 'text', text: buildJudgePrompt(input) },
-            ],
-          },
-        ],
+        messages: [{ role: 'user', content }],
       };
 
       // Retry loop: a 429/529 is transient throttling, not a defect. Back off (honoring
@@ -256,7 +308,7 @@ export function createAnthropicVisionJudge(opts: AnthropicVisionJudgeOptions = {
           .join('\n')
           .trim();
         if (!text) throw new Error('vision judge: model returned no text content');
-        return parseVerdict(text);
+        return parseVerdict(text, input.shots.map((s) => viewportLabelFor(s.viewport)));
       }
     },
   };
