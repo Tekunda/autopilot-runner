@@ -2042,6 +2042,15 @@ export interface TicketState {
   // a whole fresh architect run on a ticket that already closed, so it is additionally confirmed
   // against the page's own status property before it fires (see handleReadySighting).
   satisfiedReadyTicks?: number;
+  // Consecutive ticks the tracker has reported a SHIPPED, normally-completed ticket (everShipped,
+  // NOT satisfiedWithoutBuild) back at the ready status -- the "re-open this finished work" signal
+  // that the universal ready-column trigger reads as a redrive. Deliberately SEPARATE from
+  // satisfiedReadyTicks / blockedReadyTicks / readyDriftTicks for the reason all four are separate:
+  // a count accrued in one state must never let another state's branch act on its first own
+  // sighting. Like satisfiedReadyTicks, two consecutive sightings are necessary but NOT sufficient
+  // -- a redrive rebuilds delivered work, so it is additionally confirmed against the page's own
+  // status property before it fires (see handleReadySighting).
+  shippedReadyTicks?: number;
   // The OPEN human-status-edit episode: a person moved this ticket on the tracker board to a
   // status the store disagrees with, and the reconciler's mirror has decided not to silently
   // overwrite them (see human-status-edit.ts and the mirror sweep in reconciler.ts).
@@ -2111,6 +2120,13 @@ export interface TicketState {
   // spending a paid architect run every couple of ticks forever. The human still has "redrive",
   // which is not automatic and therefore cannot cycle.
   satisfiedReopens?: number;
+  // How many times this SHIPPED ticket has been automatically re-driven by a ready-column move --
+  // the mirror of satisfiedReopens for the more destructive redrive gesture, and the same kind of
+  // loop guard. Incremented by a board-move redrive (recoverDoneOnRedrive with `move`) and
+  // preserved across that redrive's own reset, so MAX_SHIPPED_REOPENS is a real bound; RESET only
+  // by an explicit "redrive" reply (the unbounded, deliberate escape the cap points a human at), so
+  // a typed gesture is never permanently locked out. Not reset by any other resume.
+  shippedReopens?: number;
   // Whether this ticket has EVER merged work. Durable, and deliberately never cleared: it is a fact
   // about the repository, not about the current plan.
   //
