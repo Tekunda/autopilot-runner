@@ -386,6 +386,26 @@ export interface CheckResult {
   baseId?: string;
 }
 
+// The visual-fix sub-stage's signed payload: the tenant's resolved snapshot-regen settings, plus
+// the diff base the runner scopes the regen against. Resolved server-side from PackConfig at
+// dispatch (never from tenant-editable target config) and signed like every other grant field, so
+// the shell `command` it carries cannot be tampered with in transit -- the same discipline as
+// ServeConfig.startCommand. Read ONLY by the visual-fix runner (src/runner/visual-fix.ts).
+export interface SnapshotRegenGrant {
+  // The tenant's own snapshot-update command, run on the Linux runner (spec paths appended when
+  // the diff scopes to specific specs). PLAYWRIGHT_BASE_URL is injected from the served instance.
+  command: string;
+  // Repo-relative globs whose presence in the diff marks it visual-affecting (changed-paths subset).
+  visualGlobs: string[];
+  // Broad-churn guardrail: max distinct spec directories that may churn for an unscoped (global)
+  // change before the result is treated as font/env drift and surfaced instead of committed.
+  churnCap: number;
+  // The ref the runner three-dot-diffs HEAD against to learn what this subtask changed (its
+  // integration/ticket base -- NOT the promotion base, so sibling-subtask work is excluded).
+  // Absent -> the runner falls back to the repo default branch.
+  baseRef?: string;
+}
+
 // Exactly one of stepPrompt (an inline instruction) or ref (a pointer to a
 // stored prompt/spec) is present per grant, matching the `stepPrompt|ref`
 // shape in AGENTS.md.
@@ -519,6 +539,15 @@ export type ExecutionGrant = {
   // `<gate> (<name>)`. Absent -> the single-`serve` path runs unchanged. Takes precedence over
   // `serve` when both are set.
   sites?: SiteConfig[];
+  // Marks a coding (`fix`) grant as the visual-fix sub-stage: instead of running a vendor agent,
+  // the runner regenerates stale Playwright pixel baselines for the visual source this PR touched
+  // and commits them. Signed like every other field; the runner's action.yml selects the visual
+  // path off the dispatch's `fix-mode` input (set by ci-runner from this marker), and the branch
+  // under work cannot set it. Absent -> an ordinary coding stage, unchanged.
+  fixMode?: 'visual';
+  // The visual-fix sub-stage's settings + diff base (see SnapshotRegenGrant). Present only on a
+  // `fixMode: 'visual'` grant, resolved server-side from PackConfig.gateConfig['snapshot-regen'].
+  snapshotRegen?: SnapshotRegenGrant;
   // Server-side resolved from the tenant's debug.showFullOutput config (never from ticket/
   // tracker input, like every other field here): tells the runner to pass claude-code-action's
   // own `show_full_output` input, revealing the raw SDK output instead of the minimal result

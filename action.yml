@@ -26,6 +26,10 @@ inputs:
     description: 'For a `gate` stage: `fast` (default, deterministic gates against the PR checkout) or `heavy` (the dedicated stage that builds+serves the site and runs the SEO crawl / Visual-QA gates against it -- provisions a browser). Set by the control plane per the gates the grant carries.'
     required: false
     default: 'fast'
+  fix-mode:
+    description: 'For a `fix` stage: `code` (default, an ordinary coding round -- a vendor agent edits and commits) or `visual` (the visual-fix sub-stage -- no agent; the runner regenerates stale Playwright pixel baselines for the PR''s visual edits and commits them). Set by the control plane only when the grant carries `fixMode: visual`; the full config rides the signed grant (src/runner/visual-fix.ts).'
+    required: false
+    default: 'code'
   salesforce-auth-url:
     description: >-
       The tenant's Salesforce sfdx auth URL, for the one gate that must execute IN an org:
@@ -530,7 +534,8 @@ runs:
     # control stays in the deterministic step below, shared by both vendors (issue #113).
     - name: Run with claude-code-action
       id: claude
-      if: steps.prepare.outputs.resolved == 'false' && fromJSON(inputs.coding-executor-config).provider == 'claude-code'
+      # A visual-fix `fix` grant runs NO vendor agent -- the runner regenerates baselines instead.
+      if: steps.prepare.outputs.resolved == 'false' && inputs.fix-mode != 'visual' && fromJSON(inputs.coding-executor-config).provider == 'claude-code'
       uses: anthropics/claude-code-action@fa2b2666b747000bf42767d1f332065b375e3c8f # v1.0.214
       with:
         claude_code_oauth_token: ${{ fromJSON(inputs.coding-executor-config).oauthToken || '' }}
@@ -604,7 +609,8 @@ runs:
 
     - name: Run with codex-action
       id: codex
-      if: steps.prepare.outputs.resolved == 'false' && fromJSON(inputs.coding-executor-config).provider == 'codex'
+      # A visual-fix `fix` grant runs NO vendor agent -- the runner regenerates baselines instead.
+      if: steps.prepare.outputs.resolved == 'false' && inputs.fix-mode != 'visual' && fromJSON(inputs.coding-executor-config).provider == 'codex'
       uses: openai/codex-action@86365089eb2b84e0a8fb0717b304f8bdcb13b20e # v1.12
       with:
         openai-api-key: ${{ fromJSON(inputs.coding-executor-config).apiKey }}
@@ -617,6 +623,28 @@ runs:
         effort: ${{ fromJSON(inputs.coding-executor-config).effort || steps.prepare.outputs.effort || '' }}
         permission-profile: ${{ (steps.prepare.outputs.stage-kind == 'coding' || steps.prepare.outputs.stage-kind == 'architect') && ':workspace' || ':read-only' }}
         allow-bots: true
+
+    # The visual-fix sub-stage: a `fix` grant marked `fix-mode: visual` runs NO vendor agent (the
+    # claude/codex steps above are gated off). On this dedicated ubuntu-latest job the runner
+    # regenerates the Playwright pixel baselines this PR's visual edits made stale -- Linux, so they
+    # carry the correct `-chromium-linux` suffix -- and commits ONLY those `*-snapshots/**` PNGs
+    # onto the PR branch (grant.baseBranch), reusing the customer PAT the coding checkout persisted.
+    # Detection, the heavy-gate serve reuse, the broad-churn guardrail and the commit all live in
+    # src/runner/visual-fix.ts. The signed grant carries the tenant's update command, visual globs,
+    # churn cap, diff base and serve recipe. Report-only during burn-in: the script exits 0 whatever
+    # the outcome and the control plane dispatches it best-effort, so it never blocks the merge.
+    - name: Regenerate visual snapshot baselines
+      # resolved == 'false' means the Prepare step verified the grant and resolved this stage --
+      # the same explicit guard the claude/codex coding steps carry. Belt: the runner re-verifies
+      # the signature itself (visual-fix.ts main()), because this step shells out and pushes.
+      if: steps.prepare.outputs.resolved == 'false' && steps.parse-grant.outputs.stage == 'fix' && inputs.fix-mode == 'visual'
+      shell: bash
+      env:
+        AUTOPILOT_GRANT: ${{ inputs.grant }}
+        AUTOPILOT_VERIFY_KEY: ${{ inputs.verify-key }}
+        AUTOPILOT_COMMITTER_NAME: ${{ steps.prepare.outputs.committer-name || 'github-actions[bot]' }}
+        AUTOPILOT_COMMITTER_EMAIL: ${{ steps.prepare.outputs.committer-email || '41898282+github-actions[bot]@users.noreply.github.com' }}
+      run: node "${{ github.action_path }}/src/runner/visual-fix.ts"
 
     # The architect stage writes its file-disjoint subtask plan to plan.json in the
     # checked-out tree (never committed -- architect is not a coding stage). Upload it as a
@@ -707,8 +735,10 @@ runs:
       # vendor Action step above failed outright rather than resolving to conclusion:
       # failure. Gated on resolved == 'false' (not just != 'true') so a prepare step that
       # crashed before writing any output (e.g. a malformed grant) doesn't retry finalize
-      # with the same bad input.
-      if: always() && steps.prepare.outputs.resolved == 'false'
+      # with the same bad input. The visual-fix sub-stage is exempt: it ran no vendor agent
+      # and its own step already committed+pushed, so there is no fix round for finalize to
+      # judge (a PNG-only diff would misread as a dispute/evasion) and no PR to open.
+      if: always() && steps.prepare.outputs.resolved == 'false' && inputs.fix-mode != 'visual'
       shell: bash
       working-directory: ${{ github.action_path }}
       env:
@@ -738,7 +768,8 @@ runs:
     # a fix that FAILED its own verdict is precisely the one whose reason must reach the
     # control plane.
     - name: Upload fix report
-      if: always() && steps.parse-grant.outputs.stage == 'fix'
+      # Not the visual-fix sub-stage: it produces no fix verdict (see Finalize stage above).
+      if: always() && steps.parse-grant.outputs.stage == 'fix' && inputs.fix-mode != 'visual'
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
       with:
         name: fix-report
