@@ -1417,6 +1417,14 @@ export interface TicketState {
   // or a re-poll tick never re-renders the same commit, and it is written BEFORE the loop returns so
   // a crash-replay does not re-dispatch a 13-16 min render. Undefined until the loop renders a head.
   renderJudgedSha?: string;
+  // The OUTCOME of the review-loop render for renderJudgedSha's head, for the fail-CLOSED
+  // reviewRenderBlocking decision. `pass` when a render gate actually rendered this head and passed;
+  // `fail` when a render gate failed; `no-verdict` when the render produced NO decisive gate check
+  // (cancelled / errored / a dispatch that degraded to an uncorrelated handle). reviewRenderVerdicts
+  // alone cannot express this -- it keeps only FAILs, so an empty list is ambiguous between a clean
+  // pass and nothing-rendered. This field is what lets the gate BLOCK a "no-verdict" render instead
+  // of promoting a change no eye ever saw. Undefined until the loop renders a head.
+  reviewRenderState?: 'pass' | 'fail' | 'no-verdict';
   // The rendering surfaces the architect plan deletes/hides (plan.json `removals`), in user
   // terms. Persisted alongside planClaims for the record; each removal must carry a paired
   // preservation claim (the deterministic preservation gate) and, under
