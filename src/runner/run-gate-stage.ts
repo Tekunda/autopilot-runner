@@ -686,6 +686,26 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
   const nonBlockingIds = new Set(
     specs.filter((spec) => spec.kind !== 'prompt' && spec.blocking === false).map((spec) => spec.id),
   );
+  // Promote a BLOCKING gate's infra-skip to a blocking `unjudged`/`infra` before any verdict is
+  // read off it. A vision gate (visual-qa, design-review) that a 429'd judge left as
+  // `skip`/`skipReason:'infra'` is honestly reporting "the provider was unavailable, I judged
+  // nothing" -- correct at the gate level, where fail-open is the right default (an outage must
+  // not permanently block merges). But when a TENANT has chosen `blocking:true` for that gate,
+  // fail-open silently green-lights a diff no vision gate ever looked at, which defeats the point
+  // of making it blocking. So the demotion-to-skip stays the gate's truth, and the stage decides
+  // what it costs: a blocking gate's infra-skip becomes `unjudged`/`infra`, which blocks and flows
+  // the bounded infra retry lane (one gate-only retry, then human escalation -- see fix-loop.ts's
+  // non-revertable infra classification), exactly like any other blocking gate that could not run.
+  // Keyed on `skipReason==='infra'`, NOT on status alone: a benign diff-scoped skip
+  // (`no-matching-route`, `no-config`) stays a skip and never blocks. Report-only gates
+  // (`nonBlockingIds`) keep the fail-open skip untouched -- there is nothing to block, so an
+  // outage costs nothing. vision-gate.ts's aggregation comment documents this seam from the gate
+  // side.
+  const adjudicated: GateResult[] = results.map((result) =>
+    result.status === 'skip' && result.skipReason === 'infra' && !nonBlockingIds.has(result.id)
+      ? { id: result.id, status: 'unjudged', unjudgedReason: 'infra', findings: result.findings }
+      : result,
+  );
   // An `unjudged` gate ALWAYS blocks -- report-only (`blocking:false`) can excuse a *finding*
   // fail (the gate judged and reported a defect it's non-blocking about), but NEVER a gate that
   // reached no verdict at all. A green stage on a gate that never ran is worse than no gate
@@ -708,7 +728,7 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
   }
   const ok =
     missing.length === 0 &&
-    results.every((result) =>
+    adjudicated.every((result) =>
       result.status === 'unjudged' ? false : result.status !== 'fail' || nonBlockingIds.has(result.id),
     );
 
@@ -722,7 +742,7 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
   for (const line of stack) {
     process.stdout.write(`[stack] ${line}\n`);
   }
-  for (const result of results) {
+  for (const result of adjudicated) {
     process.stdout.write(`[gate] ${result.id}: ${result.status}\n`);
     for (const finding of result.findings ?? []) {
       process.stdout.write(`  ${finding}\n`);
@@ -732,7 +752,7 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
   return {
     grantId: grantId(grant),
     result: ok ? 'pass' : 'fail',
-    checks: toChecks(results, deps.checkNameSuffix, nonBlockingIds),
+    checks: toChecks(adjudicated, deps.checkNameSuffix, nonBlockingIds),
     // Rendered lines, not the raw profiles: the gate report is read by people (and pasted into
     // tickets), and "node: yarn-classic (pinned yarn@1.22.22) — detected from package.json,
     // yarn.lock" is legible where a nested JSON blob is not. Carries no verdict -- it is the

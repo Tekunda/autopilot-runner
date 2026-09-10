@@ -381,9 +381,12 @@ export function createVisionGate(opts: { id: string; profile: VisionRubricProfil
       // Aggregation:
       // - Any real defect (or non-transient error) -> `fail` (blocks the merge). Its findings carry
       //   the inconclusive ones too, so nothing is hidden when the run also hit rate limits.
-      // - No real defect but some page was rate-limited into inconclusive -> fail-open `skip`
+      // - No real defect but some page was rate-limited into inconclusive -> `skip`
       //   (skipReason 'infra'): the judge could not be reached, so the gate evaluated nothing.
       //   NOT a pass and NOT a fail -- "could not verify" is neither "verified fine" nor "broken".
+      //   Whether that skip blocks is NOT decided here: run-gate-stage promotes it to a blocking
+      //   `unjudged`/`infra` when THIS gate is blocking (`blocking:true`), and leaves it a
+      //   fail-open skip when the gate is report-only. See the inconclusive branch below.
       // - Everything scored and passed -> `pass`.
       if (failures.length > 0) {
         return { id, status: 'fail', findings: [...failures, ...inconclusive] };
@@ -397,12 +400,18 @@ export function createVisionGate(opts: { id: string; profile: VisionRubricProfil
         // about the diff.
         //
         // It is reported the way this codebase already reports a gate that did not run: `skip` with
-        // `skipReason:'infra'`, which run-gate-stage's toChecks publishes as `pending` +
-        // `skipped:true` + `skipReason`, carrying the per-page "could not verify" findings. That is
-        // the same shape as layout-gate.ts's own browser-infra arm and serve-and-gate.ts's per-site
-        // skips, and it is loudly not-a-pass: gate-coverage banks nothing for a skipped check, and
+        // `skipReason:'infra'`. This is the HONEST GATE-LEVEL TRUTH -- the gate judged nothing --
+        // and it deliberately does NOT decide the merge outcome by itself, because that depends on
+        // whether the TENANT made this gate blocking, a fact the gate does not see. run-gate-stage
+        // owns that decision at its `adjudicated` seam: for a REPORT-ONLY gate the skip stays as
+        // published here (toChecks -> `pending` + `skipped:true` + `skipReason`, carrying the
+        // per-page "could not verify" findings), fail-open exactly as before; for a BLOCKING gate
+        // the same infra-skip is promoted to `unjudged`/`infra`, which blocks the stage and flows
+        // the bounded infra retry lane rather than green-lighting a diff no vision gate examined.
+        // Either way it is loudly not-a-pass: gate-coverage banks nothing for a skipped check, and
         // gate-verdict-ledger classes an `infra` skip SUSPICIOUS, so a judge that is down on every
-        // promotion still raises `gate_never_fired` instead of going quiet.
+        // promotion still raises `gate_never_fired` instead of going quiet. This is the same skip
+        // shape as layout-gate.ts's own browser-infra arm and serve-and-gate.ts's per-site skips.
         //
         // THE DEMOTION KEYS ON A TYPED, POSITIVE SIGNAL, never on a catch-all `else` or a bare
         // exception handler -- so a coding error cannot launder itself into "unjudged" and sail
