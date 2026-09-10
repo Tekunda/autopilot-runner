@@ -140,6 +140,10 @@ export interface AnthropicVisionJudgeOptions {
   // Production OMITS this so every judge shares `defaultVisionLimiter` (the whole point -- one
   // process-wide gate across both gates); it exists only as a test-injection seam.
   limiter?: VisionLimiter;
+  // Minimum ms between successive vision-model call STARTS on the shared limiter. OFF by default (0);
+  // opt-in per tenant to space heavy calls under the account's input-tokens-per-minute limit, which
+  // concurrency alone does not bound (successive serial calls can still burst past ITPM).
+  minIntervalMs?: number;
 }
 
 // Resolve the credential to use: an explicitly-threaded executor credential wins; otherwise fall
@@ -317,6 +321,7 @@ export function createAnthropicVisionJudge(opts: AnthropicVisionJudgeOptions = {
   const maxRetries = opts.maxRetries ?? DEFAULT_MAX_RETRIES;
   const sleep = opts.sleepImpl ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const limiter = opts.limiter ?? defaultVisionLimiter;
+  const minIntervalMs = opts.minIntervalMs ?? 0;
 
   return {
     async judge(input: JudgeInput): Promise<VisionVerdict[]> {
@@ -395,7 +400,7 @@ export function createAnthropicVisionJudge(opts: AnthropicVisionJudgeOptions = {
           if (!text) throw new Error('vision judge: model returned no text content');
           return parseVerdict(text, input.shots.map((s) => viewportLabelFor(s.viewport)));
         }
-      });
+      }, { minIntervalMs });
     },
   };
 }

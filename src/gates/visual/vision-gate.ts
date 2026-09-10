@@ -57,6 +57,7 @@ import {
   createAnthropicVisionJudge,
   VisionRateLimitError,
   viewportLabelFor,
+  type AnthropicVisionJudgeOptions,
   type ExecutorCredential,
   type JudgeShot,
   type VisionJudge,
@@ -127,6 +128,12 @@ export interface VisionGateConfig {
   // Vision model id override (defaults to judge.ts DEFAULT_VISION_MODEL).
   model?: string;
   maxTokens?: number;
+  // How many times a 429/529 is retried before the judge surfaces an infra-skip. Default is the
+  // judge's DEFAULT_MAX_RETRIES (4); tenant-tunable so a throttled account can widen the retry budget.
+  maxRetries?: number;
+  // Minimum ms between successive vision-model call STARTS across BOTH vision gates (the limiter is
+  // process-wide). Default 0 (off); opt-in per tenant to pace heavy calls under the account's ITPM.
+  minIntervalMs?: number;
 }
 
 export interface VisionGateDeps {
@@ -138,6 +145,10 @@ export interface VisionGateDeps {
   // Overridable factory for the default browser (tests assert the default path without launching
   // Chromium). Only used when `browser` is not injected.
   createBrowser?: () => Promise<ScreenshotBrowser>;
+  // Overridable factory for the default vision judge, mirroring createBrowser: tests assert the
+  // config->judge passthrough (model/maxTokens/credential/maxRetries/minIntervalMs) without a real
+  // API call. Only used when `judge` is not injected.
+  createJudge?: (opts: AnthropicVisionJudgeOptions) => VisionJudge;
 }
 
 // The responsive default sweep, used when a tenant sets no `viewports`. Covers both phone
@@ -304,10 +315,12 @@ export function createVisionGate(opts: { id: string; profile: VisionRubricProfil
         injectedBrowser ?? (await (deps.createBrowser ?? createPlaywrightBrowser)());
       const judge =
         deps.judge ??
-        createAnthropicVisionJudge({
+        (deps.createJudge ?? createAnthropicVisionJudge)({
           ...(config.model ? { model: config.model } : {}),
           ...(config.maxTokens ? { maxTokens: config.maxTokens } : {}),
           ...(config.executorCredential ? { credential: config.executorCredential } : {}),
+          ...(config.maxRetries != null ? { maxRetries: config.maxRetries } : {}),
+          ...(config.minIntervalMs != null ? { minIntervalMs: config.minIntervalMs } : {}),
         });
 
       // Real visual defects (or non-transient errors): these BLOCK the merge.
