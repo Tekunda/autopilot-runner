@@ -16,6 +16,7 @@
 // are also PARAMETERIZED via config -- a tenant can override `model` per gate.
 
 import type { Screenshot, Viewport } from './browser.ts';
+import { defaultVisionLimiter, type VisionLimiter } from './vision-concurrency.ts';
 
 // One viewport's verdict. `viewport` is the exact label (viewportLabelFor) the judge was asked to
 // score, so the gate can map each verdict back to the shot it belongs to; `pass`/`reason` are the
@@ -135,6 +136,10 @@ export interface AnthropicVisionJudgeOptions {
   // Injectable sleeper so tests exercise the backoff path without actually waiting. Defaults to
   // a real setTimeout-based delay.
   sleepImpl?: (ms: number) => Promise<void>;
+  // Serializes concurrent vision-model calls so the two vision gates don't self-inflict a 429.
+  // Production OMITS this so every judge shares `defaultVisionLimiter` (the whole point -- one
+  // process-wide gate across both gates); it exists only as a test-injection seam.
+  limiter?: VisionLimiter;
 }
 
 // Resolve the credential to use: an explicitly-threaded executor credential wins; otherwise fall
@@ -311,81 +316,86 @@ export function createAnthropicVisionJudge(opts: AnthropicVisionJudgeOptions = {
   const anthropicVersion = opts.anthropicVersion ?? ANTHROPIC_VERSION;
   const maxRetries = opts.maxRetries ?? DEFAULT_MAX_RETRIES;
   const sleep = opts.sleepImpl ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const limiter = opts.limiter ?? defaultVisionLimiter;
 
   return {
     async judge(input: JudgeInput): Promise<VisionVerdict[]> {
-      const credential = resolveCredential(opts);
-      if (!credential) {
-        throw new Error(
-          'vision judge: no executor credential (expected an apiKey or OAuth executor credential, or ANTHROPIC_API_KEY)',
-        );
-      }
-
-      // One image block per shot, each IMMEDIATELY preceded by a text block naming its viewport,
-      // in the same order the prompt lists them; the rubric prompt goes last.
-      const content: Array<Record<string, unknown>> = [];
-      for (const shot of input.shots) {
-        content.push({ type: 'text', text: `Viewport: ${viewportLabelFor(shot.viewport)}` });
-        content.push({
-          type: 'image',
-          source: { type: 'base64', media_type: shot.screenshot.mediaType, data: shot.screenshot.base64 },
-        });
-      }
-      content.push({ type: 'text', text: buildJudgePrompt(input) });
-
-      const body = {
-        model,
-        max_tokens: maxTokens,
-        messages: [{ role: 'user', content }],
-      };
-
-      // Retry loop: a 429/529 is transient throttling, not a defect. Back off (honoring
-      // Retry-After) and retry a bounded number of times; only an EXHAUSTED rate-limit surfaces,
-      // and as a VisionRateLimitError the gate treats as inconclusive rather than a visual defect.
-      for (let attempt = 0; ; attempt++) {
-        const res = await fetchImpl(apiUrl, {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            ...authHeaders(credential),
-            'anthropic-version': anthropicVersion,
-          },
-          body: JSON.stringify(body),
-        });
-
-        if (RETRYABLE_STATUSES.has(res.status) && attempt < maxRetries) {
-          // Drain/cancel the unconsumed body so undici releases the socket before the backoff.
-          await res.body?.cancel().catch(() => {});
-          await sleep(retryBackoffMs(attempt, res.headers.get('retry-after')));
-          continue;
+      return limiter.run(async () => {
+        const credential = resolveCredential(opts);
+        if (!credential) {
+          throw new Error(
+            'vision judge: no executor credential (expected an apiKey or OAuth executor credential, or ANTHROPIC_API_KEY)',
+          );
         }
 
-        if (!res.ok) {
-          // Best-effort detail: the status failure is always thrown below; a body that cannot be
-          // read only means the error names the status without the response text.
-          const detail = await res.text().catch((err: unknown) => {
-            console.warn(
-              `vision judge: could not read the error body for status ${res.status}: ` +
-                `${err instanceof Error ? err.message : String(err)} -- the thrown error names the status without the body text`,
-            );
-            return '';
+        // One image block per shot, each IMMEDIATELY preceded by a text block naming its viewport,
+        // in the same order the prompt lists them; the rubric prompt goes last.
+        const content: Array<Record<string, unknown>> = [];
+        for (const shot of input.shots) {
+          content.push({ type: 'text', text: `Viewport: ${viewportLabelFor(shot.viewport)}` });
+          content.push({
+            type: 'image',
+            source: { type: 'base64', media_type: shot.screenshot.mediaType, data: shot.screenshot.base64 },
           });
-          if (RETRYABLE_STATUSES.has(res.status)) {
-            // Retries exhausted on a rate-limit/overload -- an infra failure, distinctly typed.
-            throw new VisionRateLimitError(res.status, detail.slice(0, 200));
-          }
-          throw new Error(`vision judge: model API returned ${res.status} ${detail.slice(0, 200)}`);
         }
+        content.push({ type: 'text', text: buildJudgePrompt(input) });
 
-        const json = (await res.json()) as AnthropicMessagesResponse;
-        const text = (json.content ?? [])
-          .filter((block) => block.type === 'text')
-          .map((block) => block.text ?? '')
-          .join('\n')
-          .trim();
-        if (!text) throw new Error('vision judge: model returned no text content');
-        return parseVerdict(text, input.shots.map((s) => viewportLabelFor(s.viewport)));
-      }
+        const body = {
+          model,
+          max_tokens: maxTokens,
+          messages: [{ role: 'user', content }],
+        };
+
+        // Retry loop: a 429/529 is transient throttling, not a defect. Back off (honoring
+        // Retry-After) and retry a bounded number of times; only an EXHAUSTED rate-limit surfaces,
+        // and as a VisionRateLimitError the gate treats as inconclusive rather than a visual defect.
+        // The limiter permit is held ACROSS the backoff wait on purpose, so the other vision gate
+        // cannot burst a call in during a Retry-After and re-trip the same 429.
+        for (let attempt = 0; ; attempt++) {
+          const res = await fetchImpl(apiUrl, {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              ...authHeaders(credential),
+              'anthropic-version': anthropicVersion,
+            },
+            body: JSON.stringify(body),
+          });
+
+          if (RETRYABLE_STATUSES.has(res.status) && attempt < maxRetries) {
+            // Drain/cancel the unconsumed body so undici releases the socket before the backoff.
+            await res.body?.cancel().catch(() => {});
+            await sleep(retryBackoffMs(attempt, res.headers.get('retry-after')));
+            continue;
+          }
+
+          if (!res.ok) {
+            // Best-effort detail: the status failure is always thrown below; a body that cannot be
+            // read only means the error names the status without the response text.
+            const detail = await res.text().catch((err: unknown) => {
+              console.warn(
+                `vision judge: could not read the error body for status ${res.status}: ` +
+                  `${err instanceof Error ? err.message : String(err)} -- the thrown error names the status without the body text`,
+              );
+              return '';
+            });
+            if (RETRYABLE_STATUSES.has(res.status)) {
+              // Retries exhausted on a rate-limit/overload -- an infra failure, distinctly typed.
+              throw new VisionRateLimitError(res.status, detail.slice(0, 200));
+            }
+            throw new Error(`vision judge: model API returned ${res.status} ${detail.slice(0, 200)}`);
+          }
+
+          const json = (await res.json()) as AnthropicMessagesResponse;
+          const text = (json.content ?? [])
+            .filter((block) => block.type === 'text')
+            .map((block) => block.text ?? '')
+            .join('\n')
+            .trim();
+          if (!text) throw new Error('vision judge: model returned no text content');
+          return parseVerdict(text, input.shots.map((s) => viewportLabelFor(s.viewport)));
+        }
+      });
     },
   };
 }
