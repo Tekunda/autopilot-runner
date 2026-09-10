@@ -167,11 +167,18 @@ runs:
       shell: bash
       run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-    # HEAVY gate stage only (docs/ci-gate-refit-plan.md §5): provision the browser the fast gate
-    # path never needs. Playwright is installed into the runner's own action dir so the gate's
-    # dynamic `import('playwright')` resolves here; the customer's site build/serve (yarn
-    # install/build/start) runs in the checkout via the gate's own serve orchestration. The fast
-    # gate path skips this step entirely, keeping heavy tooling off it.
+    # HEAVY gate stage and the visual-fix stage (docs/ci-gate-refit-plan.md §5): provision the
+    # browser the fast gate path never needs. Playwright is installed into the runner's own action
+    # dir so the gate's dynamic `import('playwright')` resolves here; the customer's site build/serve
+    # (yarn install/build/start) runs in the checkout via the gate's own serve orchestration. The
+    # fast gate path skips this step entirely, keeping heavy tooling off it.
+    #
+    # The visual-fix stage needs it for the SAME reason the e2e gate does: `--with-deps` here is the
+    # ONLY thing that installs the OS shared libraries, so it must run at action/setup level (where
+    # sudo works). visual-fix.ts then drives the TENANT's own Playwright with the no-`--with-deps`
+    # `--no-install` command it shares with the e2e gate (E2E_BROWSER_PROVISION_COMMAND) -- if it
+    # tried `--with-deps` itself it would need sudo it does not have and fail, leaving baselines
+    # stale. See src/runner/visual-fix.ts and src/gates/e2e/e2e-gate.ts.
     #
     # RUNNER-INFRA NOTE (see PR): the customer toolchain itself (yarn/pnpm and its own devDeps)
     # is assumed present after corepack; a repo whose start command needs a global CLI beyond
@@ -183,8 +190,8 @@ runs:
     # own browsers, with the checkout's Playwright, after the heavy stage's install step has
     # populated node_modules -- which is after every step in this file. Bumping the pin below does
     # NOT change what a tenant's e2e suite launches. See src/gates/e2e/e2e-gate.ts.
-    - name: Provision heavy gate stage
-      if: steps.parse-grant.outputs.stage == 'gate' && inputs.gate-mode == 'heavy'
+    - name: Provision browser (heavy gate + visual-fix stages)
+      if: (steps.parse-grant.outputs.stage == 'gate' && inputs.gate-mode == 'heavy') || (steps.parse-grant.outputs.stage == 'fix' && inputs.fix-mode == 'visual')
       shell: bash
       working-directory: ${{ github.action_path }}
       run: |

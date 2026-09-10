@@ -25,6 +25,7 @@ import {
 import { computeChangedFiles, DEFAULT_BASE_REF } from './prepare-stage.ts';
 import { serveSite, type ServedSite } from './serve-and-gate.ts';
 import { isDirectlyExecuted } from './entrypoint.ts';
+import { E2E_BROWSER_PROVISION_COMMAND } from '../gates/e2e/e2e-gate.ts';
 // The sanctioned runner->control-plane grant-verification seam (see PUBLISHABLE_CONTROL_PLANE_FILES
 // in build-runner-dist.test.ts): every runner stage that acts on a grant verifies its signature
 // first, and this stage shells out + pushes with the customer PAT, so it must too.
@@ -84,6 +85,14 @@ export function parseChangedSnapshotFiles(porcelain: string): string[] {
 }
 
 const COMMIT_MESSAGE = 'Delivery Autopilot: visual-fix (regenerate snapshot baselines)';
+
+// The browser-provisioning command, defined ONCE as the e2e gate's so the two provisioning paths
+// can never diverge again. `--no-install` runs the CHECKOUT's own Playwright CLI (never a registry
+// fetch, so no version skew), and `--with-deps` is deliberately absent: the OS shared libraries are
+// installed by the action's own `--with-deps` run for this stage (action.yml), and re-installing
+// them needs sudo the runner does not have -- with `--with-deps`, this command fails and baselines
+// are left stale, which is exactly the bug this reuse removes. See src/gates/e2e/e2e-gate.ts.
+export const VISUAL_FIX_BROWSER_PROVISION_COMMAND = E2E_BROWSER_PROVISION_COMMAND;
 
 /**
  * Provision the browser, bring the site up (if a serve recipe is present), run the scoped update
@@ -198,8 +207,9 @@ export function makeVisualFixIO(opts: {
         .filter((p) => p.length > 0 && isSnapshotPath(p)),
     provisionBrowsers: async () => {
       // Provision the browser for the TENANT's own Playwright (already in their node_modules after
-      // serve's install step), mirroring the e2e gate's `--no-install` provisioning.
-      sh('npx --no-install playwright install --with-deps chromium', cwd, process.env);
+      // serve's install step), mirroring the e2e gate's `--no-install` provisioning. OS deps come
+      // from the action's `--with-deps` run for this stage (action.yml), never from here.
+      sh(VISUAL_FIX_BROWSER_PROVISION_COMMAND, cwd, process.env);
     },
     serve: (config) => serveSite(config, { cwd }),
     runUpdate: async (command, baseUrl) => {
