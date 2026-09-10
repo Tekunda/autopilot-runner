@@ -1041,6 +1041,12 @@ export interface InFlightStage {
   // (the create-only publishCheck bug -- see subtask-pipeline.ts's publishStageProgress).
   // Absent when the pending publish failed, wasn't attempted, or predates this field.
   checkRunId?: number;
+  // Set on the `fix`-stage marker of the opt-in visual-fix sub-stage (a `fixMode: 'visual'` run
+  // that regenerates stale Playwright pixel baselines and commits them snapshot-only). It rides on
+  // a `stage: 'fix'` marker because that IS the grant's stage, but its reconcile is distinct: no
+  // vendor agent ran, so there is no fix verdict to judge -- on completion it simply re-gates the
+  // (now-regenerated) head. Absent on every ordinary fix marker.
+  visualFix?: true;
 }
 
 // The WRITE-AHEAD record of a stage dispatch: persisted BEFORE the paid `workflow_dispatch`
@@ -1231,6 +1237,13 @@ export interface SubtaskState {
   // evidence the code-only reviewer cannot. Rolled up into TicketState.renderVerdicts. Absent when
   // this subtask's gate report named no render gate.
   renderVerdicts?: RenderVerdict[];
+  // Set once the opt-in visual-fix sub-stage has been dispatched for this subtask (a gate failed
+  // on a stale Playwright pixel baseline, so the baselines were regenerated). It fires at MOST once
+  // per subtask: after regeneration the fresh baselines are re-gated, and if that re-gate still
+  // fails -- because a real, non-baseline assertion also failed, which a snapshot regen cannot
+  // touch -- this flag stops the lane firing again to launder that failure into a green PR. Absent
+  // until the sub-stage has been dispatched (and on tenants that never opted in).
+  visualFixAttempted?: true;
 }
 
 // WHICH gate implementation produced the findings that blocked a subtask (and, rolled up, its
