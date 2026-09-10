@@ -29,7 +29,10 @@ import { registerGenericGates } from '../gates/generic/index.ts';
 import { layoutRulesGate } from '../gates/layout/layout-gate.ts';
 import { GateRegistry } from '../gates/registry.ts';
 import type { Gate } from '../gates/types.ts';
-import { visualQaGate } from '../gates/visual/visual-qa.ts';
+import { designReviewGate, DESIGN_REVIEW_GATE_ID } from '../gates/visual/design-review.ts';
+import { AGGRESSIVE_DESIGN_PROFILE, CONSERVATIVE_PROFILE, type VisionRubricProfile } from '../gates/visual/judge.ts';
+import { createVisionGate, type VisionGateDeps } from '../gates/visual/vision-gate.ts';
+import { visualQaGate, VISUAL_QA_GATE_ID } from '../gates/visual/visual-qa.ts';
 
 export function createRunnerGateRegistry(): GateRegistry {
   const registry = new GateRegistry();
@@ -59,13 +62,33 @@ export function registerGatesForSpecs(registry: GateRegistry, gates: Iterable<Ga
 // registerHeavyGatesForSpecs runs there, never in the fast runGateStage path, so a Visual-QA spec
 // can only ever execute inside the browser/server-capable stage.
 const HEAVY_GATE_CATALOG: ReadonlyMap<string, Gate> = new Map(
-  [visualQaGate, e2eGate, layoutRulesGate].map((gate) => [gate.id, gate] as const),
+  [visualQaGate, designReviewGate, e2eGate, layoutRulesGate].map((gate) => [gate.id, gate] as const),
 );
 
-export function registerHeavyGatesForSpecs(registry: GateRegistry, ids: Iterable<string>): void {
+// The rubric profile each vision-judge heavy gate is built from -- the source of truth
+// registerHeavyGatesForSpecs uses to REBUILD one with injected test deps (browser/judge) while
+// still resolving the id through HEAVY_GATE_CATALOG. Absent here, a gate is registered as-is.
+const VISION_GATE_PROFILES: ReadonlyMap<string, VisionRubricProfile> = new Map([
+  [VISUAL_QA_GATE_ID, CONSERVATIVE_PROFILE],
+  [DESIGN_REVIEW_GATE_ID, AGGRESSIVE_DESIGN_PROFILE],
+]);
+
+// `visionDeps` is a TEST seam: production passes none and the catalog's default gates build a real
+// Playwright browser + Anthropic judge lazily. A test passes a fake browser/judge so it can exercise
+// the REAL registration path (an id must still be in HEAVY_GATE_CATALOG to register at all -- remove
+// it and the signed spec resolves to no gate and the stage fails closed) without a live browser or
+// API key. Only the vision-judge gates (VISION_GATE_PROFILES) are rebuildable this way.
+export function registerHeavyGatesForSpecs(
+  registry: GateRegistry,
+  ids: Iterable<string>,
+  visionDeps?: VisionGateDeps,
+): void {
   for (const id of ids) {
-    const gate = HEAVY_GATE_CATALOG.get(id);
-    if (gate && !registry.get(id)) registry.register(gate);
+    const catalogGate = HEAVY_GATE_CATALOG.get(id);
+    if (!catalogGate || registry.get(id)) continue;
+    const profile = VISION_GATE_PROFILES.get(id);
+    const gate = visionDeps && profile ? createVisionGate({ id, profile, deps: visionDeps }) : catalogGate;
+    registry.register(gate);
   }
 }
 

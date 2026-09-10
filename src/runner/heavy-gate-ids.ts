@@ -8,7 +8,15 @@
 // set from THIS list rather than a hand-maintained parallel one. Kept in a tiny dependency-free
 // module (no gate catalog / control-plane imports) so the adapter can import the ids without
 // pulling in the whole heavy toolchain. The gate-routing-coverage test enforces the invariant.
-export const URL_BOUND_HEAVY_GATE_IDS = ['seo-site-crawl', 'visual-qa', 'e2e', 'layout-rules'] as const;
+export const URL_BOUND_HEAVY_GATE_IDS = ['seo-site-crawl', 'visual-qa', 'e2e', 'layout-rules', 'design-review'] as const;
+
+// The vision-judge heavy gates: URL-bound gates whose default judge authenticates with the tenant's
+// executor credential (judge.ts createAnthropicVisionJudge). The heavy stage threads that credential
+// onto EACH of these gates' runtime config exactly as it threads the served baseUrl -- so a new
+// vision gate needs adding here (not a second hard-coded `if (id === 'visual-qa')`) to be
+// credentialed. A SUBSET of URL_BOUND_HEAVY_GATE_IDS: seo-site-crawl/e2e/layout-rules make no model
+// call and take no credential.
+export const VISION_JUDGE_GATE_IDS: ReadonlySet<string> = new Set(['visual-qa', 'design-review']);
 
 // The SITE-SCOPED deterministic gates -- content/SEO gates that judge the CHECKOUT, not a served
 // site, but whose RULES are per-brand (banned phrases, competitor lists, commercial-link patterns,

@@ -27,7 +27,7 @@ import { verifyGrant } from '../control-plane/grant-verify.ts';
 import { runCommand as defaultRunCommand } from '../gates/exec.ts';
 import { boundedCapture } from '../gates/output-capture.ts';
 import { registerHeavyGatesForSpecs } from './gate-registry.ts';
-import { SITE_SCOPED_GATE_IDS, URL_BOUND_HEAVY_GATE_IDS } from './heavy-gate-ids.ts';
+import { SITE_SCOPED_GATE_IDS, URL_BOUND_HEAVY_GATE_IDS, VISION_JUDGE_GATE_IDS } from './heavy-gate-ids.ts';
 import { digestFor, grantId, rejectedTelemetry } from './prepare-stage.ts';
 import {
   packBundleNoteCheck,
@@ -312,9 +312,12 @@ export async function runHeavyGateStage(grant: ExecutionGrant, deps: RunHeavyGat
       configOverlay = {};
       for (const id of URL_BOUND_HEAVY_GATE_IDS) configOverlay[id] = { baseUrl: served.baseUrl };
       // The vision judge authenticates with the tenant's executor credential -- threaded onto
-      // the visual-qa gate's runtime config the same way its baseUrl is.
+      // EACH vision-judge gate's runtime config the same way its baseUrl is (visual-qa and
+      // design-review, per VISION_JUDGE_GATE_IDS; the non-model URL-bound gates take no credential).
       if (deps.executorCredential) {
-        configOverlay['visual-qa'] = { ...configOverlay['visual-qa'], executorCredential: deps.executorCredential };
+        for (const id of VISION_JUDGE_GATE_IDS) {
+          configOverlay[id] = { ...configOverlay[id], executorCredential: deps.executorCredential };
+        }
       }
     }
 
@@ -802,8 +805,11 @@ async function runPerSiteHeavyGates(
           // nothing to report it.
           configOverlay[id] = { ...(gateConfigFor(id, site.gateConfig) ?? {}), baseUrl: served.baseUrl };
         }
-        if (deps.executorCredential && urlBoundIds.has('visual-qa')) {
-          configOverlay['visual-qa'] = { ...configOverlay['visual-qa'], executorCredential: deps.executorCredential };
+        if (deps.executorCredential) {
+          for (const id of VISION_JUDGE_GATE_IDS) {
+            if (!urlBoundIds.has(id)) continue;
+            configOverlay[id] = { ...configOverlay[id], executorCredential: deps.executorCredential };
+          }
         }
         absorb(
           await runGateStage(grant, {

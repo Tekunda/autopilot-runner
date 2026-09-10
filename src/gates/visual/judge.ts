@@ -39,8 +39,23 @@ export interface JudgeInput {
   // The SAME route rendered at several viewports, in the order the prompt lists them.
   shots: JudgeShot[];
   // The judging rubric for this page -- global gate criteria plus any per-target ones. Optional;
-  // empty/absent falls back to DEFAULT_CRITERIA.
+  // empty/absent falls back to the active profile's `defaultCriteria`.
   criteria?: string[];
+  // Which rubric PROFILE frames the prompt -- the conservative breakage rubric (visual-qa) or the
+  // aggressive aesthetics rubric (design-review). Absent -> CONSERVATIVE_PROFILE, so a caller that
+  // does not set it gets byte-identical behavior to before profiles existed.
+  profile?: VisionRubricProfile;
+}
+
+// A rubric PROFILE: the instruction lines that WRAP the criteria (how strict, what to flag, the
+// output contract) plus the default criteria used when a caller passes none. Two profiles ship --
+// CONSERVATIVE_PROFILE (visual-qa's breakage rubric, unchanged) and AGGRESSIVE_DESIGN_PROFILE
+// (design-review's aesthetics rubric) -- so one judge/prompt/parse pipeline serves both gates and
+// only the framing differs. `framing` may contain the CRITERIA_MARKER sentinel exactly once, which
+// buildJudgePrompt expands into the criteria bullets so a profile controls WHERE its criteria sit.
+export interface VisionRubricProfile {
+  framing: string[];
+  defaultCriteria: string[];
 }
 
 // Scores a route's shots against its criteria in ONE call, returning a per-viewport verdict array
@@ -138,21 +153,49 @@ function authHeaders(credential: ExecutorCredential): Record<string, string> {
     : { 'x-api-key': credential.apiKey };
 }
 
+// A sentinel line in a profile's `framing`: buildJudgePrompt replaces it with the criteria bullets
+// (`- <criterion>`), so each profile decides WHERE its criteria appear among its instruction lines.
+// Matched by WHOLE-LINE equality (`line === CRITERIA_MARKER`), and tenant criteria only ever render
+// as `- <criterion>` bullets, so a tenant string can never occupy a framing-line slot -- the exact
+// sentinel value is irrelevant to safety, so a plain-ASCII token is fine.
+const CRITERIA_MARKER = '__CRITERIA_MARKER__';
+
 // The DIFFERENTIAL rubric prompt: the model is shown the SAME route rendered at several sizes and
 // must answer with a strict per-viewport JSON verdict, so the gate can parse a deterministic
-// pass/fail per size out of a probabilistic model. The criteria are the tenant's, injected.
+// pass/fail per size out of a probabilistic model. The framing comes from the active PROFILE
+// (default CONSERVATIVE_PROFILE) and the criteria are the tenant's, injected where the profile's
+// CRITERIA_MARKER sits.
 export function buildJudgePrompt(input: JudgeInput): string {
-  const criteria = input.criteria && input.criteria.length > 0 ? input.criteria : DEFAULT_CRITERIA;
+  const profile = input.profile ?? CONSERVATIVE_PROFILE;
+  const criteria = input.criteria && input.criteria.length > 0 ? input.criteria : profile.defaultCriteria;
   const labels = input.shots.map((s) => viewportLabelFor(s.viewport));
+  const framing = profile.framing.flatMap((line) =>
+    line === CRITERIA_MARKER ? criteria.map((c) => `- ${c}`) : [line],
+  );
   return [
     `You are a visual QA judge reviewing the SAME page (${input.url}) rendered at ${labels.length} viewport sizes.`,
     'The screenshots are provided in this order, each immediately preceded by its viewport label:',
     ...labels.map((label, i) => `${i + 1}. ${label}`),
     '',
+    ...framing,
+  ].join('\n');
+}
+
+export const DEFAULT_CRITERIA = [
+  'The layout is intact and renders as a coherent page.',
+  'No broken, overlapping, or overflowing elements.',
+  'No obviously missing images, icons, or CSS (no unstyled/raw HTML, no broken-image placeholders).',
+];
+
+// The CONSERVATIVE (breakage) rubric visual-qa ships with: fail only on a CLEAR divergence, never a
+// subjective nitpick. Its framing is byte-for-byte the lines the prompt hard-coded before profiles
+// existed, so a JudgeInput without a profile builds an identical prompt (guarded in judge.test.ts).
+export const CONSERVATIVE_PROFILE: VisionRubricProfile = {
+  framing: [
     'Judge EACH viewport on TWO independent tests, and mark the size a FAIL if EITHER applies:',
     'TEST 1 (absolute) -- the layout at this size violates any of these criteria, regardless of how',
     'the other sizes look (so a defect present at EVERY size is still a fail at every size):',
-    ...criteria.map((c) => `- ${c}`),
+    CRITERIA_MARKER,
     'TEST 2 (differential) -- compare the sizes against one another, treat the sizes that look',
     'correct as the reference for the intended design, and flag where this size diverges from them:',
     '- misaligned or overlapping elements',
@@ -167,14 +210,47 @@ export function buildJudgePrompt(input: JudgeInput): string {
     '{"verdicts": [{"viewport": "<label>", "pass": true, "reason": "<one concise sentence>"}]}',
     'Include exactly one entry for EVERY viewport listed above, using its exact label. When a',
     'viewport fails, name the specific problem in its reason.',
-  ].join('\n');
-}
+  ],
+  defaultCriteria: DEFAULT_CRITERIA,
+};
 
-export const DEFAULT_CRITERIA = [
-  'The layout is intact and renders as a coherent page.',
-  'No broken, overlapping, or overflowing elements.',
-  'No obviously missing images, icons, or CSS (no unstyled/raw HTML, no broken-image placeholders).',
-];
+// The AGGRESSIVE (aesthetics) rubric design-review ships with, distilled from the calibrated design
+// critique rubric: catch "technically-passing but ugly" -- cramped spacing, edge-jammed clusters,
+// broken/flat hierarchy, inconsistent rhythm -- and INVERT the conservative caution. Meeting a
+// literal constraint (no overflow, one line) is not a defense here; cramming to satisfy a rule is
+// exactly the defect it exists to catch. Calibration preserved: it still fails only on defects a
+// designer would agree are wrong, never on taste, and biases against false-fails -- but it does NOT
+// carry the "never a subjective nitpick" line, so a clear aesthetic weakness is a fail, not a note.
+export const AGGRESSIVE_DESIGN_PROFILE: VisionRubricProfile = {
+  framing: [
+    'Judge EACH viewport as a senior product designer would -- for AESTHETIC and layout quality, not',
+    'merely whether it technically renders. Flag a clear aesthetic weakness even when the layout is',
+    'technically functional, and mark the size a FAIL if any of these are present:',
+    CRITERIA_MARKER,
+    'Also compare the sizes against one another: treat the sizes that look right as the reference and',
+    'flag where this size diverges (misaligned or overlapping elements, text wrapping onto extra',
+    'lines, content overflow or clipping, large unintended dead space).',
+    '',
+    'Meeting a literal constraint is NOT a defense: "no overflow" or "fits on one line" does not',
+    'excuse a squeezed, jammed, or edge-crammed result -- cramming to satisfy a rule is exactly the',
+    'defect this review exists to catch.',
+    'Do not fail on taste (color palette, font choice, minimal-vs-rich, or which of two clean layouts',
+    'is nicer): two clean but different layouts both PASS, and a defect must be visible in the',
+    'screenshot. But when a size is genuinely cramped, unbalanced, or hierarchy-less, FAIL it -- do',
+    'not soften a real defect to avoid failing.',
+    '',
+    'Respond with ONLY a single JSON object and nothing else, in this exact shape:',
+    '{"verdicts": [{"viewport": "<label>", "pass": true, "reason": "<one concise sentence>"}]}',
+    'Include exactly one entry for EVERY viewport listed above, using its exact label. When a',
+    'viewport fails, name the specific problem in its reason.',
+  ],
+  defaultCriteria: [
+    'The layout has deliberate breathing room -- groups are separated by clearly more space than exists within a group; nothing is wall-to-wall or cramped.',
+    'Visual weight is balanced, not shoved to one side or jammed against an edge leaving dead space opposite.',
+    'There is a clear hierarchy with one obvious focal point, not a flat wall of equal-weight content.',
+    'Spacing rhythm and alignment are consistent across elements, with no squeezed or off-rhythm clusters.',
+  ],
+};
 
 // Pull the per-viewport verdict array out of the model's reply. The prompt demands strict JSON,
 // but a model may wrap it in prose or a code fence, so we extract the first JSON object. The reply
