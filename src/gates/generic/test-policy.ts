@@ -466,12 +466,22 @@ export function createTestPolicyGate(): Gate {
       const changed = new Set(ctx.changedFiles);
       const changedNames = new Set(ctx.changedFiles.map((file) => path.posix.basename(file)));
 
+      // A PURE DELETION needs no matching test: you do not write a test for code you are removing,
+      // and demanding one wedges the promotion PR that deletes a file present only on the base
+      // branch (the `test`->`main` case that removed `scripts/check-jsd.sh`). Renames arrive as
+      // delete-old + add-new (`--no-renames`), so the old path is exempted here while the NEW path
+      // still requires its test -- only the removal side is let through. Absent `deletedFiles` (an
+      // older caller or a hand-built context) means "no deletions", which over-demands rather than
+      // under-demands a test -- the safe direction.
+      const deleted = new Set(ctx.deletedFiles ?? []);
+
       // Exemption is part of scope, not a step inside the loop: a diff of nothing but exempt
       // files (`src/index.ts`, `src/types.ts`) asserts exactly as much as a diff of no source
       // files at all, and reporting "examined 2 in-scope source file(s)" for it is the same
       // examined-nothing-and-said-pass ambiguity in miniature.
       const inScope = ctx.changedFiles.filter(
         (file) =>
+          !deleted.has(file) &&
           !isTestPolicyTestFile(file, config.testMarkers) &&
           isInScope(file, config) &&
           !isExempt(file, config.exemptSuffixes),

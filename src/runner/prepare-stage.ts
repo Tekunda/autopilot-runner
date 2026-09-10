@@ -333,7 +333,27 @@ export async function prepareStage(grant: ExecutionGrant, deps: PrepareStageDeps
 // this list through the workflow_dispatch input: computing it here routes the data where
 // the tree already lives and keeps the dispatch input small (every changed path would
 // otherwise ride along, ~12KB for a large PR).
+// One changed file together with the single-letter git status of its change. Renames are OFF
+// (`--no-renames`, see below), so a move is reported as a `D` of the old path plus an `A` of the
+// new one -- each side carries its own honest status, and nothing arrives as `R`/`C`.
+export interface ChangedFileStatus {
+  status: string;
+  path: string;
+}
+
 export async function computeChangedFiles(baseRef: string, cwd: string = process.cwd()): Promise<string[]> {
+  return (await computeChangedFileStatuses(baseRef, cwd)).map((entry) => entry.path);
+}
+
+// The changed files a gate scopes over, each with its diff status, computed IN THE RUNNER from
+// its own checkout: fetch the base branch (best-effort -- a checkout without the base falls back
+// to a local ref), then three-dot diff against HEAD. `computeChangedFiles` is the paths-only view
+// of this; a caller that needs to distinguish added/modified from deleted (test-policy exempts
+// pure deletions -- you do not add a test for code you are removing) reads the status here.
+export async function computeChangedFileStatuses(
+  baseRef: string,
+  cwd: string = process.cwd(),
+): Promise<ChangedFileStatus[]> {
   const git = (args: string[]): Promise<string> =>
     new Promise((resolve, reject) => {
       execFile('git', args, { cwd, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => (err ? reject(err) : resolve(stdout)));
@@ -368,12 +388,20 @@ export async function computeChangedFiles(baseRef: string, cwd: string = process
   // touched, and a move touches two.
   let out: string;
   try {
-    out = await git(['diff', '--no-renames', '--name-only', '-z', `${base}...HEAD`]);
+    out = await git(['diff', '--no-renames', '--name-status', '-z', `${base}...HEAD`]);
   } catch (err) {
     await git(['fetch', '--unshallow', 'origin']).catch(() => undefined);
-    out = await git(['diff', '--no-renames', '--name-only', '-z', `${base}...HEAD`]).catch(() => {
+    out = await git(['diff', '--no-renames', '--name-status', '-z', `${base}...HEAD`]).catch(() => {
       throw err;
     });
   }
-  return out.split('\0').filter((line) => line.length > 0);
+  // `--name-status -z` streams `<status>\0<path>\0` records with no quoting or trailing newline.
+  // With `--no-renames` there are no `R`/`C` records (which would carry two paths), so every
+  // record is exactly one status token followed by one path token.
+  const tokens = out.split('\0').filter((token) => token.length > 0);
+  const entries: ChangedFileStatus[] = [];
+  for (let i = 0; i + 1 < tokens.length; i += 2) {
+    entries.push({ status: tokens[i]!, path: tokens[i + 1]! });
+  }
+  return entries;
 }

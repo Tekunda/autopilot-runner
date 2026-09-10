@@ -81,6 +81,16 @@ export interface GateContext {
   branch: string;
   baseRef: string;
   changedFiles: string[];
+  // The subset of `changedFiles` that are PURE DELETIONS in this diff -- a file removed on the PR
+  // branch, not added or modified. Renames are reported as delete-old + add-new (computeChangedFiles
+  // runs `--no-renames`), so a rename's old path lands here and its new path does not. A gate that
+  // demands a companion artifact for a changed file (test-policy's matching-test rule) must exempt
+  // these: you do not add a test for code you are removing. Filesystem-derived and assembled
+  // runner-side like `changedFiles`; optional, and absent means "not supplied" (an older caller, a
+  // hand-built test context), never "no deletions". A gate treating absence as an empty list is
+  // correct -- it just loses the deletion exemption, which is the safe direction (over-demanding a
+  // test, never under-demanding one).
+  deletedFiles?: readonly string[];
   // The customer PR checkout the gates run against (GITHUB_WORKSPACE), NOT the
   // runner's own action directory. Deterministic tree-scanning gates (cve's
   // `npm audit`) must audit this, never process.cwd().

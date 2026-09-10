@@ -55,6 +55,9 @@ export interface GateTarget {
   branch: string;
   baseRef: string;
   changedFiles: string[];
+  // The pure-deletion subset of `changedFiles` (see GateContext.deletedFiles). Filesystem-derived
+  // runner-side, absent for an older caller -- which loses only the test-policy deletion exemption.
+  deletedFiles?: readonly string[];
   config?: Record<string, unknown>;
 }
 
@@ -511,6 +514,17 @@ export async function runGateStage(grant: ExecutionGrant, deps: RunGateStageDeps
     // next lane's (or the next site's) list. A fresh array per call costs nothing next to running
     // a gate.
     changedFiles: [...(deps.changedFilesOverride ?? deps.target.changedFiles)],
+    // Kept a subset of the effective `changedFiles`: when `changedFilesOverride` narrows the set for
+    // a per-site heavy run, the deletion list is narrowed the same way, so a gate never sees a
+    // deleted path that was scoped out of its `changedFiles`.
+    ...(deps.target.deletedFiles !== undefined
+      ? {
+          deletedFiles: (() => {
+            const visible = new Set(deps.changedFilesOverride ?? deps.target.changedFiles);
+            return deps.target.deletedFiles.filter((file) => visible.has(file));
+          })(),
+        }
+      : {}),
     workspaceRoot,
     vcsHost: deps.vcsHost,
     config,

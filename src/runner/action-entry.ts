@@ -30,7 +30,7 @@ import { FIX_REPORT_FILE } from './fix-verdict.ts';
 import { JUDGMENT_REPORT_FILE } from './judgment-report.ts';
 import { classifyProviderRejection } from './provider-rejection.ts';
 import { createRunnerGateRegistry } from './gate-registry.ts';
-import { CODING_STAGES, computeChangedFiles, DEFAULT_BASE_REF, prepareStage, rejectedTelemetry, type PreparedStage } from './prepare-stage.ts';
+import { CODING_STAGES, computeChangedFileStatuses, DEFAULT_BASE_REF, prepareStage, rejectedTelemetry, type PreparedStage } from './prepare-stage.ts';
 import { isDirectlyExecuted } from './entrypoint.ts';
 import { claimRejection, resolveClaimSha, tryClaimGrant, type ClaimEmitter } from './replay-claim.ts';
 import { GATE_REPORT_FILE, runGateStage, type GateTarget } from './run-gate-stage.ts';
@@ -509,9 +509,14 @@ export async function main(): Promise<void> {
     // (src/packaging/runner-release.test.ts), which asserts that a fresh clone of the published
     // runner fails CLEANLY rather than merely failing.
     if (inputs.mode === 'gate' || inputs.mode === 'heavy-gate') {
+      const statuses = await computeChangedFileStatuses(inputs.target.baseRef, workspaceRoot());
       inputs = {
         ...inputs,
-        target: { ...inputs.target, changedFiles: await computeChangedFiles(inputs.target.baseRef, workspaceRoot()) },
+        target: {
+          ...inputs.target,
+          changedFiles: statuses.map((entry) => entry.path),
+          deletedFiles: statuses.filter((entry) => entry.status === 'D').map((entry) => entry.path),
+        },
       };
     }
     result = await runActionEntry(inputs);
