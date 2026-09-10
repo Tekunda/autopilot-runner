@@ -2001,7 +2001,20 @@ export interface TicketState {
   // never ran the tenant's code, so it is evidence about the infrastructure and none about the
   // PR. It must never reach the fixer (there is nothing to fix) and must never be reported as the
   // author's defect. It is stamped only once the bounded gate retries below are spent.
-  externalGate?: { headSha: string; outcome: 'pass' | 'fail' | 'infra'; recordedAt: string; checks?: CheckResult[] };
+  //
+  // `gateVersion` is the control-plane gate version (AUTOPILOT_GATE_VERSION) that produced this
+  // verdict. Absent = "cannot determine" (the plane was not told its own version when it settled),
+  // and absent never re-gates -- exactly the GateBlockProvenance.gateVersion discipline. A later
+  // tick whose deployed version differs treats a recorded `fail`/`infra` verdict as stale and
+  // re-gates once (recoverBlockedOnGateChange's once-per-version bound, applied to the external
+  // lane); a `pass` stays deduped.
+  externalGate?: {
+    headSha: string;
+    outcome: 'pass' | 'fail' | 'infra';
+    recordedAt: string;
+    checks?: CheckResult[];
+    gateVersion?: string;
+  };
   // Consecutive gate-stage INFRA faults on an external PR's current head, bounding the gate
   // re-dispatch the way the ticket-driven lane's `gateErrorAttempts` bounds its own. One counter
   // for all four fault classes on purpose: it bounds how long a PR may sit on gates that never
