@@ -39,6 +39,20 @@ import type { Gate, GateContext, GateResult } from '../types.ts';
 export interface StructureGateConfig {
   forbiddenPathPrefixes: string[];
   maxChangedFiles: number;
+  // Branch names that identify a rollup/promotion PR, which is EXEMPT from `maxChangedFiles`. A
+  // promotion moves an entire accumulated integration branch onto the production branch in a single
+  // PR, so it legitimately touches far more files than any one feature change -- the 434-file
+  // `test` -> `main` rollup that the feature-tuned cap could never pass, blocking EVERY production
+  // promotion. A PR is a promotion only when its base is one of `promotionBaseBranches` AND its
+  // head is one of `promotionHeadBranches` (see isPromotionPr): requiring BOTH sides is what keeps
+  // an ordinary feature PR into the production branch -- head is a feature branch, not an
+  // integration one -- from being waved past the cap. Both lists are empty by default, so an
+  // unconfigured tenant keeps the cap on every PR and nothing is exempted; a tenant names its own
+  // integration/production branches to opt in. They live on the gate config rather than being read
+  // from the tenant's top-level branch settings because the gate context exposes only its own
+  // config subtree (run-gate-stage builds `ctx.config[id]` per gate id), never the whole RepoConfig.
+  promotionBaseBranches: string[];
+  promotionHeadBranches: string[];
   // How a changed file is recognized as a TEST file, for the false-green ban. Cross-framework and
   // not TS-bound: a MARKER or a directory segment, gated by a known source extension so
   // `tests/fixtures/data.json` is not mistaken for a spec. Selection is separate from what the
@@ -95,6 +109,10 @@ export const DEFAULT_STRUCTURE_CONFIG: StructureGateConfig = {
   // that cannot fire is decoration, and this file's whole subject is checks that assert nothing.
   forbiddenPathPrefixes: ['dist/', 'build/', 'node_modules/', '.git/', '.env', '.venv/'],
   maxChangedFiles: 100,
+  // Empty by default: no PR is recognized as a promotion until a tenant names its branches, so the
+  // 100-file cap applies to every PR exactly as before. See the field docs on StructureGateConfig.
+  promotionBaseBranches: [],
+  promotionHeadBranches: [],
   // Apex needs BOTH `Test.` and `Test`, and the pair is not redundant -- each names one of the two
   // spellings the convention allows, through the shape that actually matches it (see
   // matchesTestMarker): `Test.` is the SUFFIX branch and selects `OrderTest.cls` / `Order_Test.cls`,
@@ -150,6 +168,14 @@ export function effectiveStructureConfig(specConfig?: Record<string, unknown>): 
       DEFAULT_STRUCTURE_CONFIG.forbiddenPathPrefixes,
     ),
     maxChangedFiles: normalizePositiveInt(config.maxChangedFiles, DEFAULT_STRUCTURE_CONFIG.maxChangedFiles),
+    promotionBaseBranches: normalizeStringArray(
+      config.promotionBaseBranches,
+      DEFAULT_STRUCTURE_CONFIG.promotionBaseBranches,
+    ),
+    promotionHeadBranches: normalizeStringArray(
+      config.promotionHeadBranches,
+      DEFAULT_STRUCTURE_CONFIG.promotionHeadBranches,
+    ),
     testFileMarkers: normalizeStringArray(config.testFileMarkers, DEFAULT_STRUCTURE_CONFIG.testFileMarkers),
     testFileDirs: normalizeStringArray(config.testFileDirs, DEFAULT_STRUCTURE_CONFIG.testFileDirs),
     testFileExtensions: normalizeStringArray(
@@ -374,6 +400,17 @@ function isReportOnlyViolation(file: string, kind: TestIntegrityKind): boolean {
   return isShellTestFile(file) || kind === 'vacuous-guard';
 }
 
+// Is this PR a rollup/promotion -- an entire integration branch being moved onto the production
+// branch -- rather than a single feature change? Recognized purely from GateContext.branch (head)
+// and baseRef, matched against the tenant's configured branch names. BOTH sides must match: base in
+// promotionBaseBranches AND head in promotionHeadBranches. Requiring both is deliberate and stated
+// positively -- a feature PR whose base happens to be the production branch has a feature head, not
+// an integration one, so it stays subject to the cap. With either list empty (the default) nothing
+// is a promotion and the cap applies to every PR, exactly as before this exemption existed.
+export function isPromotionPr(branch: string, baseRef: string, config: StructureGateConfig): boolean {
+  return config.promotionBaseBranches.includes(baseRef) && config.promotionHeadBranches.includes(branch);
+}
+
 export function createStructureGate(): Gate {
   return {
     id: 'structure',
@@ -399,7 +436,14 @@ export function createStructureGate(): Gate {
         if (hit) findings.push(`"${file}" is under forbidden path "${hit}"`);
       }
 
-      if (ctx.changedFiles.length > config.maxChangedFiles) {
+      // A rollup/promotion PR legitimately carries the whole accumulated diff since the last
+      // promotion, so the feature-tuned file-count cap is exempted for it (and only for it -- the
+      // forbidden-path and false-green-test checks below still run on every PR). Feature PRs, and
+      // any tenant that has not named its promotion branches, keep the cap unchanged.
+      if (
+        !isPromotionPr(ctx.branch, ctx.baseRef, config) &&
+        ctx.changedFiles.length > config.maxChangedFiles
+      ) {
         findings.push(
           `diff touches ${ctx.changedFiles.length} files, exceeding the max of ${config.maxChangedFiles}`,
         );
