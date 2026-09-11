@@ -97,6 +97,12 @@ const DEFAULT_MAX_RETRIES = 4;
 // (or a high exponent) can't silently stall the gate; total wait is bounded by maxRetries anyway.
 const RETRY_BASE_MS = 1_000;
 const RETRY_CAP_MS = 20_000;
+// A server-directed Retry-After is honored up to a HIGHER ceiling than the exponential cap: when
+// the account is contended Anthropic returns e.g. Retry-After: 60, and clamping that to 20s just
+// retries into the still-throttled window and exhausts maxRetries before the throttle lifts. Cap
+// the honored wait high enough to actually clear a typical throttle, still bounded so an absurd
+// header can't park the gate.
+const RETRY_AFTER_CAP_MS = 90_000;
 
 // A rate-limit/overload that survived every retry. Distinct from a generic judge error so the
 // gate can classify it as a TRANSIENT INFRA failure (inconclusive), not read a 429 as a visual
@@ -136,6 +142,9 @@ export interface AnthropicVisionJudgeOptions {
   // Injectable sleeper so tests exercise the backoff path without actually waiting. Defaults to
   // a real setTimeout-based delay.
   sleepImpl?: (ms: number) => Promise<void>;
+  // Injectable clock so tests can exercise the HTTP-date form of Retry-After deterministically.
+  // Defaults to Date.now.
+  nowImpl?: () => number;
   // Serializes concurrent vision-model calls so the two vision gates don't self-inflict a 429.
   // Production OMITS this so every judge shares `defaultVisionLimiter` (the whole point -- one
   // process-wide gate across both gates); it exists only as a test-injection seam.
@@ -293,13 +302,23 @@ export function parseVerdict(text: string, expectedLabels: string[]): VisionVerd
   throw new Error(`vision judge returned an unparseable verdict: ${text.slice(0, 200)}`);
 }
 
-// How long to wait before the next retry. An honest Retry-After header (seconds per HTTP) wins,
-// capped; otherwise exponential backoff with equal jitter -- half the exponential window is fixed
-// (so a retry never fires effectively immediately) and half is random (so concurrent judges in
-// the heavy stage don't all wake and re-burst in lockstep, re-tripping the same 429).
-export function retryBackoffMs(attempt: number, retryAfter: string | null): number {
+// How long to wait before the next retry. An honest Retry-After header (integer seconds, or an
+// HTTP-date, per HTTP) wins and is honored up to RETRY_AFTER_CAP_MS -- NOT clamped to the shorter
+// exponential cap, or a Retry-After: 60 would retry into the still-throttled window. Otherwise
+// exponential backoff with equal jitter -- half the exponential window is fixed (so a retry never
+// fires effectively immediately) and half is random (so concurrent judges in the heavy stage don't
+// all wake and re-burst in lockstep, re-tripping the same 429).
+export function retryBackoffMs(attempt: number, retryAfter: string | null, now: () => number = Date.now): number {
   const headerSec = Number(retryAfter);
-  if (Number.isFinite(headerSec) && headerSec > 0) return Math.min(headerSec * 1_000, RETRY_CAP_MS);
+  if (Number.isFinite(headerSec) && headerSec > 0) return Math.min(headerSec * 1_000, RETRY_AFTER_CAP_MS);
+  if (retryAfter) {
+    // HTTP-date form (RFC 7231): honor the delta to that instant if it parses to a future time.
+    const dateMs = Date.parse(retryAfter);
+    if (Number.isFinite(dateMs)) {
+      const deltaMs = dateMs - now();
+      if (deltaMs > 0) return Math.min(deltaMs, RETRY_AFTER_CAP_MS);
+    }
+  }
   const window = Math.min(RETRY_BASE_MS * 2 ** attempt, RETRY_CAP_MS);
   return Math.round(window / 2 + Math.random() * (window / 2));
 }
@@ -320,6 +339,7 @@ export function createAnthropicVisionJudge(opts: AnthropicVisionJudgeOptions = {
   const anthropicVersion = opts.anthropicVersion ?? ANTHROPIC_VERSION;
   const maxRetries = opts.maxRetries ?? DEFAULT_MAX_RETRIES;
   const sleep = opts.sleepImpl ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const now = opts.nowImpl ?? Date.now;
   const limiter = opts.limiter ?? defaultVisionLimiter;
   const minIntervalMs = opts.minIntervalMs ?? 0;
 
@@ -370,7 +390,7 @@ export function createAnthropicVisionJudge(opts: AnthropicVisionJudgeOptions = {
           if (RETRYABLE_STATUSES.has(res.status) && attempt < maxRetries) {
             // Drain/cancel the unconsumed body so undici releases the socket before the backoff.
             await res.body?.cancel().catch(() => {});
-            await sleep(retryBackoffMs(attempt, res.headers.get('retry-after')));
+            await sleep(retryBackoffMs(attempt, res.headers.get('retry-after'), now));
             continue;
           }
 
