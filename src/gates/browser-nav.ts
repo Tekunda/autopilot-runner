@@ -47,3 +47,17 @@ export async function settledGoto(page: SettledGotoPage, url: string, opts: Sett
   // Fixed settle so fonts/hydration/layout are in the finished frame even when idle never fired.
   await page.waitForTimeout(settleMs);
 }
+
+// Chromium launch options shared by both browser-driven gates (Visual-QA's ScreenshotBrowser and
+// layout-rules' LayoutBrowser). The place these MUST have --no-sandbox is the heavy gate stage,
+// which runs inside the prebaked Playwright container AS ROOT (uid 0): chrome-headless-shell
+// refuses to start under root without it and dies on launch with "Target page, context or browser
+// has been closed" before rendering anything. These are the default factories (vision-gate.ts /
+// layout-gate.ts fall back to them), so a developer running the gate locally hits the same path --
+// there --no-sandbox is simply harmless (own-tenant pages, and on macOS a near no-op), so passing
+// it unconditionally is correct and is the standard Chromium flag for containerized CI. Shared so
+// the two call sites cannot drift: dropping it from one silently breaks that gate in-container.
+export const CHROMIUM_LAUNCH_OPTIONS: { headless: boolean; args: string[] } = {
+  headless: true,
+  args: ['--no-sandbox'],
+};

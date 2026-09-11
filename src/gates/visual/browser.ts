@@ -5,7 +5,7 @@
 // launched runner-side in the dedicated heavy stage -- the only stage with a browser (the fast
 // deterministic gate path has none). See createVisualQaGate for how the two are wired.
 
-import { settledGoto } from '../browser-nav.ts';
+import { settledGoto, CHROMIUM_LAUNCH_OPTIONS } from '../browser-nav.ts';
 
 export interface Viewport {
   width: number;
@@ -45,7 +45,7 @@ interface PlaywrightBrowser {
   close(): Promise<void>;
 }
 interface PlaywrightModule {
-  chromium: { launch(opts?: { headless?: boolean }): Promise<PlaywrightBrowser> };
+  chromium: { launch(opts?: { headless?: boolean; args?: string[] }): Promise<PlaywrightBrowser> };
 }
 
 export interface PlaywrightBrowserOptions {
@@ -61,7 +61,7 @@ export interface PlaywrightBrowserOptions {
 export async function createPlaywrightBrowser(opts: PlaywrightBrowserOptions = {}): Promise<ScreenshotBrowser> {
   const specifier = 'playwright';
   const { chromium } = (await import(specifier)) as unknown as PlaywrightModule;
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch(CHROMIUM_LAUNCH_OPTIONS);
   const timeout = opts.navigationTimeoutMs ?? 30_000;
   return {
     async screenshot(url: string, viewport: Viewport): Promise<Screenshot> {
