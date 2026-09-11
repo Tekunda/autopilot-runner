@@ -91,8 +91,13 @@ const OAUTH_BETA_HEADER = 'oauth-2025-04-20';
 // key, 400 bad request, 5xx server error) is NOT retried -- it won't fix itself with a wait.
 const RETRYABLE_STATUSES = new Set([429, 529]);
 // Up to this many RETRIES (so maxRetries+1 total attempts) before a rate-limit surfaces as an
-// error. Bounded so a sustained outage can't park the heavy gate stage indefinitely.
-const DEFAULT_MAX_RETRIES = 4;
+// error. Bounded so a sustained outage can't park the heavy gate stage indefinitely. Trimmed from
+// 4 to 2 on purpose: the gate-level short-circuit (vision-gate.ts stops judging the remaining
+// routes once ONE exhausts this budget) plus the proactive ITPM pacing (defaultVisionLimiter's
+// minInterval) make a large per-call retry budget counterproductive -- it just multiplies the
+// worst-case wall-time. With 2 the worst-case first-call wait is ~2 x RETRY_AFTER_CAP_MS (~3 min)
+// before the route is declared inconclusive and the gate short-circuits, instead of ~6 min.
+const DEFAULT_MAX_RETRIES = 2;
 // Exponential-backoff base and cap per attempt. A single wait is capped so an absurd Retry-After
 // (or a high exponent) can't silently stall the gate; total wait is bounded by maxRetries anyway.
 const RETRY_BASE_MS = 1_000;
@@ -103,6 +108,17 @@ const RETRY_CAP_MS = 20_000;
 // the honored wait high enough to actually clear a typical throttle, still bounded so an absurd
 // header can't park the gate.
 const RETRY_AFTER_CAP_MS = 90_000;
+// Per-fetch wall-clock ceiling. A single vision API call is aborted after this long so a socket that
+// accepts the request but never sends a response cannot hang the call -- and thus the whole heavy
+// stage -- indefinitely (there was NO per-fetch timeout before, so a dead socket parked the gate
+// past the job timeout). A timed-out fetch is transient infra: it is retried like a 429 and, once
+// the retry budget is spent, surfaced as a typed VisionRateLimitError so the gate demotes it to an
+// infra skip rather than crashing the stage or reading it as a visual defect.
+const FETCH_TIMEOUT_MS = 120_000;
+// The status a spent fetch-timeout is surfaced under (RFC 7231 Request Timeout). It never comes from
+// the server -- it is our own abort -- but tagging it onto VisionRateLimitError lets the gate's
+// existing `instanceof` demotion treat it as the transient-infra signal it is.
+const FETCH_TIMEOUT_STATUS = 408;
 
 // A rate-limit/overload that survived every retry. Distinct from a generic judge error so the
 // gate can classify it as a TRANSIENT INFRA failure (inconclusive), not read a 429 as a visual
@@ -137,8 +153,13 @@ export interface AnthropicVisionJudgeOptions {
   fetchImpl?: typeof fetch;
   apiUrl?: string;
   anthropicVersion?: string;
-  // How many times a 429/529 is retried before surfacing as a VisionRateLimitError. Default 4.
+  // How many times a 429/529 (or a fetch timeout) is retried before surfacing as a
+  // VisionRateLimitError. Default DEFAULT_MAX_RETRIES (2).
   maxRetries?: number;
+  // Per-fetch wall-clock ceiling in ms; a call that does not respond within it is aborted and
+  // retried as transient infra. Default FETCH_TIMEOUT_MS (120_000). Injectable so tests exercise the
+  // abort path with a tiny value instead of a real 2-minute wait.
+  fetchTimeoutMs?: number;
   // Injectable sleeper so tests exercise the backoff path without actually waiting. Defaults to
   // a real setTimeout-based delay.
   sleepImpl?: (ms: number) => Promise<void>;
@@ -323,6 +344,13 @@ export function retryBackoffMs(attempt: number, retryAfter: string | null, now: 
   return Math.round(window / 2 + Math.random() * (window / 2));
 }
 
+// True for the abort our own per-call timeout raises on a fetch that stopped responding. The timer
+// aborts with a DOMException named 'TimeoutError'; a manual/other abort is 'AbortError'. Either means
+// "the request did not complete in time" -- transient infra we retry, not a defect.
+function isFetchTimeout(err: unknown): boolean {
+  return err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
+}
+
 interface AnthropicTextBlock {
   type: string;
   text?: string;
@@ -342,6 +370,7 @@ export function createAnthropicVisionJudge(opts: AnthropicVisionJudgeOptions = {
   const now = opts.nowImpl ?? Date.now;
   const limiter = opts.limiter ?? defaultVisionLimiter;
   const minIntervalMs = opts.minIntervalMs ?? 0;
+  const fetchTimeoutMs = opts.fetchTimeoutMs ?? FETCH_TIMEOUT_MS;
 
   return {
     async judge(input: JudgeInput): Promise<VisionVerdict[]> {
@@ -377,15 +406,46 @@ export function createAnthropicVisionJudge(opts: AnthropicVisionJudgeOptions = {
         // The limiter permit is held ACROSS the backoff wait on purpose, so the other vision gate
         // cannot burst a call in during a Retry-After and re-trip the same 429.
         for (let attempt = 0; ; attempt++) {
-          const res = await fetchImpl(apiUrl, {
-            method: 'POST',
-            headers: {
-              'content-type': 'application/json',
-              ...authHeaders(credential),
-              'anthropic-version': anthropicVersion,
-            },
-            body: JSON.stringify(body),
-          });
+          // A fresh per-attempt wall-clock ceiling: abort a call that stops responding so a dead
+          // socket cannot hang the stage. The timer bounds THIS attempt, not the whole retry loop,
+          // is unref'd so it never keeps the process alive, and is cleared the instant fetch settles.
+          const controller = new AbortController();
+          const timer = setTimeout(
+            () => controller.abort(new DOMException(`vision judge fetch exceeded ${fetchTimeoutMs}ms`, 'TimeoutError')),
+            fetchTimeoutMs,
+          );
+          if (typeof timer.unref === 'function') timer.unref();
+          let res: Response;
+          try {
+            res = await fetchImpl(apiUrl, {
+              method: 'POST',
+              headers: {
+                'content-type': 'application/json',
+                ...authHeaders(credential),
+                'anthropic-version': anthropicVersion,
+              },
+              body: JSON.stringify(body),
+              signal: controller.signal,
+            });
+          } catch (err) {
+            // Our own fetch-timeout abort is transient infra: back off and retry like a 429, and once
+            // the retry budget is spent surface it as the typed VisionRateLimitError the gate demotes
+            // to an infra skip -- never a hang and never a false visual defect. Any OTHER fetch
+            // rejection is left to propagate (fail closed), unchanged.
+            if (isFetchTimeout(err)) {
+              if (attempt < maxRetries) {
+                await sleep(retryBackoffMs(attempt, null, now));
+                continue;
+              }
+              throw new VisionRateLimitError(
+                FETCH_TIMEOUT_STATUS,
+                `vision judge fetch timed out after ${fetchTimeoutMs}ms`,
+              );
+            }
+            throw err;
+          } finally {
+            clearTimeout(timer);
+          }
 
           if (RETRYABLE_STATUSES.has(res.status) && attempt < maxRetries) {
             // Drain/cancel the unconsumed body so undici releases the socket before the backoff.

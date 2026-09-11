@@ -129,10 +129,12 @@ export interface VisionGateConfig {
   model?: string;
   maxTokens?: number;
   // How many times a 429/529 is retried before the judge surfaces an infra-skip. Default is the
-  // judge's DEFAULT_MAX_RETRIES (4); tenant-tunable so a throttled account can widen the retry budget.
+  // judge's DEFAULT_MAX_RETRIES (2); tenant-tunable so a throttled account can widen the retry budget.
   maxRetries?: number;
   // Minimum ms between successive vision-model call STARTS across BOTH vision gates (the limiter is
-  // process-wide). Default 0 (off); opt-in per tenant to pace heavy calls under the account's ITPM.
+  // process-wide). Defaults to DEFAULT_VISION_MIN_INTERVAL_MS so pacing is ON by default -- an
+  // account-wide ITPM floor that keeps the two gates from bursting past the rate limit. Set to 0 to
+  // disable pacing, or to a higher value to pace more conservatively.
   minIntervalMs?: number;
 }
 
@@ -163,6 +165,19 @@ export const DEFAULT_SWEEP: VisionGateViewport[] = [
   { width: 1280, height: 800, name: 'desktop' },
 ];
 const DEFAULT_CONTENT_DIR = 'content';
+
+// Proactive, process-wide ITPM floor: the minimum ms between successive vision-model call STARTS,
+// applied BY DEFAULT across BOTH vision gates. Both gates build their judge with this interval and
+// share defaultVisionLimiter, which latches the interval by monotonic-max, so a call from EITHER
+// gate is spaced at least this far behind the last vision call regardless of which gate made it.
+// Concurrency=1 only serializes calls; it does not PACE them, so back-to-back large-image calls
+// still burst past the account's input-tokens-per-minute limit and self-inflict a 429 -- which made
+// design-review skip on infra and never render a verdict. This floor throttles that burst
+// PROACTIVELY and combines with the judge's REACTIVE Retry-After backoff (a 429 that still slips
+// through is honored per its header). Conservative on purpose: a slightly slower heavy stage beats
+// one that renders nothing because every call 429s. Tenant-overridable via config.minIntervalMs
+// (set it to 0 to disable pacing).
+export const DEFAULT_VISION_MIN_INTERVAL_MS = 12_000;
 
 // A route to render, plus WHY the diff selected it (logged so a run is self-describing about the
 // pages it chose -- especially the representative sample a global change fans out to).
@@ -320,7 +335,9 @@ export function createVisionGate(opts: { id: string; profile: VisionRubricProfil
           ...(config.maxTokens ? { maxTokens: config.maxTokens } : {}),
           ...(config.executorCredential ? { credential: config.executorCredential } : {}),
           ...(config.maxRetries != null ? { maxRetries: config.maxRetries } : {}),
-          ...(config.minIntervalMs != null ? { minIntervalMs: config.minIntervalMs } : {}),
+          // Pacing is ON by default (the proactive ITPM floor); a tenant tunes or disables it via
+          // config.minIntervalMs. Always forwarded so a default judge is paced, not just a tenant one.
+          minIntervalMs: config.minIntervalMs ?? DEFAULT_VISION_MIN_INTERVAL_MS,
         });
 
       // Real visual defects (or non-transient errors): these BLOCK the merge.
@@ -332,8 +349,23 @@ export function createVisionGate(opts: { id: string; profile: VisionRubricProfil
       // below): the judging infrastructure was down, which is a statement about the provider and
       // not about this diff.
       const inconclusive: string[] = [];
+      // Once ANY route exhausts the judge's rate-limit retry budget, the model API is throttling the
+      // whole account -- judging the remaining routes would each pay the same multi-minute retry wait
+      // for the same throttle (2 gates x K routes x minutes blew past the 40-min job timeout, a
+      // 65-min hang was observed). So the FIRST exhausted rate-limit flips this, and every remaining
+      // route is marked inconclusive WITHOUT another judge call. At most one route pays the retry
+      // budget; the gate then resolves to the same infra skip it would have reached anyway.
+      let rateLimited = false;
       try {
         for (const target of targets) {
+          if (rateLimited) {
+            for (const viewport of viewports) {
+              inconclusive.push(
+                `${viewportLabel(target, viewport)}: could not verify -- model API rate-limited; judging skipped after a prior route exhausted the retry budget (transient infra issue, not a visual defect)`,
+              );
+            }
+            continue;
+          }
           const url = new URL(target.path, baseUrl).toString();
 
           // First render every viewport for this route. A screenshot that itself fails to capture is
@@ -369,12 +401,14 @@ export function createVisionGate(opts: { id: string; profile: VisionRubricProfil
           } catch (err) {
             if (err instanceof VisionRateLimitError) {
               // Rate-limited past the retry budget -> inconclusive, not a defect. The whole route's
-              // batch could not be judged, so every viewport is labeled inconclusive.
+              // batch could not be judged, so every viewport is labeled inconclusive. Flip the
+              // short-circuit so the remaining routes skip judging (see the loop guard above).
               for (const shot of shots) {
                 inconclusive.push(
                   `${viewportLabel(target, shot.viewport)}: could not verify -- model API rate-limited (${err.status}); transient infra issue, not a visual defect`,
                 );
               }
+              rateLimited = true;
             } else {
               // Could not judge for a non-transient reason -> fail closed. A page we cannot verify is
               // NOT a pass (the judge is never stubbed to pass); report why, per viewport.
