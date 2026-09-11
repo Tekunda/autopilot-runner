@@ -155,6 +155,27 @@ runs:
         # channel is closed outright.
         persist-credentials: ${{ steps.prepare.outputs.stage-kind == 'coding' }}
 
+    # actions/checkout sets safe.directory only inside its OWN throwaway $HOME and tears it down
+    # when its step ends (git-source-provider's configureTempGlobalConfig -> removeGlobalConfig),
+    # so in a container job -- where every step runs as root (uid 0) over a workspace the image
+    # owns as a different uid -- each LATER step's git command hits "detected dubious ownership"
+    # (exit 128). That is precisely what made the heavy gate's resolveBaseSha (src/gates/git.ts)
+    # fail closed with a generic "base ref not found" the moment browser stages moved into the
+    # Playwright container (#590): a resolved exit-128 fetch, not a missing ref. Persist
+    # safe.directory in the real (root's) $HOME so it survives for the gate/coding steps below.
+    # Paired with the checkout condition so it only runs when there IS a checkout to trust; inert
+    # where the uids already match (host runner) -- the entry is set but git never consults it.
+    - name: Trust the checkout for later git (container root vs workspace uid)
+      if: steps.prepare.outputs.resolved == 'false' || steps.parse-grant.outputs.stage == 'gate'
+      shell: bash
+      # Idempotent: `git config --global` writes the runner user's ~/.gitconfig, which on a
+      # PERSISTENT self-hosted runner outlives the job, so a bare `--add` would append a duplicate
+      # safe.directory line every run and grow it unbounded. Add only when the path is not already
+      # trusted.
+      run: |
+        git config --global --get-all safe.directory | grep -qxF "$GITHUB_WORKSPACE" \
+          || git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
     # The checkout's HEAD before the vendor agent touches anything. The `fix` stage's finalize
     # diffs against this to tell a real fix from a re-encoding of the same content, and this is
     # the only moment that revision is still knowable: a fix grant's own baseBranch IS the PR head

@@ -14,10 +14,17 @@ import { runCommand } from './exec.ts';
 // over nothing.
 export async function resolveBaseSha(baseRef: string, cwd: string = process.cwd()): Promise<string> {
   const remoteRef = `refs/remotes/origin/${baseRef}`;
-  // No origin (or offline) -> fall back to a locally-known branch below.
-  await runCommand('git', ['fetch', '--no-tags', 'origin', `+refs/heads/${baseRef}:${remoteRef}`], cwd).catch(
-    () => undefined,
-  );
+  // No origin (or offline) -> fall back to a locally-known branch below. Keep the result: a git
+  // that RAN and exited non-zero RESOLVES here (dubious-ownership exit 128 when a container runs
+  // git as root over a workspace owned by another uid, or an auth 128) -- it is not a rejection
+  // (see exec.ts), so its exit code was otherwise silently discarded and every such failure
+  // collapsed into the same generic "not found" below. A never-spawned or killed/timed-out fetch
+  // DOES reject and is caught to undefined here, adding no detail -- only a ran-and-failed one does.
+  const fetch = await runCommand(
+    'git',
+    ['fetch', '--no-tags', 'origin', `+refs/heads/${baseRef}:${remoteRef}`],
+    cwd,
+  ).catch(() => undefined);
 
   const revParse = async (ref: string): Promise<string> => {
     const result = await runCommand('git', ['rev-parse', '--verify', '--quiet', ref], cwd).catch(() => undefined);
@@ -25,7 +32,20 @@ export async function resolveBaseSha(baseRef: string, cwd: string = process.cwd(
   };
 
   const base = (await revParse(remoteRef)) || (await revParse(`refs/heads/${baseRef}`));
-  if (!base) throw new Error(`resolveBaseSha: base ref "${baseRef}" not found locally or on origin`);
+  if (!base) {
+    let detail = '';
+    if (fetch && fetch.exitCode !== 0) {
+      const lines = (fetch.stderr || fetch.stdout || '')
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean);
+      // git prints the actionable cause ("fatal: detected dubious ownership...") ABOVE an indented
+      // remediation hint, so the last line is often the hint, not the cause -- prefer fatal/error.
+      const cause = lines.find((line) => /^(fatal|error):/i.test(line)) ?? lines[lines.length - 1] ?? 'no output';
+      detail = ` (git fetch exited ${fetch.exitCode}: ${cause})`;
+    }
+    throw new Error(`resolveBaseSha: base ref "${baseRef}" not found locally or on origin${detail}`);
+  }
   return base;
 }
 
