@@ -412,6 +412,14 @@ function px(value: number): string {
   return `${Math.round(value)}px`;
 }
 
+// A box the browser actually laid out. A display:none or not-yet-rendered element returns a 0x0
+// box from getBoundingClientRect; treating it as present corrupts gap/size measurements (it sorts
+// to the origin and manufactures a near-zero gap, or fails a size floor it never really violated).
+// Both the size and gap rules skip these.
+function isRendered(box: Box): boolean {
+  return box.width > 0 && box.height > 0;
+}
+
 function naFinding(rule: LayoutRule, selector: string): LayoutFinding {
   return {
     ruleType: rule.type,
@@ -604,8 +612,9 @@ function evaluateNoWrap(rule: NoWrapRule, geometry: RuleGeometry): LayoutFinding
 
 function evaluateMinRenderedSize(rule: MinRenderedSizeRule, geometry: RuleGeometry): LayoutFinding[] {
   if (geometry.matches.length === 0) return [naFinding(rule, rule.selector)];
-  const rendered = geometry.matches.map((match) => match.box).filter((box) => box.width > 0 || box.height > 0);
-  // Matches existed but none rendered a box -> could not measure (N/A), not "shrunk to nothing".
+  const rendered = geometry.matches.map((match) => match.box).filter(isRendered);
+  // Matches existed but none were laid out by the browser -> could not measure (N/A), not "shrunk
+  // to nothing".
   if (rendered.length === 0) return [naFinding(rule, rule.selector)];
   const violations = rendered.filter(
     (box) =>
@@ -613,9 +622,12 @@ function evaluateMinRenderedSize(rule: MinRenderedSizeRule, geometry: RuleGeomet
       (rule.min_height_px !== undefined && box.height < rule.min_height_px),
   );
   if (violations.length === 0) return [];
-  const worst = violations.reduce((a, b) =>
-    rule.min_width_px !== undefined ? (b.width < a.width ? b : a) : b.height < a.height ? b : a,
-  );
+  const deficit = (box: Box): number =>
+    Math.max(
+      rule.min_width_px !== undefined ? rule.min_width_px - box.width : Number.NEGATIVE_INFINITY,
+      rule.min_height_px !== undefined ? rule.min_height_px - box.height : Number.NEGATIVE_INFINITY,
+    );
+  const worst = violations.reduce((a, b) => (deficit(b) > deficit(a) ? b : a));
   const floor =
     rule.min_width_px !== undefined && rule.min_height_px !== undefined
       ? `min ${px(rule.min_width_px)} x ${px(rule.min_height_px)}`
@@ -648,7 +660,7 @@ function tightestRowGap(row: readonly Box[]): number | null {
 function evaluateMinChildGap(rule: MinChildGapRule, geometry: RuleGeometry): LayoutFinding[] {
   if (geometry.matches.length === 0) return [naFinding(rule, rule.within)];
   const violations = geometry.matches
-    .flatMap((match) => groupIntoRows(match.children ?? []).map((row) => tightestRowGap(row)))
+    .flatMap((match) => groupIntoRows((match.children ?? []).filter(isRendered)).map((row) => tightestRowGap(row)))
     .filter((gap): gap is number => gap !== null && gap < rule.min_px);
   if (violations.length === 0) return [];
   const worst = Math.min(...violations);
