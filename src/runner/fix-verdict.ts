@@ -28,7 +28,7 @@
 
 import { readFile } from 'node:fs/promises';
 
-import type { FixDispute, FixEvasion, FixVerdict } from '../contracts/types.ts';
+import type { FixContentRevert, FixDispute, FixEvasion, FixVerdict } from '../contracts/types.ts';
 import { runCommand } from '../gates/exec.ts';
 
 // Where a fix stage writes its dispute, at the root of the customer checkout. Deliberately a
@@ -273,6 +273,79 @@ export function findEvasions(diffs: readonly FixFileDiff[]): FixEvasion[] {
 }
 
 // ---------------------------------------------------------------------------------------
+// Content-revert detection
+// ---------------------------------------------------------------------------------------
+
+// The set of rendered, trimmed, non-empty lines in a file -- the comparison unit for content
+// reverts. Rendered (entity/homoglyph/whitespace folded, see renderedText) so a line restored in a
+// different encoding still matches its base twin, and trimmed + non-empty so indentation churn and
+// blank lines never register as content. A Set (not a multiset): whether a line is PRESENT is the
+// only question, and duplicate lines carry no additional business fact.
+export function contentLineset(source: string): Set<string> {
+  const out = new Set<string>();
+  for (const raw of source.split('\n')) {
+    const line = renderedText(raw).trim();
+    if (line.length > 0) out.add(line);
+  }
+  return out;
+}
+
+function difference(a: Set<string>, b: Set<string>): Set<string> {
+  const out = new Set<string>();
+  for (const value of a) if (!b.has(value)) out.add(value);
+  return out;
+}
+
+function intersectionSize(a: Set<string>, b: Set<string>): number {
+  let n = 0;
+  for (const value of a) if (b.has(value)) n += 1;
+  return n;
+}
+
+// Every file in the round's diff where the fix NET-REVERTED author-authored content back toward
+// the ticket base branch. `baseLinesByPath` holds each path's line set at the ticket base (A);
+// each FixFileDiff carries the pre-fix content (P = before) and the post-fix content (F = after).
+//
+//   authorAdded   = P \ A   lines the author introduced over base
+//   authorRemoved = A \ P   lines the author deleted from base
+//   fixRemoved    = P \ F   lines the fix deleted this round
+//   fixAdded      = F \ P   lines the fix introduced this round
+//
+// Two ways the round moves author content back toward base:
+//   1. The fix re-added base content the author had removed -- |fixAdded ∩ authorRemoved|. This is
+//      the sharp, canonical signal: base's "11K" the author replaced with "130K" is back, and the
+//      re-added line IS literally base content. It alone fires on the disputed-value incident.
+//   2. The fix PURELY deleted author-added content -- |fixRemoved ∩ authorAdded|, but only when the
+//      round added nothing back to this file (fixAdded empty). The gate is what keeps a genuine
+//      value CHANGE from registering: author "130K" -> fix "125K" removes the author's "130K" line
+//      the same way a pure delete does, but "125K" matches neither base nor a delete, so it is an
+//      edit to a new value, not a revert. Without the gate every value edit would false-positive.
+//
+// Rendered folding (via contentLineset) means an encoding-only swap -- the evasion case -- leaves P
+// and F rendering identically, so it never registers here: content reverts and evasions do not
+// double-count the same line. A restore that differs from base only by entity/whitespace still
+// matches base under folding and IS detected.
+export function findContentReverts(
+  diffs: readonly FixFileDiff[],
+  baseLinesByPath: ReadonlyMap<string, Set<string>>,
+): FixContentRevert[] {
+  const reverts: FixContentRevert[] = [];
+  for (const diff of diffs) {
+    const base = baseLinesByPath.get(diff.path) ?? new Set<string>();
+    const pre = contentLineset(diff.before);
+    const post = contentLineset(diff.after);
+    const authorAdded = difference(pre, base);
+    const authorRemoved = difference(base, pre);
+    const fixRemoved = difference(pre, post);
+    const fixAdded = difference(post, pre);
+    let revertedLines = intersectionSize(fixAdded, authorRemoved);
+    if (fixAdded.size === 0) revertedLines += intersectionSize(fixRemoved, authorAdded);
+    if (revertedLines > 0) reverts.push({ path: diff.path, revertedLines });
+  }
+  return reverts;
+}
+
+// ---------------------------------------------------------------------------------------
 // Dispute file
 // ---------------------------------------------------------------------------------------
 
@@ -374,6 +447,26 @@ export async function readFixDiff(baseSha: string, cwd: string): Promise<FixFile
   return diffs;
 }
 
+// The ticket base branch's line set for each path in the round's diff, read for content-revert
+// detection. `baseRef` is a branch name (the PR base, resolved control-plane-side via findOpenPR),
+// so it is fetched once before reading blobs -- a fix grant's checkout is the PR head branch and
+// need not already have the base tip. THROWS on a fetch failure (via git()); the caller DEGRADES
+// that to "skip content-revert detection and re-gate" -- deliberately NOT the evasion scanError
+// path, since content-revert is best-effort and off by default (see buildFixVerdict).
+async function readBaseLines(
+  baseRef: string,
+  paths: readonly string[],
+  cwd: string,
+): Promise<Map<string, Set<string>>> {
+  await git(['fetch', '--depth=1', 'origin', baseRef], cwd);
+  const map = new Map<string, Set<string>>();
+  for (const path of paths) {
+    const content = await blobAt('FETCH_HEAD', path, cwd);
+    map.set(path, isText(content) ? contentLineset(content) : new Set<string>());
+  }
+  return map;
+}
+
 // Read the fixer's dispute file out of the checkout. Absent (the ordinary case) yields [].
 export async function readFixDisputes(cwd: string): Promise<FixDispute[]> {
   try {
@@ -391,12 +484,35 @@ export async function readFixDisputes(cwd: string): Promise<FixDispute[]> {
  * leaves us unable to say whether the round was an evasion, and an undecidable answer must be
  * SURFACED, never silently accepted. The control plane treats it as unjudged, which is the
  * existing convention for "a gate ran but reached no verdict" and routes to a human.
+ *
+ * `scanError` is reserved for the ALWAYS-ENFORCED evasion scan: a diff that could not be read from
+ * `baseSha`..HEAD leaves the evasion question undecidable, and that is escalated as unjudged.
+ *
+ * `baseRef` is the ticket base branch (the PR base), used only for the best-effort, off-by-default
+ * content-revert scan. It is deliberately handled in its OWN try so its failures cannot leak into
+ * the evasion channel: a base that could not be resolved (absent) OR could not be fetched/read
+ * DEGRADES to "skip content-revert detection and re-gate", preserving the evasion verdict already
+ * computed. Routing a transient `git fetch` blip into scanError would escalate the ticket to a
+ * human even with the feature off -- and would discard any real evasion found this round.
  */
-export async function buildFixVerdict(cwd: string, baseSha: string): Promise<FixVerdict> {
+export async function buildFixVerdict(cwd: string, baseSha: string, baseRef?: string): Promise<FixVerdict> {
   const disputes = await readFixDisputes(cwd);
+  let diffs: FixFileDiff[];
   try {
-    return { disputes, evasions: findEvasions(await readFixDiff(baseSha, cwd)) };
+    diffs = await readFixDiff(baseSha, cwd);
   } catch (err) {
     return { disputes, evasions: [], scanError: err instanceof Error ? err.message : String(err) };
+  }
+  const evasions = findEvasions(diffs);
+  if (!baseRef || baseRef.trim().length === 0) {
+    return { disputes, evasions };
+  }
+  try {
+    const baseLines = await readBaseLines(baseRef.trim(), diffs.map((d) => d.path), cwd);
+    return { disputes, evasions, contentReverts: findContentReverts(diffs, baseLines) };
+  } catch {
+    // Unfetchable/unreadable base: keep the evasion verdict and skip content reverts so the loop
+    // re-gates. Not a scanError -- this scan is off by default and must never escalate on its own.
+    return { disputes, evasions };
   }
 }

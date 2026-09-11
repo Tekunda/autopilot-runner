@@ -641,12 +641,27 @@ export interface FixEvasion {
   detail: string;
 }
 
+// A change a fix round made that NET-REVERTS author-added content back toward the ticket base
+// branch: a line the author added that the fix removed, or a line the author removed that the fix
+// re-added. Deterministic (see src/runner/fix-verdict.ts), computed over rendered/trimmed lines.
+// This complements the empty-PR guard (which only catches a fully-emptied PR) by catching PARTIAL
+// content reverts -- e.g. a fix that restored base's stale "11K" the author had changed to "130K".
+// The pipeline cannot adjudicate which value is business-correct, so a revert inside a protected
+// content path escalates to a human rather than re-gating a green-but-gutted PR.
+export interface FixContentRevert {
+  path: string;
+  revertedLines: number;
+}
+
 // A fix stage's own verdict on the round it just ran, computed runner-side in finalize and
 // carried back on the fix-report artifact. Empty disputes + empty evasions + no scanError is the
 // ordinary case: the round is judged by re-gating it, exactly as before.
 export interface FixVerdict {
   disputes: FixDispute[];
   evasions: FixEvasion[];
+  // Files where the round net-reverted author-authored content back toward the ticket base. The
+  // control plane classifies these against the tenant's protectedContentPaths; a match escalates.
+  contentReverts?: FixContentRevert[];
   // Why the evasion scan could not run. A diff that could not be COMPUTED and a diff that is
   // genuinely EMPTY are different facts, and only one of them means "no evasion" -- so an
   // undecidable scan is reported here and escalated as unjudged rather than read as clean.

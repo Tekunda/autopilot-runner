@@ -65,7 +65,7 @@ export interface FinalizeStageDeps {
    * Seam for the `fix` stage's self-verdict, so tests can supply one without a git checkout.
    * Defaults to buildFixVerdict() over `workspaceRoot`.
    */
-  readFixVerdict?: (cwd: string, baseSha: string) => Promise<FixVerdict>;
+  readFixVerdict?: (cwd: string, baseSha: string, baseRef?: string) => Promise<FixVerdict>;
   /**
    * The vendor step's own reason, when its failure was the PROVIDER REJECTING the request rather
    * than the agent running and failing (classifyProviderRejection over the execution log
@@ -253,6 +253,12 @@ export async function finalizeCodingStage(
       conclusion: outcome.conclusion,
       branchName,
     });
+    // The ticket base branch this fix targets. `branchName` is the PR HEAD for a fix (the round
+    // pushed onto it), so the grant's baseBranch would resolve to the fix's own commit -- the open
+    // PR is the only place the true base lives. Best-effort: absent, content-revert detection is
+    // skipped and the round is judged by evasions + re-gating exactly as before.
+    // eslint-disable-next-line no-restricted-syntax -- best-effort base lookup: a findOpenPR fault must skip content-revert detection (re-gate), never fail the round, matching the openPrWithRetry swallow above
+    const ticketBase = (await deps.vcsHost.findOpenPR(grant.repoId, branchName).catch(() => undefined))?.baseRef;
     // What the round says about ITSELF, before anyone re-gates it. Scanned here because this is
     // the only point in the pipeline that can still see both sides of the fix: the checkout holds
     // the fixer's dispute file, and the diff from `preAgentSha` to HEAD is what says whether the
@@ -261,6 +267,7 @@ export async function finalizeCodingStage(
     const verdict = await (deps.readFixVerdict ?? buildFixVerdict)(
       deps.workspaceRoot ?? process.cwd(),
       deps.preAgentSha ?? '',
+      ticketBase,
     );
     const verdictChecks = fixVerdictChecks(verdict);
     // FIRST in the list, because this is the fact that outranks every other one in the report: a

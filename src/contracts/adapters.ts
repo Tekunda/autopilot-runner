@@ -395,7 +395,11 @@ export interface VCSHost {
   // subtask reuses its existing PR instead of opening a second one for the same work
   // (src/runner/finalize-stage.ts) -- the live trace accumulated duplicate build PRs
   // because every build attempt opened a fresh PR from a fresh branch.
-  findOpenPR(repoId: string, headBranch: string): Promise<{ url: string; number: number } | undefined>;
+  // `baseRef` is the branch the PR targets. For a `fix` grant the checkout's own branch is the PR
+  // HEAD (the fix pushes onto it), so this is the only way the runner can recover the ticket base
+  // to scan a round for author-content reverts -- the grant's baseBranch would resolve to the fix's
+  // own commit.
+  findOpenPR(repoId: string, headBranch: string): Promise<{ url: string; number: number; baseRef: string } | undefined>;
   // Every open PR targeting `baseBranch`. Used by the control plane's external-PR QA
   // sweep to find PRs it did not open itself (blog/SEO automations, human test->main
   // promotions) so it can QA them and publish the `qa` check they'd otherwise wait on

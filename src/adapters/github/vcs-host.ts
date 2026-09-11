@@ -22,6 +22,7 @@ interface GhRef {
 interface GhPull {
   number: number;
   html_url: string;
+  base: { ref: string };
 }
 
 interface GhListPull {
@@ -1065,7 +1066,7 @@ export class GitHubVCSHost implements VCSHost {
   // load-bearing for a tenant started after that -- but it still is on canonicalRepoId's own
   // fallback path (a lookup that fails keeps the configured spelling) and for any ticket/tenant
   // whose store entries predate this change.
-  async findOpenPR(repoId: string, headBranch: string): Promise<{ url: string; number: number } | undefined> {
+  async findOpenPR(repoId: string, headBranch: string): Promise<{ url: string; number: number; baseRef: string } | undefined> {
     const owner = repoId.split('/')[0];
     const head = encodeURIComponent(`${owner}:${headBranch}`);
     const pulls = await this.client.requestOptional<GhPull[]>(
@@ -1073,7 +1074,7 @@ export class GitHubVCSHost implements VCSHost {
       `/repos/${repoId}/pulls?state=open&head=${head}&per_page=1`,
     );
     const pr = pulls?.[0];
-    return pr ? { url: pr.html_url, number: pr.number } : undefined;
+    return pr ? { url: pr.html_url, number: pr.number, baseRef: pr.base.ref } : undefined;
   }
 
   async listOpenPRs(repoId: string, baseBranch: string): Promise<OpenPR[]> {
