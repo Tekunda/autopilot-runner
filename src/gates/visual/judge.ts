@@ -125,11 +125,17 @@ const FETCH_TIMEOUT_STATUS = 408;
 // defect. Carries the HTTP status (429/529) and the provider's error detail for the finding.
 export class VisionRateLimitError extends Error {
   readonly status: number;
+  // The compact rate-limit bracket (see formatRateLimitBracket) built from THIS throttled response's
+  // own headers -- present ONLY when the error was raised from a route that made a fresh throttled
+  // call. A short-circuited route (rate-limit raised WITHOUT a new call) and a spent fetch-timeout
+  // (no response to read) leave it undefined, so the gate appends nothing for those.
+  readonly diagnostic?: string;
 
-  constructor(status: number, detail: string) {
+  constructor(status: number, detail: string, diagnostic?: string) {
     super(`vision judge: model API rate-limited (${status})${detail ? ` ${detail}` : ''}`);
     this.name = 'VisionRateLimitError';
     this.status = status;
+    if (diagnostic) this.diagnostic = diagnostic;
   }
 }
 
@@ -344,6 +350,91 @@ export function retryBackoffMs(attempt: number, retryAfter: string | null, now: 
   return Math.round(window / 2 + Math.random() * (window / 2));
 }
 
+// The standard, non-secret rate-limit RESPONSE headers Anthropic returns on a 429/529, read into a
+// struct. Never reads the credential or any request header, so the whole struct is safe to surface.
+// Every field is the raw header value or null when the response omits it.
+export interface RateLimitInfo {
+  status: number;
+  retryAfter: string | null;
+  inputTokensLimit: string | null;
+  inputTokensRemaining: string | null;
+  inputTokensReset: string | null;
+  requestsLimit: string | null;
+  requestsRemaining: string | null;
+  requestsReset: string | null;
+  tokensLimit: string | null;
+  tokensRemaining: string | null;
+  tokensReset: string | null;
+  requestId: string | null;
+}
+
+// Pull the rate-limit response headers off a throttled response into a RateLimitInfo. Reads ONLY the
+// standard rate-limit headers -- never the credential -- so its result is safe to log AND to surface.
+export function readRateLimitHeaders(res: Response): RateLimitInfo {
+  const h = (name: string): string | null => res.headers.get(name);
+  return {
+    status: res.status,
+    retryAfter: h('retry-after'),
+    inputTokensLimit: h('anthropic-ratelimit-input-tokens-limit'),
+    inputTokensRemaining: h('anthropic-ratelimit-input-tokens-remaining'),
+    inputTokensReset: h('anthropic-ratelimit-input-tokens-reset'),
+    requestsLimit: h('anthropic-ratelimit-requests-limit'),
+    requestsRemaining: h('anthropic-ratelimit-requests-remaining'),
+    requestsReset: h('anthropic-ratelimit-requests-reset'),
+    tokensLimit: h('anthropic-ratelimit-tokens-limit'),
+    tokensRemaining: h('anthropic-ratelimit-tokens-remaining'),
+    tokensReset: h('anthropic-ratelimit-tokens-reset'),
+    requestId: h('request-id'),
+  };
+}
+
+// This request's magnitude: how many images it carried and the on-wire base64 byte total. Used by
+// both the stderr diagnostic and the surfaced bracket to show whether a 429 is a big-request problem.
+function imageMetrics(input: JudgeInput): { images: number; b64Bytes: number } {
+  let b64Bytes = 0;
+  for (const shot of input.shots) b64Bytes += shot.screenshot.base64.length;
+  return { images: input.shots.length, b64Bytes };
+}
+
+const orQuestion = (value: string | null): string => value ?? '?';
+
+// The FULL stderr diagnostic line: every rate-limit header plus the model and this call's magnitude,
+// as `key=value; ...`. Missing header -> `?`. This is the exact content #599's `[vision-429-diag]`
+// line carries, factored out so the throw path can reuse the same header read.
+export function formatRateLimitInfo(info: RateLimitInfo, model: string, images: number, b64Bytes: number): string {
+  return [
+    `status=${info.status}`,
+    `retry-after=${orQuestion(info.retryAfter)}`,
+    `input-tokens-limit=${orQuestion(info.inputTokensLimit)}`,
+    `input-tokens-remaining=${orQuestion(info.inputTokensRemaining)}`,
+    `input-tokens-reset=${orQuestion(info.inputTokensReset)}`,
+    `requests-limit=${orQuestion(info.requestsLimit)}`,
+    `requests-remaining=${orQuestion(info.requestsRemaining)}`,
+    `requests-reset=${orQuestion(info.requestsReset)}`,
+    `tokens-limit=${orQuestion(info.tokensLimit)}`,
+    `tokens-remaining=${orQuestion(info.tokensRemaining)}`,
+    `tokens-reset=${orQuestion(info.tokensReset)}`,
+    `request-id=${orQuestion(info.requestId)}`,
+    `model=${model}`,
+    `images=${images}`,
+    `approx-input-b64-bytes=${b64Bytes}`,
+  ].join('; ');
+}
+
+// The COMPACT one-bracket form folded into the operator-visible 429 skip reason: the input-tokens
+// limit/remaining/reset (which tells a low-tier credential apart from cross-run saturation), the
+// server's Retry-After, the model, and this call's magnitude. Missing header -> `?`. Never the
+// credential. Kept short on purpose -- the full picture is in the stderr diagnostic.
+export function formatRateLimitBracket(info: RateLimitInfo, model: string, images: number, b64Bytes: number): string {
+  return [
+    `in-tok limit=${orQuestion(info.inputTokensLimit)} rem=${orQuestion(info.inputTokensRemaining)} reset=${orQuestion(info.inputTokensReset)}`,
+    `retry-after=${orQuestion(info.retryAfter)}`,
+    `model=${model}`,
+    `imgs=${images}`,
+    `~b64=${b64Bytes}`,
+  ].join('; ');
+}
+
 // Emit ONE stderr line describing a retryable (429/529) response so a systematic first-call throttle
 // can be diagnosed from the logs alone: the account's input-tokens-per-minute limit vs remaining
 // tells a low tier apart from aggregate cross-runner exhaustion, Retry-After is what the server asks
@@ -356,28 +447,8 @@ export function retryBackoffMs(attempt: number, retryAfter: string | null, now: 
 function logRateLimitDiagnostic(res: Response, model: string, input: JudgeInput): void {
   if (!RETRYABLE_STATUSES.has(res.status)) return;
   try {
-    const h = (name: string): string => res.headers.get(name) ?? '?';
-    const images = input.shots.length;
-    let b64Bytes = 0;
-    for (const shot of input.shots) b64Bytes += shot.screenshot.base64.length;
-    const line = [
-      `status=${res.status}`,
-      `retry-after=${h('retry-after')}`,
-      `input-tokens-limit=${h('anthropic-ratelimit-input-tokens-limit')}`,
-      `input-tokens-remaining=${h('anthropic-ratelimit-input-tokens-remaining')}`,
-      `input-tokens-reset=${h('anthropic-ratelimit-input-tokens-reset')}`,
-      `requests-limit=${h('anthropic-ratelimit-requests-limit')}`,
-      `requests-remaining=${h('anthropic-ratelimit-requests-remaining')}`,
-      `requests-reset=${h('anthropic-ratelimit-requests-reset')}`,
-      `tokens-limit=${h('anthropic-ratelimit-tokens-limit')}`,
-      `tokens-remaining=${h('anthropic-ratelimit-tokens-remaining')}`,
-      `tokens-reset=${h('anthropic-ratelimit-tokens-reset')}`,
-      `request-id=${h('request-id')}`,
-      `model=${model}`,
-      `images=${images}`,
-      `approx-input-b64-bytes=${b64Bytes}`,
-    ].join('; ');
-    console.error(`[vision-429-diag] ${line}`);
+    const { images, b64Bytes } = imageMetrics(input);
+    console.error(`[vision-429-diag] ${formatRateLimitInfo(readRateLimitHeaders(res), model, images, b64Bytes)}`);
   } catch (diagErr) {
     // Diagnostics must never break the retry path; a fault building the line is noted, not thrown.
     console.warn(
@@ -385,6 +456,13 @@ function logRateLimitDiagnostic(res: Response, model: string, input: JudgeInput)
         `${diagErr instanceof Error ? diagErr.message : String(diagErr)}`,
     );
   }
+}
+
+// The compact bracket contents to attach to a surfaced 429/529, built from the throttled response's
+// own headers. Only a route that made a fresh throttled call has a Response to read this from.
+function rateLimitDiagnostic(res: Response, model: string, input: JudgeInput): string {
+  const { images, b64Bytes } = imageMetrics(input);
+  return formatRateLimitBracket(readRateLimitHeaders(res), model, images, b64Bytes);
 }
 
 // True for the abort our own per-call timeout raises on a fetch that stopped responding. The timer
@@ -513,8 +591,13 @@ export function createAnthropicVisionJudge(opts: AnthropicVisionJudgeOptions = {
               return '';
             });
             if (RETRYABLE_STATUSES.has(res.status)) {
-              // Retries exhausted on a rate-limit/overload -- an infra failure, distinctly typed.
-              throw new VisionRateLimitError(res.status, detail.slice(0, 200));
+              // Retries exhausted on a rate-limit/overload -- an infra failure, distinctly typed. Carry
+              // this response's own rate-limit numbers so the gate can fold them into the skip reason.
+              throw new VisionRateLimitError(
+                res.status,
+                detail.slice(0, 200),
+                rateLimitDiagnostic(res, model, input),
+              );
             }
             throw new Error(`vision judge: model API returned ${res.status} ${detail.slice(0, 200)}`);
           }

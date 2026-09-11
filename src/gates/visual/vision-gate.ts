@@ -233,6 +233,14 @@ function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+// The compact rate-limit bracket to fold into a surfaced 429 reason, or '' when the error carries no
+// diagnostic -- a short-circuited route raises VisionRateLimitError WITHOUT a fresh throttled call, so
+// it has no response numbers to show and its reason stays exactly as before. Isolated as its own
+// function so the branch never touches the render loop's complexity.
+function rateLimitSuffix(err: VisionRateLimitError): string {
+  return err.diagnostic ? ` [${err.diagnostic}]` : '';
+}
+
 // Turn the diff into the SET of routes to screenshot, deduped by path (first reason wins). A
 // changed content file -> its own route; any changed shared asset -> the representative sample;
 // `alwaysCheck` routes -> always, independent of the diff.
@@ -403,9 +411,10 @@ export function createVisionGate(opts: { id: string; profile: VisionRubricProfil
               // Rate-limited past the retry budget -> inconclusive, not a defect. The whole route's
               // batch could not be judged, so every viewport is labeled inconclusive. Flip the
               // short-circuit so the remaining routes skip judging (see the loop guard above).
+              const suffix = rateLimitSuffix(err);
               for (const shot of shots) {
                 inconclusive.push(
-                  `${viewportLabel(target, shot.viewport)}: could not verify -- model API rate-limited (${err.status}); transient infra issue, not a visual defect`,
+                  `${viewportLabel(target, shot.viewport)}: could not verify -- model API rate-limited (${err.status}); transient infra issue, not a visual defect${suffix}`,
                 );
               }
               rateLimited = true;
