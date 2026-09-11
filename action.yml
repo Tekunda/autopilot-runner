@@ -208,6 +208,12 @@ runs:
         # tooling, and a bad publish reached every tenant's heavy gate on its own schedule. Bump
         # this deliberately. `npx playwright` then resolves the version just installed.
         npm install playwright@1.62.1 --no-save
+        # Blacksmith runners have intermittently flaky egress to the Ubuntu apt mirrors, and
+        # `--with-deps` shells apt-get with no retry -- one transient "Connection failed" fails the
+        # whole step before any gate runs. Tell apt to retry transient mirror failures itself, so a
+        # flake no longer hard-fails a step we cannot afford to drop `--with-deps` from (the image
+        # is not guaranteed to ship all Chromium libs; libnss3 was among the failures).
+        echo 'Acquire::Retries "5";' | sudo tee /etc/apt/apt.conf.d/80-autopilot-retries
         npx playwright install --with-deps chromium
 
     # EVERY gate stage (fast and heavy): provision the dependency scanner the `cve` gate needs for

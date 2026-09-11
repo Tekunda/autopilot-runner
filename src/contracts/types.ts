@@ -751,7 +751,17 @@ export interface StageResult {
   // (is_error:false, in budget, conclusion 'success') but wrote no verdict artifact -- an
   // infra/agent-behavior flake, not a content verdict, so the caller can retry it separately
   // and message it honestly rather than surfacing a content-less failure.
-  errorReason?: 'timeout' | 'workflow-drift' | 'run-not-found' | 'transient' | 'no-verdict-clean-run';
+  // 'gate-no-report' is the gate-stage mirror of that: a NON-success conclusion with no
+  // gate-report artifact means provisioning/setup died before any gate produced a verdict
+  // (e.g. a flaky apt mirror hard-failing the browser install), so it is infra, not a fixable
+  // gate failure -- classify it 'error' so it never reaches the Autofixer.
+  errorReason?:
+    | 'timeout'
+    | 'workflow-drift'
+    | 'run-not-found'
+    | 'transient'
+    | 'no-verdict-clean-run'
+    | 'gate-no-report';
   // Set by dispatchStage/checkStage so the caller can persist the in-flight run marker and,
   // on later ticks, re-correlate the same run (cross-tick deadline is anchored on
   // runCreatedAt -- the run's immutable created_at -- so a hung run still escalates).
