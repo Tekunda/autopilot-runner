@@ -231,13 +231,28 @@ runs:
         npm install playwright@1.62.1 --no-save
         # AUTOPILOT_PW_BAKED is exported by runner.yml ONLY when this stage runs inside the
         # prebuilt Playwright container (mcr.microsoft.com/playwright:v1.62.1-jammy, tag coupled
-        # to the pin above -- pw-container-version.test.ts fails a desync). That image ships
-        # Chromium baked at /ms-playwright plus every OS shared lib, so provisioning touches ZERO
-        # apt: skip both the apt-retry write and `--with-deps`. The npm install above still runs --
-        # the image does NOT ship the playwright NPM package, and the gate's dynamic
-        # `import('playwright')` resolves it from this action dir (see the note at the top of this
-        # step). PLAYWRIGHT_BROWSERS_PATH is set by the image, but we assert it into GITHUB_ENV
-        # when unset so the later e2e/visual-fix steps' `--no-install` resolves the baked browsers.
+        # to the pin above -- pw-container-version.test.ts fails a desync). What that image gives us
+        # is the baked OS SHARED LIBRARIES: every Chromium system dependency is already present, so
+        # provisioning touches ZERO apt -- skip both the apt-retry write and `--with-deps`. That is
+        # the whole reason the container exists (it cures the flaky-egress apt-mirror failures the
+        # host runner hits, e.g. libnss3).
+        #
+        # The BROWSER BINARY, however, is NOT reliably baked into the image and must still be
+        # provisioned. The launch-failure diagnostic (#596) observed the container running with NO
+        # chrome-headless-shell under /ms-playwright, and the render gates crashed on launch with
+        # `icu_util.cc: Invalid file descriptor to ICU data received` + SIGTRAP (an incomplete
+        # browser payload). So we run `npx playwright install chromium` WITHOUT `--with-deps`: a
+        # Playwright-CDN download (not apt -> the mirror flake cannot recur) that fetches chromium
+        # incl. chrome-headless-shell into /ms-playwright when absent and is a fast no-op when
+        # already present. It uses the playwright@1.62.1 driver the npm install above provisioned;
+        # that npm install runs regardless because the image does NOT ship the playwright NPM
+        # package and the gate's dynamic `import('playwright')` resolves it from this action dir
+        # (see the note at the top of this step). PLAYWRIGHT_BROWSERS_PATH is exported into THIS
+        # shell (so the install writes to /ms-playwright here) and asserted into GITHUB_ENV when
+        # unset so the later e2e/visual-fix steps' `--no-install` resolves the same browsers.
+        #
+        # So AUTOPILOT_PW_BAKED means "system deps are baked, skip apt + --with-deps", NOT "the
+        # browser binary is baked".
         #
         # When the sentinel is UNSET (host runner, tenant has not adopted the container) this is
         # today's behavior verbatim -- the apt-retry mitigation plus `--with-deps` -- so the change
@@ -246,6 +261,10 @@ runs:
           if [ -z "$PLAYWRIGHT_BROWSERS_PATH" ]; then
             echo "PLAYWRIGHT_BROWSERS_PATH=/ms-playwright" >> "$GITHUB_ENV"
           fi
+          # Export into THIS shell too: GITHUB_ENV only affects LATER steps, but the install below
+          # runs now and must write to /ms-playwright, not the default per-user cache.
+          export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-/ms-playwright}"
+          npx playwright install chromium
         else
           # Blacksmith runners have intermittently flaky egress to the Ubuntu apt mirrors, and
           # `--with-deps` shells apt-get with no retry -- one transient "Connection failed" fails the
