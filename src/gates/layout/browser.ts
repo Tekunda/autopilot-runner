@@ -7,7 +7,7 @@
 // fake browser and needs no real Chromium in the loop. The default implementation is Playwright,
 // launched runner-side in the dedicated heavy stage -- the only stage with a browser.
 
-import { settledGoto, CHROMIUM_LAUNCH_OPTIONS } from '../browser-nav.ts';
+import { settledGoto, CHROMIUM_LAUNCH_OPTIONS, launchWithDiagnostics } from '../browser-nav.ts';
 import type { Box, MatchGeometry, MeasureSpec, RawMeasurements } from './rules.ts';
 
 export interface Viewport {
@@ -111,7 +111,7 @@ export async function createPlaywrightLayoutBrowser(
 ): Promise<LayoutBrowser> {
   const specifier = 'playwright';
   const { chromium } = (await import(specifier)) as unknown as PlaywrightModule;
-  const browser = await chromium.launch(CHROMIUM_LAUNCH_OPTIONS);
+  const browser = await launchWithDiagnostics(() => chromium.launch(CHROMIUM_LAUNCH_OPTIONS));
   const timeout = opts.navigationTimeoutMs ?? 30_000;
   return {
     async measure(url: string, viewport: Viewport, spec: MeasureSpec): Promise<RawMeasurements> {
