@@ -215,7 +215,14 @@ export async function renamedPathsSince(base: string, cwd: string = process.cwd(
 // `relPath` must be repo-root-relative -- exactly the shape a PR's changed-file list carries, and
 // `cwd` the checkout root those paths are relative to.
 async function showAtBase(base: string, relPath: string, cwd: string): Promise<string | undefined> {
-  const { exitCode, stdout, stderr } = await runCommand('git', ['show', `${base}:${relPath}`], cwd);
+  // LC_ALL=C so git's absence messages come back in English -- they are matched below, and git
+  // localizes them via gettext, so a tenant runner with a non-C locale would otherwise match
+  // neither pattern and throw on every legitimately-absent (new/renamed) blob. runCommand's env
+  // REPLACES the child env, so process.env is spread to keep PATH et al. Mirrors blobAt in
+  // fix-verdict.ts, which draws the same absence-vs-error distinction off the same messages.
+  const { exitCode, stdout, stderr } = await runCommand('git', ['show', `${base}:${relPath}`], cwd, {
+    env: { ...process.env, LC_ALL: 'C' },
+  });
   if (exitCode === 0) return stdout;
   // git's two "the tree is fine, this path simply is not in it" messages. Matched on the message
   // and not the exit code, because git spends 128 on every fatal -- absence and corruption alike.

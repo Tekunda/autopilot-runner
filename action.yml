@@ -754,8 +754,8 @@ runs:
         if ! git diff --cached --quiet; then
           git commit -m "Delivery Autopilot: $STAGE"
         fi
-        # Empirical identity check: prove no pushed commit is authored claude[bot]. Lists every
-        # commit this stage adds on top of base with its author AND committer.
+        # Commit-identity log, printed for operator review: lists every commit this stage adds on
+        # top of base with its author AND committer. Nothing parses or gates on this output.
         echo "Pipeline commit identities ($BASE_REF..HEAD):"
         git log "origin/$BASE_REF..HEAD" --format='%h %an <%ae> / %cn <%ce>' || true
         if [ "$(git rev-parse HEAD)" != "$(git rev-parse "origin/$BASE_REF")" ]; then
