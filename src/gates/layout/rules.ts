@@ -1,3 +1,6 @@
+/* eslint-disable max-lines -- the single-file pure rule core (see header): one cohesive interface +
+   builder + measure-spec + evaluator block per rule type. Splitting it would fragment the registry
+   this file deliberately is. */
 // The PURE, deterministic core of the layout-rules gate (the false-green post-mortem's
 // "Deterministic layout rules, declared per tenant and repo"). It knows nothing about a browser: it
 // turns a declared rule set into a MEASUREMENT SPEC (the DOM queries whose geometry the in-page
@@ -115,13 +118,39 @@ export interface NoWrapRule {
   viewports?: number[];
 }
 
+// Any element matching `selector` whose RENDERED box is smaller than a configured floor fails:
+// width below `min_width_px` or height below `min_height_px` (each optional; at least one required).
+// Guards against an element (a logo, an icon, a tap target) shrunk below a comfortable/legible size
+// to force a fit. Zero-area matches are treated as not-rendered (N/A), not as "shrunk to nothing" --
+// a display:none element is absent, not undersized.
+export interface MinRenderedSizeRule {
+  type: 'min_rendered_size';
+  selector: string;
+  min_width_px?: number;
+  min_height_px?: number;
+  viewports?: number[];
+}
+
+// Within each `within` match, direct children sharing a visual row must keep at least `min_px`
+// horizontal space between adjacent children. A smaller (or negative/overlapping) gap fails: the
+// row is crammed. Children are grouped into rows exactly like sibling_height_delta/no_wrap; only
+// gaps BETWEEN adjacent children on the SAME row are measured (vertical stacking is no_wrap's job).
+export interface MinChildGapRule {
+  type: 'min_child_gap';
+  within: string;
+  min_px: number;
+  viewports?: number[];
+}
+
 export type LayoutRule =
   | SiblingHeightDeltaRule
   | ContentWidthRatioRule
   | LargestEmptyRegionRule
   | SectionHeightRule
   | HorizontalOverflowRule
-  | NoWrapRule;
+  | NoWrapRule
+  | MinRenderedSizeRule
+  | MinChildGapRule;
 
 export const DEFAULT_SECTION_SELECTOR = 'section[id]';
 
@@ -195,12 +224,50 @@ function buildFlowRule(type: string, body: Record<string, unknown>): LayoutRule 
   }
 }
 
+// Build the size/gap family (min_rendered_size, min_child_gap), or `undefined` when `type` is not
+// one of them so the caller falls through. `null` still means a recognized type whose required
+// fields were missing/mistyped.
+function buildSizeRule(type: string, body: Record<string, unknown>): LayoutRule | null | undefined {
+  switch (type) {
+    case 'min_rendered_size': {
+      const selector = asString(body.selector);
+      const min_width_px = asNumber(body.min_width_px);
+      const min_height_px = asNumber(body.min_height_px);
+      if (selector === undefined || (min_width_px === undefined && min_height_px === undefined)) return null;
+      return withViewports(
+        {
+          type,
+          selector,
+          ...(min_width_px !== undefined ? { min_width_px } : {}),
+          ...(min_height_px !== undefined ? { min_height_px } : {}),
+        },
+        body,
+      );
+    }
+    case 'min_child_gap': {
+      const within = asString(body.within);
+      const min_px = asNumber(body.min_px);
+      return within !== undefined && min_px !== undefined ? withViewports({ type, within, min_px }, body) : null;
+    }
+    default:
+      return undefined;
+  }
+}
+
+// The flow (overflow/no-wrap) and size (min-size/gap) families as one dispatch: the first family
+// that recognizes `type` wins, `undefined` when neither does. A recognized-but-malformed rule
+// returns null from its family and is NOT retried against the next.
+function buildFamilyRule(type: string, body: Record<string, unknown>): LayoutRule | null | undefined {
+  const flowRule = buildFlowRule(type, body);
+  return flowRule !== undefined ? flowRule : buildSizeRule(type, body);
+}
+
 // Build a typed rule from an already-flattened `{ type, ...fields }` object, or null if a required
 // field is missing/mistyped. Returning null (rather than throwing) keeps a single malformed rule
 // from wedging the whole gate -- it simply does not run.
 function buildRule(type: string, body: Record<string, unknown>): LayoutRule | null {
-  const flowRule = buildFlowRule(type, body);
-  if (flowRule !== undefined) return flowRule;
+  const familyRule = buildFamilyRule(type, body);
+  if (familyRule !== undefined) return familyRule;
   switch (type) {
     case 'sibling_height_delta': {
       const within = asString(body.within);
@@ -238,6 +305,8 @@ const RULE_TYPES = new Set([
   'section_height',
   'horizontal_overflow',
   'no_wrap',
+  'min_rendered_size',
+  'min_child_gap',
 ]);
 
 const MALFORMED_FIELD_REASON = 'missing or malformed required field';
@@ -330,6 +399,10 @@ export function measureSpecFor(rules: readonly LayoutRule[]): MeasureSpec {
       case 'horizontal_overflow':
         return { selector: rule.selector, overflow: true };
       case 'no_wrap':
+        return { selector: rule.within, children: true };
+      case 'min_rendered_size':
+        return { selector: rule.selector };
+      case 'min_child_gap':
         return { selector: rule.within, children: true };
     }
   });
@@ -529,6 +602,66 @@ function evaluateNoWrap(rule: NoWrapRule, geometry: RuleGeometry): LayoutFinding
   ];
 }
 
+function evaluateMinRenderedSize(rule: MinRenderedSizeRule, geometry: RuleGeometry): LayoutFinding[] {
+  if (geometry.matches.length === 0) return [naFinding(rule, rule.selector)];
+  const rendered = geometry.matches.map((match) => match.box).filter((box) => box.width > 0 || box.height > 0);
+  // Matches existed but none rendered a box -> could not measure (N/A), not "shrunk to nothing".
+  if (rendered.length === 0) return [naFinding(rule, rule.selector)];
+  const violations = rendered.filter(
+    (box) =>
+      (rule.min_width_px !== undefined && box.width < rule.min_width_px) ||
+      (rule.min_height_px !== undefined && box.height < rule.min_height_px),
+  );
+  if (violations.length === 0) return [];
+  const worst = violations.reduce((a, b) =>
+    rule.min_width_px !== undefined ? (b.width < a.width ? b : a) : b.height < a.height ? b : a,
+  );
+  const floor =
+    rule.min_width_px !== undefined && rule.min_height_px !== undefined
+      ? `min ${px(rule.min_width_px)} x ${px(rule.min_height_px)}`
+      : rule.min_width_px !== undefined
+        ? `min width ${px(rule.min_width_px)}`
+        : `min height ${px(rule.min_height_px!)}`;
+  const els = `${violations.length} element${violations.length === 1 ? '' : 's'}`;
+  return [
+    {
+      ruleType: rule.type,
+      status: 'fail',
+      message: `min_rendered_size '${rule.selector}': ${els} below floor (${floor}); worst ${px(worst.width)} x ${px(worst.height)}`,
+    },
+  ];
+}
+
+// The smallest horizontal gap between adjacent children on one visual row (children sorted by left;
+// gap = next.left - (prev.left + prev.width)). A single-child row has no adjacent pair -> null.
+function tightestRowGap(row: readonly Box[]): number | null {
+  if (row.length < 2) return null;
+  const sorted = [...row].sort((a, b) => a.left - b.left);
+  let smallest: number | null = null;
+  for (let i = 1; i < sorted.length; i += 1) {
+    const gap = sorted[i]!.left - (sorted[i - 1]!.left + sorted[i - 1]!.width);
+    if (smallest === null || gap < smallest) smallest = gap;
+  }
+  return smallest;
+}
+
+function evaluateMinChildGap(rule: MinChildGapRule, geometry: RuleGeometry): LayoutFinding[] {
+  if (geometry.matches.length === 0) return [naFinding(rule, rule.within)];
+  const violations = geometry.matches
+    .flatMap((match) => groupIntoRows(match.children ?? []).map((row) => tightestRowGap(row)))
+    .filter((gap): gap is number => gap !== null && gap < rule.min_px);
+  if (violations.length === 0) return [];
+  const worst = Math.min(...violations);
+  const rows = `${violations.length} row${violations.length === 1 ? '' : 's'}`;
+  return [
+    {
+      ruleType: rule.type,
+      status: 'fail',
+      message: `min_child_gap within '${rule.within}': ${rows} below ${px(rule.min_px)}; worst ${px(worst)} gap`,
+    },
+  ];
+}
+
 // Evaluate every rule against the measurements collected for it (aligned by index) and return the
 // findings: `fail` for a real violation, `na` for a rule that had nothing to measure. A passing rule
 // contributes no finding. This is the whole verdict surface -- the gate blocks iff any `fail` exists.
@@ -554,6 +687,12 @@ export function evaluateRules(rules: readonly LayoutRule[], measurements: RawMea
         break;
       case 'no_wrap':
         findings.push(...evaluateNoWrap(rule, geometry));
+        break;
+      case 'min_rendered_size':
+        findings.push(...evaluateMinRenderedSize(rule, geometry));
+        break;
+      case 'min_child_gap':
+        findings.push(...evaluateMinChildGap(rule, geometry));
         break;
     }
   });
