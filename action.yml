@@ -208,13 +208,32 @@ runs:
         # tooling, and a bad publish reached every tenant's heavy gate on its own schedule. Bump
         # this deliberately. `npx playwright` then resolves the version just installed.
         npm install playwright@1.62.1 --no-save
-        # Blacksmith runners have intermittently flaky egress to the Ubuntu apt mirrors, and
-        # `--with-deps` shells apt-get with no retry -- one transient "Connection failed" fails the
-        # whole step before any gate runs. Tell apt to retry transient mirror failures itself, so a
-        # flake no longer hard-fails a step we cannot afford to drop `--with-deps` from (the image
-        # is not guaranteed to ship all Chromium libs; libnss3 was among the failures).
-        echo 'Acquire::Retries "5";' | sudo tee /etc/apt/apt.conf.d/80-autopilot-retries
-        npx playwright install --with-deps chromium
+        # AUTOPILOT_PW_BAKED is exported by runner.yml ONLY when this stage runs inside the
+        # prebuilt Playwright container (mcr.microsoft.com/playwright:v1.62.1-jammy, tag coupled
+        # to the pin above -- pw-container-version.test.ts fails a desync). That image ships
+        # Chromium baked at /ms-playwright plus every OS shared lib, so provisioning touches ZERO
+        # apt: skip both the apt-retry write and `--with-deps`. The npm install above still runs --
+        # the image does NOT ship the playwright NPM package, and the gate's dynamic
+        # `import('playwright')` resolves it from this action dir (see the note at the top of this
+        # step). PLAYWRIGHT_BROWSERS_PATH is set by the image, but we assert it into GITHUB_ENV
+        # when unset so the later e2e/visual-fix steps' `--no-install` resolves the baked browsers.
+        #
+        # When the sentinel is UNSET (host runner, tenant has not adopted the container) this is
+        # today's behavior verbatim -- the apt-retry mitigation plus `--with-deps` -- so the change
+        # is inert and backward-compatible until a tenant opts in via its runner.yml.
+        if [ -n "$AUTOPILOT_PW_BAKED" ]; then
+          if [ -z "$PLAYWRIGHT_BROWSERS_PATH" ]; then
+            echo "PLAYWRIGHT_BROWSERS_PATH=/ms-playwright" >> "$GITHUB_ENV"
+          fi
+        else
+          # Blacksmith runners have intermittently flaky egress to the Ubuntu apt mirrors, and
+          # `--with-deps` shells apt-get with no retry -- one transient "Connection failed" fails the
+          # whole step before any gate runs. Tell apt to retry transient mirror failures itself, so a
+          # flake no longer hard-fails a step we cannot afford to drop `--with-deps` from (the image
+          # is not guaranteed to ship all Chromium libs; libnss3 was among the failures).
+          echo 'Acquire::Retries "5";' | sudo tee /etc/apt/apt.conf.d/80-autopilot-retries
+          npx playwright install --with-deps chromium
+        fi
 
     # EVERY gate stage (fast and heavy): provision the dependency scanner the `cve` gate needs for
     # the tree shapes npm/Yarn cannot read -- Python, Go, Rust, Ruby, Java, PHP, and JavaScript's
