@@ -401,10 +401,31 @@ async function git(args: string[], cwd: string): Promise<string> {
   return stdout;
 }
 
-// Content of `path` at `rev`, or '' when the file does not exist there (added or deleted).
-async function blobAt(rev: string, path: string, cwd: string): Promise<string> {
-  const { exitCode, stdout } = await runCommand('git', ['show', `${rev}:${path}`], cwd, { maxBuffer: 32 * 1024 * 1024 });
-  return exitCode === 0 ? stdout : '';
+// Content of `path` at `rev`, or '' when the file GENUINELY does not exist there (added or
+// deleted). THROWS on any OTHER git failure -- a severed shallow object DB, an unresolvable rev,
+// an unreadable object -- rather than folding it into ''. This scanner feeds the fix-round evasion
+// and content-revert verdicts, and reading "git could not load this file" as "this file has no
+// content" would pass an evasion in a blob that simply failed to read: the same EMPTY-vs-could-not-
+// be-COMPUTED distinction git.ts:showAtBase draws and readFixDiff's own header promises. Absence is
+// matched on git's own two messages, and accepted only once the rev is confirmed to name a real
+// object -- those same messages also come back for a rev git cannot resolve at all.
+export async function blobAt(rev: string, path: string, cwd: string): Promise<string> {
+  // LC_ALL=C so git's absence messages come back in English -- they are matched below, and git
+  // localizes them via gettext, so a tenant runner with a non-C locale would otherwise match
+  // neither pattern and throw on every legitimately-absent (added/deleted) blob. runCommand's
+  // env REPLACES the child env, so process.env is spread to keep PATH et al.
+  const cEnv = { ...process.env, LC_ALL: 'C' };
+  const { exitCode, stdout, stderr } = await runCommand('git', ['show', `${rev}:${path}`], cwd, {
+    maxBuffer: 32 * 1024 * 1024,
+    env: cEnv,
+  });
+  if (exitCode === 0) return stdout;
+  if (/does not exist in|exists on disk, but not in/.test(stderr)) {
+    const verified = await runCommand('git', ['rev-parse', '--verify', '--quiet', `${rev}^{object}`], cwd);
+    if (verified.exitCode === 0) return '';
+    throw new Error(`git show ${rev}:${path} failed: "${rev}" names no object in this checkout`);
+  }
+  throw new Error(`git show ${rev}:${path} failed (exit ${exitCode}): ${stderr.trim()}`);
 }
 
 // Looks like text, i.e. worth comparing as rendered content. A NUL byte is git's own binary
