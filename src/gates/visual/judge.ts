@@ -344,6 +344,49 @@ export function retryBackoffMs(attempt: number, retryAfter: string | null, now: 
   return Math.round(window / 2 + Math.random() * (window / 2));
 }
 
+// Emit ONE stderr line describing a retryable (429/529) response so a systematic first-call throttle
+// can be diagnosed from the logs alone: the account's input-tokens-per-minute limit vs remaining
+// tells a low tier apart from aggregate cross-runner exhaustion, Retry-After is what the server asks
+// for, and the per-call image count / on-wire base64 size shows this request's magnitude. Reads only
+// standard, non-secret rate-limit response headers -- never the credential or any request header.
+// Every read is guarded (missing header -> `?`) and the whole thing is wrapped so a logging fault can
+// NEVER throw into the retry path. Emitted on EACH retryable response so a persistent 429 prints the
+// trend of `remaining`. A no-op for a non-retryable response, so the caller invokes it unconditionally
+// after every fetch and this decides -- keeping the retry loop's own branching (and complexity) as-is.
+function logRateLimitDiagnostic(res: Response, model: string, input: JudgeInput): void {
+  if (!RETRYABLE_STATUSES.has(res.status)) return;
+  try {
+    const h = (name: string): string => res.headers.get(name) ?? '?';
+    const images = input.shots.length;
+    let b64Bytes = 0;
+    for (const shot of input.shots) b64Bytes += shot.screenshot.base64.length;
+    const line = [
+      `status=${res.status}`,
+      `retry-after=${h('retry-after')}`,
+      `input-tokens-limit=${h('anthropic-ratelimit-input-tokens-limit')}`,
+      `input-tokens-remaining=${h('anthropic-ratelimit-input-tokens-remaining')}`,
+      `input-tokens-reset=${h('anthropic-ratelimit-input-tokens-reset')}`,
+      `requests-limit=${h('anthropic-ratelimit-requests-limit')}`,
+      `requests-remaining=${h('anthropic-ratelimit-requests-remaining')}`,
+      `requests-reset=${h('anthropic-ratelimit-requests-reset')}`,
+      `tokens-limit=${h('anthropic-ratelimit-tokens-limit')}`,
+      `tokens-remaining=${h('anthropic-ratelimit-tokens-remaining')}`,
+      `tokens-reset=${h('anthropic-ratelimit-tokens-reset')}`,
+      `request-id=${h('request-id')}`,
+      `model=${model}`,
+      `images=${images}`,
+      `approx-input-b64-bytes=${b64Bytes}`,
+    ].join('; ');
+    console.error(`[vision-429-diag] ${line}`);
+  } catch (diagErr) {
+    // Diagnostics must never break the retry path; a fault building the line is noted, not thrown.
+    console.warn(
+      `[vision-429-diag] could not emit the rate-limit diagnostic: ` +
+        `${diagErr instanceof Error ? diagErr.message : String(diagErr)}`,
+    );
+  }
+}
+
 // True for the abort our own per-call timeout raises on a fetch that stopped responding. The timer
 // aborts with a DOMException named 'TimeoutError'; a manual/other abort is 'AbortError'. Either means
 // "the request did not complete in time" -- transient infra we retry, not a defect.
@@ -446,6 +489,11 @@ export function createAnthropicVisionJudge(opts: AnthropicVisionJudgeOptions = {
           } finally {
             clearTimeout(timer);
           }
+
+          // Measurement first: log the rate-limit response detail on every throttled response,
+          // whether we retry it or surface it exhausted below (a no-op otherwise). Headers only,
+          // never the body.
+          logRateLimitDiagnostic(res, model, input);
 
           if (RETRYABLE_STATUSES.has(res.status) && attempt < maxRetries) {
             // Drain/cancel the unconsumed body so undici releases the socket before the backoff.
