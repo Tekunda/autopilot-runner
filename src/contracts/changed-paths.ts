@@ -19,14 +19,63 @@
 import type { SiteConfig } from './types.ts';
 
 // Glob subset, deliberately small: `**` (any number of path segments, including none), `*` and
-// `?` (within one segment). Enough for the shapes a CI paths-filter is written in
-// (`apps/<app>/**`, `content/**/<site>/**`, `yarn.lock`) and nothing more, so no
-// dependency is added for it.
+// `?` (within one segment), and `{a,b,c}` brace alternation (within one segment). Enough for the
+// shapes a CI paths-filter is written in (`apps/<app>/**`, `content/**/<site>/**`, `yarn.lock`,
+// `apps/{one,two}-web/**`) and nothing more, so no dependency is added for it.
 //
 // A pattern with NO wildcard is treated as a path OR a directory prefix (`packages` matches
 // `packages/ui/x.ts`), which is the inclusive reading -- see the safety rule above. Everything
 // else is anchored: a pattern matches the WHOLE repo-relative path, never a substring.
-function globToRegExp(pattern: string): RegExp {
+
+// Translate a brace-free segment fragment: escape regex metachars, map the in-segment wildcards
+// `*` -> `[^/]*` and `?` -> `[^/]` (neither ever crosses a path separator). This is the exact
+// per-segment translation the matcher used before brace support was added, so a fragment with no
+// braces compiles identically. (`{`/`}` are still in the escape class but a fragment routed here
+// never contains one.)
+function translateSegmentFragment(fragment: string): string {
+  return fragment.replace(/[.*+?^${}()|[\]\\]/g, (ch) => (ch === '*' ? '[^/]*' : ch === '?' ? '[^/]' : `\\${ch}`));
+}
+
+// Translate ONE path segment, expanding a well-formed `{a,b,c}` group to alternation `(?:a|b|c)`
+// whose alternatives are each themselves translated (so `{a.b,c}` treats the `.` literally). A `{`
+// with no matching `}` before the next `{` -- or a stray `}` -- is not a group and stays literal,
+// exactly as before brace support existed. A segment with no braces compiles identically to the
+// legacy per-segment `.replace`. Braces spanning a `/` are not supported (the pattern is split on
+// `/` before this runs), matching the deliberately-small subset above.
+function translateSegment(segment: string): string {
+  let out = '';
+  let i = 0;
+  while (i < segment.length) {
+    const ch = segment[i];
+    if (ch === '{') {
+      const close = segment.indexOf('}', i + 1);
+      const nextOpen = segment.indexOf('{', i + 1);
+      if (close !== -1 && (nextOpen === -1 || nextOpen > close)) {
+        const alts = segment.slice(i + 1, close).split(',').map(translateSegmentFragment);
+        out += `(?:${alts.join('|')})`;
+        i = close + 1;
+        continue;
+      }
+      // Not a well-formed group: keep the brace literal.
+      out += translateSegmentFragment('{');
+      i += 1;
+      continue;
+    }
+    if (ch === '}') {
+      out += translateSegmentFragment('}');
+      i += 1;
+      continue;
+    }
+    // Consume the run up to the next brace and translate it as one fragment, so `*`/`?` stay intact.
+    let j = i;
+    while (j < segment.length && segment[j] !== '{' && segment[j] !== '}') j += 1;
+    out += translateSegmentFragment(segment.slice(i, j));
+    i = j;
+  }
+  return out;
+}
+
+export function globToRegExp(pattern: string): RegExp {
   const segments = pattern.replace(/\/+$/, '').split('/');
   let source = '^';
   segments.forEach((segment, index) => {
@@ -38,11 +87,13 @@ function globToRegExp(pattern: string): RegExp {
       source += last ? '.*' : '(?:[^/]*/)*';
       return;
     }
-    source += segment.replace(/[.*+?^${}()|[\]\\]/g, (ch) => (ch === '*' ? '[^/]*' : ch === '?' ? '[^/]' : `\\${ch}`));
+    source += translateSegment(segment);
     if (!last) source += '/';
   });
-  // The wildcard-free directory-prefix reading. Only applied when the pattern names no wildcard
-  // at all; `apps/*` stays a one-segment match.
+  // The wildcard-free directory-prefix reading. Only applied when the pattern names no `*`/`?`
+  // wildcard; `apps/*` stays a one-segment match. A brace group expands to literal alternatives,
+  // each of which IS wildcard-free, so `apps/{one,two}-web` keeps the prefix reading --
+  // exactly as if the two literals had been listed separately, which is the inclusive safe reading.
   if (!/[*?]/.test(pattern)) source += '(?:/.*)?';
   return new RegExp(`${source}$`);
 }
