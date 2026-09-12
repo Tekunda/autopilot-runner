@@ -70,6 +70,10 @@ const DEFAULTS = {
   readyPath: '/',
   readyTimeoutMs: 120_000,
   readyIntervalMs: 1_000,
+  // Teardown: after SIGTERM, poll up to `stopMaxPolls` times (`stopPollMs` apart) for the server to
+  // exit before escalating to SIGKILL, so a process that traps/ignores SIGTERM cannot leak past it.
+  stopPollMs: 200,
+  stopMaxPolls: 50,
 };
 
 function defaultSleep(ms: number): Promise<void> {
@@ -211,19 +215,25 @@ export async function serveSite(config: ServeConfig, deps: ServeSiteDeps): Promi
   if (config.buildCommand) await runOrThrow(runCommand, 'build', config.buildCommand, deps.cwd);
 
   const child = spawn('sh', ['-c', config.startCommand], deps.cwd);
+
+  let serverExited: number | null | undefined;
+  child.onExit((code) => {
+    serverExited = code;
+  });
+
+  // SIGTERM, then a bounded wait for the process to exit, then SIGKILL. A server that traps or
+  // ignores SIGTERM would otherwise leak past teardown into later runner steps. Bounded by an
+  // iteration count against the injectable `sleep` (not wall-clock) so it stays deterministic.
   const stop = async (): Promise<void> => {
     child.kill('SIGTERM');
+    for (let i = 0; serverExited === undefined && i < DEFAULTS.stopMaxPolls; i += 1) await sleep(DEFAULTS.stopPollMs);
+    if (serverExited === undefined) child.kill('SIGKILL');
   };
 
   const readyUrl = new URL(config.readyPath ?? DEFAULTS.readyPath, config.baseUrl.replace(/\/$/, '') + '/').toString();
   const timeoutMs = config.readyTimeoutMs ?? DEFAULTS.readyTimeoutMs;
   const intervalMs = config.readyIntervalMs ?? DEFAULTS.readyIntervalMs;
   const deadline = Date.now() + timeoutMs;
-
-  let serverExited: number | null | undefined;
-  child.onExit((code) => {
-    serverExited = code;
-  });
 
   for (;;) {
     if (serverExited !== undefined) {
@@ -288,6 +298,22 @@ async function closeSharedCapture(capture: SharedCapture): Promise<void> {
   });
 }
 
+// The single-`serve` analogue of the multi-site loop's serve-failure handling: the SHARED
+// serveFailureChecks (unsuffixed -- one implicit site), wrapped as the stage's aggregate telemetry.
+// It classifies every fault class identically to the per-site path -- a TRANSIENT fault as
+// `heavy-serve unjudged/infra` (bounded infra retry) and a NON-transient build break as a plain
+// fixable `heavy-serve` fail carrying the real message (the autofixer's full fix budget) -- so a
+// single-serve tenant is neither denied the infra retry nor the repair attempts a multi-brand
+// tenant gets. Neither branch rethrows: a serve/build throw never becomes a reason-less runner-crash.
+function serveFailureTelemetry(grant: ExecutionGrant, err: unknown): StatusTelemetry {
+  return {
+    grantId: grantId(grant),
+    result: 'fail',
+    checks: serveFailureChecks('', new Set(URL_BOUND_HEAVY_GATE_IDS), err),
+    logDigest: digestFor(grant.repoId, grant.ticketId, grant.stage, String((grant.gateSpecs ?? []).length)),
+  };
+}
+
 // The heavy stage: bring the site up, thread its base URL into the URL-bound heavy gates, run the
 // grant's gates (delegating verification, PR-match and execution to runGateStage), then always
 // tear the server down. The Visual-QA gate is registered here (it must NOT ride on the fast gate
@@ -323,7 +349,20 @@ export async function runHeavyGateStage(grant: ExecutionGrant, deps: RunHeavyGat
   try {
     let configOverlay: Record<string, Record<string, unknown>> | undefined;
     if (serveConfig?.startCommand) {
-      served = await serveSiteImpl(serveConfig, { cwd: workspaceRoot, ...(deps.serveDeps ?? {}) });
+      try {
+        served = await serveSiteImpl(serveConfig, { cwd: workspaceRoot, ...(deps.serveDeps ?? {}) });
+      } catch (err) {
+        // Classify the serve/build fault EXACTLY as the multi-site loop does (serveFailureChecks),
+        // for EVERY fault class: a TRANSIENT install/ready-poll fault -> `unjudged/infra`, which the
+        // control plane re-runs on its bounded infra budget (fix-loop.ts isInfraUnjudgedOnly); a
+        // NON-transient build break -> a plain fixable `heavy-serve` fail carrying the real message,
+        // which earns the autofixer's full fix budget. Neither rethrows to a reason-less
+        // `runner-crash` (action-entry.ts crashTelemetry, 0 fix rounds) -- so a real build break in a
+        // single-serve tenant now gets the same repair attempts a multi-brand tenant already gets. A
+        // genuine runner crash OUTSIDE serveSite still reaches crashTelemetry via action-entry's own
+        // outer catch; only the serve/build class is classified here.
+        return serveFailureTelemetry(grant, err);
+      }
       configOverlay = {};
       for (const id of URL_BOUND_HEAVY_GATE_IDS) configOverlay[id] = { baseUrl: served.baseUrl };
       // The vision judge authenticates with the tenant's executor credential -- threaded onto
@@ -349,16 +388,19 @@ export async function runHeavyGateStage(grant: ExecutionGrant, deps: RunHeavyGat
   }
 }
 
-// A site's serveSiteImpl (install/build/start/ready-poll) threw. The URL-bound gates for THIS
-// site genuinely never ran -- publish them `skip/infra`, never a `fail` with invented findings
-// (the exact mislabel this fix removes: a build break masquerading as an SEO content-gate
-// FAILURE). A separate `heavy-serve (<site>)` check carries the real classification: a
-// transient-shaped fault (registry hiccup, truncated tarball) reports `unjudged/infra`, which
-// the control plane retries as an infra fault before escalating (bounded by `fix.maxBuildRetries`
-// on the dispatch path, one gate-only retry on the blocking fix loop) -- a bare re-run may just
-// clear it. A reproducible break (a real syntax/type error) reports `fail` with the real message,
-// so it blocks the merge, correctly attributed to the build rather than to a phantom SEO finding.
-function siteServeFailureChecks(site: SiteConfig, urlBoundIds: ReadonlySet<string>, err: unknown): CheckResult[] {
+// A serveSiteImpl (install/build/start/ready-poll) threw. The URL-bound gates genuinely never ran
+// -- publish them `skip/infra`, never a `fail` with invented findings (the exact mislabel this
+// removes: a build break masquerading as an SEO content-gate FAILURE). A separate `heavy-serve`
+// check carries the real classification: a transient-shaped fault (registry hiccup, truncated
+// tarball) reports `unjudged/infra`, which the control plane retries as an infra fault before
+// escalating (bounded by `fix.maxBuildRetries` on the dispatch path, one gate-only retry on the
+// blocking fix loop) -- a bare re-run may just clear it. A reproducible break (a real syntax/type
+// error) reports `fail` with the real message, so it blocks the merge, correctly attributed to the
+// build rather than to a phantom SEO finding.
+//
+// `nameSuffix` is the per-site ` (<site>)` label the multi-site loop appends, or '' for the
+// single-`serve` path (one implicit site, no suffix). Shared so both paths classify identically.
+function serveFailureChecks(nameSuffix: string, urlBoundIds: ReadonlySet<string>, err: unknown): CheckResult[] {
   const message = err instanceof Error ? err.message : String(err);
   // `baseId` for the same reason run-gate-stage.ts's toChecks sets it on every suffixed check: the
   // never-run / no-baseline ledger and the enabled-gate set are keyed by the BARE gate id
@@ -366,17 +408,17 @@ function siteServeFailureChecks(site: SiteConfig, urlBoundIds: ReadonlySet<strin
   // can never match an enabled id. That matters most precisely here -- "a gate that never ran
   // because its site would not serve" is the scenario the never-run diagnostic exists to report.
   const skipChecks: CheckResult[] = [...urlBoundIds].map((id) => ({
-    name: `${id} (${site.name})`,
+    name: `${id}${nameSuffix}`,
     baseId: id,
     status: 'pending',
     skipped: true,
     skipReason: 'infra',
   }));
-  // `heavy-serve` is a per-site synthetic check, not one of the tenant's enabled gates, so it
-  // carries no baseId -- there is no bare id for the ledger to match it against.
+  // `heavy-serve` is a synthetic check, not one of the tenant's enabled gates, so it carries no
+  // baseId -- there is no bare id for the ledger to match it against.
   const serveCheck: CheckResult = isTransientBuildFault(phaseOf(err), message)
-    ? { name: `heavy-serve (${site.name})`, status: 'fail', unjudged: true, unjudgedReason: 'infra', findings: [message] }
-    : { name: `heavy-serve (${site.name})`, status: 'fail', findings: [message] };
+    ? { name: `heavy-serve${nameSuffix}`, status: 'fail', unjudged: true, unjudgedReason: 'infra', findings: [message] }
+    : { name: `heavy-serve${nameSuffix}`, status: 'fail', findings: [message] };
   return [...skipChecks, serveCheck];
 }
 
@@ -384,7 +426,7 @@ function siteServeFailureChecks(site: SiteConfig, urlBoundIds: ReadonlySet<strin
 // this PR's diff touches none of the site's declared `paths`. Published rather than silently
 // omitted: an absent check is indistinguishable from a gate nobody noticed did not run, which is
 // the failure mode run-gate-stage.ts's `missing` backstop exists for. Same shape as
-// siteServeFailureChecks' skips (including `baseId` for the never-run ledger); only the reason
+// serveFailureChecks' skips (including `baseId` for the never-run ledger); only the reason
 // differs, and it is a DIFF-scoped one -- the next PR touching this site runs it.
 //
 // Both per-site loops report through here, so `notRunPhrase` names what actually did not happen:
@@ -809,7 +851,7 @@ async function runPerSiteHeavyGates(
           // of runPerSiteHeavyGates and discard any OTHER site's already-collected findings (and,
           // absent action-entry.ts's own catch, crash the runner before gate-report.json is
           // written at all).
-          checks.push(...siteServeFailureChecks(site, urlBoundIds, err));
+          checks.push(...serveFailureChecks(` (${site.name})`, urlBoundIds, err));
           ok = false;
           continue;
         }
