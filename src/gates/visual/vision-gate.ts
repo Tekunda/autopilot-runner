@@ -51,6 +51,8 @@ import {
   matchesAnyGlob,
   normalizeRoute,
 } from '../content/route-targets.ts';
+import { resolveModel } from '../../config/model-tiers.ts';
+import type { ModelTier } from '../../contracts/types.ts';
 import type { Gate, GateContext, GateResult } from '../types.ts';
 import { createPlaywrightBrowser, type ScreenshotBrowser } from './browser.ts';
 import {
@@ -125,7 +127,14 @@ export interface VisionGateConfig {
   viewports?: VisionGateViewport[];
   // Gate-wide judging rubric. Falls back to the active profile's defaultCriteria when unset.
   criteria?: string[];
-  // Vision model id override (defaults to judge.ts DEFAULT_VISION_MODEL).
+  // The model TIER for the vision judge, resolved through src/config/model-tiers.ts to a concrete
+  // Claude model. Defaults to DEFAULT_VISION_MODEL_TIER ('standard' -> claude-sonnet-5): opus vision
+  // systematically 429s on a subscription token, while the standard tier has far higher throughput
+  // and is sufficient for visual-defect judgment. A tenant with API-tier credentials can set 'deep'
+  // to resolve claude-opus-5.
+  modelTier?: ModelTier;
+  // Explicit vision model id override. Wins over modelTier when set (the tier is Autopilot's
+  // default, not an override of a BYO model choice). Defaults to the resolved modelTier.
   model?: string;
   maxTokens?: number;
   // How many times a 429/529 is retried before the judge surfaces an infra-skip. Default is the
@@ -178,6 +187,14 @@ const DEFAULT_CONTENT_DIR = 'content';
 // one that renders nothing because every call 429s. Tenant-overridable via config.minIntervalMs
 // (set it to 0 to disable pacing).
 export const DEFAULT_VISION_MIN_INTERVAL_MS = 12_000;
+
+// The default model TIER the vision judge resolves when a tenant sets neither modelTier nor an
+// explicit model. 'standard' -> claude-sonnet-5 via src/config/model-tiers.ts. Right-sized down from
+// the deep/Opus tier: opus vision 429s systematically on a subscription token (the 429 carries no
+// anthropic-ratelimit-* headers, so it is a subscription throughput ceiling, not an API-key one),
+// standard has much higher throughput limits, and it is sufficient for visual-defect judgment.
+// Tenant-overridable via config.modelTier (e.g. 'deep' for an account with API-tier credentials).
+export const DEFAULT_VISION_MODEL_TIER: ModelTier = 'standard';
 
 // A route to render, plus WHY the diff selected it (logged so a run is self-describing about the
 // pages it chose -- especially the representative sample a global change fans out to).
@@ -336,10 +353,13 @@ export function createVisionGate(opts: { id: string; profile: VisionRubricProfil
       const injectedBrowser = deps.browser;
       const browser =
         injectedBrowser ?? (await (deps.createBrowser ?? createPlaywrightBrowser)());
+      // The vision judge is Anthropic-only, so resolve the model off the 'claude' tier map: an
+      // explicit config.model wins, else the tier (default 'standard' -> claude-sonnet-5).
+      const resolvedModel = resolveModel('claude', config.modelTier ?? DEFAULT_VISION_MODEL_TIER, config.model);
       const judge =
         deps.judge ??
         (deps.createJudge ?? createAnthropicVisionJudge)({
-          ...(config.model ? { model: config.model } : {}),
+          ...(resolvedModel ? { model: resolvedModel } : {}),
           ...(config.maxTokens ? { maxTokens: config.maxTokens } : {}),
           ...(config.executorCredential ? { credential: config.executorCredential } : {}),
           ...(config.maxRetries != null ? { maxRetries: config.maxRetries } : {}),

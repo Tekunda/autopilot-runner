@@ -15,6 +15,7 @@
 // `claude-opus-5`). The `claude-api` skill was not installed in the build environment, so both
 // are also PARAMETERIZED via config -- a tenant can override `model` per gate.
 
+import { modelForTier } from '../../config/model-tiers.ts';
 import type { Screenshot, Viewport } from './browser.ts';
 import { defaultVisionLimiter, type VisionLimiter } from './vision-concurrency.ts';
 
@@ -76,9 +77,13 @@ export function viewportLabelFor(viewport: Viewport): string {
     : `${viewport.width}x${viewport.height}`;
 }
 
-// The Opus tier this repo already resolves for deep model work (src/config/model-tiers.ts).
-// Overridable per gate via config.model.
-export const DEFAULT_VISION_MODEL = 'claude-opus-5';
+// The default vision-judge model: the STANDARD tier this repo resolves for ordinary model work
+// (src/config/model-tiers.ts -> claude-sonnet-5). Right-sized down from the deep/Opus tier because
+// opus vision systematically 429s on a subscription token, while standard has far higher throughput
+// limits and is sufficient for visual-defect judgment. Overridable per gate via config.modelTier
+// (resolved through the tier map) or an explicit config.model. The vision judge is Anthropic-only,
+// so the vendor is always 'claude' (which always maps, so the resolve is non-null here).
+export const DEFAULT_VISION_MODEL = modelForTier('claude', 'standard')!;
 export const ANTHROPIC_MESSAGES_URL = 'https://api.anthropic.com/v1/messages';
 const ANTHROPIC_VERSION = '2023-06-01';
 // OAuth/subscription tokens authenticate via `Authorization: Bearer` and require this beta
