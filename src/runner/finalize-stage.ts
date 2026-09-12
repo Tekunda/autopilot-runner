@@ -329,9 +329,14 @@ export async function finalizeCodingStage(
       // openPrWithRetry), a sibling racing the same branch, or the integration base branch
       // momentarily missing. The build's work is ALREADY pushed to result.branchName, so this
       // must NOT crash finalize and orphan it: retry the open with backoff, and only once the
-      // attempts are spent surface the confirmed branch with NO prUrl and an `error` outcome so
-      // the control plane re-ensures the base branch and retries next tick -- never a hollow
-      // "no-op done" that discards a real build. See finalize/#113 + control-plane.ts hardening.
+      // attempts are spent surface the confirmed branch with NO prUrl and a non-`pass` (`error`)
+      // outcome. That outcome does NOT travel as `error` end to end: on the CI-action runner any
+      // non-`pass` result fails the action step (exitCodeFor), so the run concludes `failure`,
+      // which the CIRunner maps to a build `fail` (toStageOutcome), never a distinct `error`. The
+      // subtask drive reconciles that `fail` as a BOUNDED build retry -- re-dispatching the build
+      // under fix.maxBuildRetries and blocking only once that budget is spent -- so a spent-retry
+      // openPR failure never lands as a hollow "no-op done" that discards the pushed work. See
+      // openPrWithRetry + finalize/#113.
       prUrl = await openPrWithRetry(deps.vcsHost, grant, result.branchName, baseRef);
       if (!prUrl) {
         return {
