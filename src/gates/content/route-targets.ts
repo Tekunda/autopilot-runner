@@ -43,11 +43,50 @@ export function isGlob(route: string): boolean {
   return route.includes('*') || route.includes('?');
 }
 
-// Compile a route glob to a full-match RegExp: `*` matches any run of characters, `?` a single one;
-// everything else is literal.
+// Translate a brace-free glob fragment: escape regex metachars, then `*` -> any run of characters,
+// `?` -> a single one. This is the exact translation the whole matcher used before brace support was
+// added, so a glob with no braces compiles identically. (`{`/`}` are still in the escape class but a
+// fragment routed here never contains one.)
+function translateGlobFragment(fragment: string): string {
+  return fragment.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
+}
+
+// Compile a route glob to a full-match RegExp: `*` matches any run of characters, `?` a single one,
+// and a well-formed `{a,b,c}` group is brace alternation (`(?:a|b|c)`) whose alternatives are each
+// themselves translated (so `{a.b,c}` treats the `.` literally). A `{` with no matching `}` before
+// the next `{` -- or a stray `}` -- is not a group and stays literal, exactly as before. Everything
+// else is literal.
 export function globToRegExp(glob: string): RegExp {
-  const escaped = glob.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
-  return new RegExp(`^${escaped}$`);
+  let out = '';
+  let i = 0;
+  while (i < glob.length) {
+    const ch = glob[i];
+    if (ch === '{') {
+      const close = glob.indexOf('}', i + 1);
+      const nextOpen = glob.indexOf('{', i + 1);
+      if (close !== -1 && (nextOpen === -1 || nextOpen > close)) {
+        const alts = glob.slice(i + 1, close).split(',').map(translateGlobFragment);
+        out += `(?:${alts.join('|')})`;
+        i = close + 1;
+        continue;
+      }
+      // Not a well-formed group: keep the brace literal.
+      out += translateGlobFragment('{');
+      i += 1;
+      continue;
+    }
+    if (ch === '}') {
+      out += translateGlobFragment('}');
+      i += 1;
+      continue;
+    }
+    // Consume the run up to the next brace and translate it as one fragment, so `**`/`*`/`?` stay intact.
+    let j = i;
+    while (j < glob.length && glob[j] !== '{' && glob[j] !== '}') j += 1;
+    out += translateGlobFragment(glob.slice(i, j));
+    i = j;
+  }
+  return new RegExp(`^${out}$`);
 }
 
 export function matchesAnyGlob(file: string, globs: string[]): boolean {
