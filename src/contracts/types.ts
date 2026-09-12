@@ -770,13 +770,23 @@ export interface StageResult {
   // gate-report artifact means provisioning/setup died before any gate produced a verdict
   // (e.g. a flaky apt mirror hard-failing the browser install), so it is infra, not a fixable
   // gate failure -- classify it 'error' so it never reaches the Autofixer.
+  // 'rate-limited' means the run crossed back reporting a provider (AI credential) rate-limit --
+  // a 429/529 on the shared coding-executor token, distinct from 'transient' (a GitHub API blip on
+  // a healthy run). Observed by the cross-run rate coordinator (ai-rate-ledger.ts) to record real
+  // RPM and set an advisory cooldown; in Phase 0 it is OBSERVE-ONLY and never changes the run's
+  // fate. `retryAfterMs` below carries the provider-directed backoff when the signal had one.
   errorReason?:
     | 'timeout'
     | 'workflow-drift'
     | 'run-not-found'
     | 'transient'
+    | 'rate-limited'
     | 'no-verdict-clean-run'
     | 'gate-no-report';
+  // Provider-directed backoff (ms) accompanying an errorReason of 'rate-limited', when the 429/529
+  // carried a Retry-After. Absent when the provider gave no header (the coordinator falls back to a
+  // configured default cooldown) and for every non-rate-limited result.
+  retryAfterMs?: number;
   // Set by dispatchStage/checkStage so the caller can persist the in-flight run marker and,
   // on later ticks, re-correlate the same run (cross-tick deadline is anchored on
   // runCreatedAt -- the run's immutable created_at -- so a hung run still escalates).
