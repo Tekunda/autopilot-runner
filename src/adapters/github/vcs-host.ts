@@ -12,7 +12,7 @@ import type {
 } from '../../contracts/adapters.ts';
 import { retryableHostMessage } from '../../contracts/adapters.ts';
 import { sameRepoId } from '../../contracts/types.ts';
-import type { CheckResult, CheckRunSnapshot, OpenCheckRun, PRStatus } from '../../contracts/types.ts';
+import type { CheckResult, CheckRunConclusion, CheckRunSnapshot, OpenCheckRun, PRStatus } from '../../contracts/types.ts';
 import { GitHubApiError, GitHubClient, type GitHubClientConfig } from './rest.ts';
 
 interface GhRef {
@@ -713,6 +713,31 @@ export class GitHubVCSHost implements VCSHost {
       if (isNewerCheckRun(run, latest.get(run.name))) latest.set(run.name, run);
     }
     return latest;
+  }
+
+  // The latest check-run of `name` on `ref`, with its RAW conclusion -- the read listChecks
+  // cannot serve because mapCheckStatus collapses every non-passing conclusion to `fail`. Reuses
+  // the same latest-per-name listing listChecks does, then hands back that one run's own status
+  // and conclusion verbatim. Fail-safe: unlike listChecks it does NOT rethrow a ref it cannot
+  // resolve -- the caller (the stranded-gate recovery lane) reads `undefined` as "nothing to act
+  // on" and holds, the safe direction for a recovery that would otherwise re-arm on a guess.
+  async latestCheckRun(repoId: string, ref: string, name: string): Promise<CheckRunConclusion | undefined> {
+    let latest: Map<string, GhCheckRun>;
+    try {
+      latest = await this.latestCheckRunsByName(repoId, ref);
+    } catch {
+      // Fail-safe: an unresolvable ref or transport fault reads as "nothing to act on" (the caller
+      // holds), never as a verdict. Unlike listChecks, which rethrows, this read is a recovery
+      // probe whose safe direction is silence.
+      return undefined;
+    }
+    const run = latest.get(name);
+    if (!run) return undefined;
+    // The host's own three lifecycle words; anything unexpected is treated as not-yet-completed so
+    // a conclusion is never read off a run this adapter does not understand.
+    const status: CheckRunConclusion['status'] =
+      run.status === 'completed' ? 'completed' : run.status === 'in_progress' ? 'in_progress' : 'queued';
+    return { status, conclusion: run.conclusion };
   }
 
   async reviewDecision(repoId: string, prNumber: number): Promise<'approved' | 'changes_requested' | 'pending'> {

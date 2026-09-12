@@ -4,6 +4,7 @@
 
 import type {
   CheckResult,
+  CheckRunConclusion,
   CheckRunSnapshot,
   CheckStatus,
   CodingActionInputs,
@@ -472,6 +473,18 @@ export interface VCSHost {
   // orphans" is the silent-pass shape this contract exists to avoid.
   // Optional -- a host without it simply has no orphan sweep.
   listOpenCheckRuns?(repoId: string, ref: string): Promise<OpenCheckRun[] | undefined>;
+  // The latest check-run of `name` on `ref`, with its RAW GitHub conclusion. The one read that
+  // separates a gate that STOPPED WITHOUT A VERDICT (superseded/cancelled/timed out) from one
+  // that judged the code and found a defect: listChecks maps both to `fail` (mapCheckStatus), so
+  // the stranded-gate recovery lane (watchdog.ts) -- which must re-arm the first and never touch
+  // the second -- cannot read it there. Latest-per-name, the same rule listChecks applies.
+  //
+  // Fail-safe like checkRunStatus/RunLiveness/listOpenCheckRuns: `undefined` means the check-run
+  // could NOT be read (transport error, rate limit, a ref the host cannot resolve) OR no run of
+  // that name exists on the ref -- never "completed with no verdict". A recovery lane keying on a
+  // specific conclusion treats undefined as "nothing to act on" and holds, which is the safe
+  // direction. Optional -- a host without it makes the stranded-gate recovery lane inert.
+  latestCheckRun?(repoId: string, ref: string, name: string): Promise<CheckRunConclusion | undefined>;
   // Re-trigger a FAILED deployment on `ref` (a merge commit sha): re-run the failed jobs of
   // the workflow run(s) that produced the failing deployment check, so a transient deploy
   // failure (registry blip, infra flake) recovers without a human. Returns true if a rerun

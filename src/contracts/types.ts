@@ -984,6 +984,20 @@ export interface CheckRunSnapshot {
   name: string;
 }
 
+// The latest check-run of one NAME on a ref, with its RAW GitHub conclusion -- as returned by
+// VCSHost.latestCheckRun. CheckRunSnapshot answers "is the run I remember still open?" by id;
+// this answers "how did the newest run of this name END?" by name, and it exists for the one
+// fact CheckRunSnapshot and listChecks both discard: the raw conclusion. listChecks collapses
+// `cancelled`/`timed_out` into `fail` (mapCheckStatus), so a recovery lane that must tell a gate
+// that STOPPED WITHOUT A VERDICT (superseded/cancelled/timed out) from one that judged the code
+// and found a defect (`failure`) cannot read it there. `conclusion` is null while `status` is
+// not 'completed', and also on a completed run the host reported without one -- indeterminate,
+// never a pass -- exactly as RunLiveness documents.
+export interface CheckRunConclusion {
+  status: 'queued' | 'in_progress' | 'completed';
+  conclusion: string | null;
+}
+
 // One check-run the host still holds OPEN (queued/in_progress) on a ref, as returned by
 // VCSHost.listOpenCheckRuns. This is the discovery half of the ghost story: CheckRunSnapshot
 // answers "is the check-run I remember still open?", which only works while something still
@@ -1251,6 +1265,19 @@ export interface SubtaskState {
   // coverage. Absent until a gate stage completed. Not persisted long-term meaning: overwritten
   // each gate pass.
   lastGateChecks?: RecordedGateCheck[];
+  // The PR head sha the watchdog's stranded-gate recovery lane last re-armed on (watchdog.ts
+  // recoverStrandedSubtaskGates). It exists to suppress re-counting a re-arm the drive has not
+  // consumed yet: after a re-arm the subtask is `reviewing` with no marker, but the cancelled
+  // check-run stays the latest on the branch through the window before the (capacity-bounded,
+  // may-be-deferred) drive loop re-gates it -- so a sweep that finds the SAME head still stranded
+  // must NOT spend the budget again. The lane re-counts only when this differs from the current
+  // head, i.e. the head genuinely ADVANCED (a fix/rebuild push or an update-branch merge commit) --
+  // a new revision its own gate never judged. It does NOT track the "stuck on the same head" case:
+  // once the drive re-gates, the subtask holds a marker again and the LIVE in-flight reconcile owns
+  // any repeat infra escalation on the same shared gateErrorAttempts budget. Overwritten on each
+  // fresh-strand re-arm; the gate's own PASS path leaves it (dominated by lastGateHeadSha). Absent
+  // until the lane has re-armed this subtask at least once.
+  strandedGateHeadSha?: string;
   // The PR head sha the last PASSING gate ran against. Set only alongside lastGateChecks, so
   // its presence already implies "that gate passed". Used to tell a head that has genuinely
   // moved (rebuild, fix push, update-branch merge commit -- all of which MUST be re-gated)
