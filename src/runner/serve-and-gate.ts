@@ -23,6 +23,7 @@ import type { CheckResult, ExecutionGrant, ServeConfig, SiteConfig, StatusTeleme
 import { matchesAnyPath, sitesForChangedFiles } from '../contracts/changed-paths.ts';
 import { canonicalGateId, gateConfigFor } from '../gates/gate-id-aliases.ts';
 import type { ExecutorCredential } from '../gates/visual/judge.ts';
+import { defaultSharedCapture, type SharedCapture } from '../gates/visual/capture-cache.ts';
 import { verifyGrant } from '../control-plane/grant-verify.ts';
 import { runCommand as defaultRunCommand } from '../gates/exec.ts';
 import { boundedCapture } from '../gates/output-capture.ts';
@@ -271,6 +272,20 @@ export interface RunHeavyGateStageDeps extends RunGateStageDeps {
   // only exists at run time, off the coding-executor-config, so it can't ride the signed grant).
   // Absent -> the judge falls back to ANTHROPIC_API_KEY, else fails closed.
   executorCredential?: ExecutorCredential;
+  // The shared screenshot capture the vision gates render through. The stage OWNS its lifecycle,
+  // closing it in each served site's teardown so the browser process and its base64 shot map are
+  // freed between sites. Defaults to the process-wide defaultSharedCapture the gates reach directly;
+  // injected only in tests to assert the close happens.
+  sharedCapture?: SharedCapture;
+}
+
+// Close the shared vision capture on a served site's teardown, freeing the browser process and its
+// base64 shot map. A close failure is logged, never swallowed and never propagated -- teardown must
+// proceed to the next site (or exit) regardless of whether the headless browser shut down cleanly.
+async function closeSharedCapture(capture: SharedCapture): Promise<void> {
+  await capture.close().catch((err) => {
+    process.stdout.write(`[capture] shared browser close failed: ${err instanceof Error ? err.message : String(err)}\n`);
+  });
 }
 
 // The heavy stage: bring the site up, thread its base URL into the URL-bound heavy gates, run the
@@ -328,6 +343,9 @@ export async function runHeavyGateStage(grant: ExecutionGrant, deps: RunHeavyGat
     });
   } finally {
     if (served) await served.stop().catch(() => {});
+    // Free the shared browser + its base64 shot map now the site is down. The gates never close it
+    // (a gate closing it would break a concurrent sibling); the stage owns exactly this one close.
+    await closeSharedCapture(deps.sharedCapture ?? defaultSharedCapture);
   }
 }
 
@@ -822,6 +840,9 @@ async function runPerSiteHeavyGates(
         );
       } finally {
         if (served) await served.stop().catch(() => {});
+        // Close PER SITE: the shared browser and its accumulated base64 shot map are freed before the
+        // next site serves, so a multi-brand run does not leak one site's shots into the next.
+        await closeSharedCapture(deps.sharedCapture ?? defaultSharedCapture);
       }
     }
   }

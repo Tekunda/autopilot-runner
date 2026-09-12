@@ -54,7 +54,8 @@ import {
 import { resolveModel } from '../../config/model-tiers.ts';
 import type { ModelTier } from '../../contracts/types.ts';
 import type { Gate, GateContext, GateResult } from '../types.ts';
-import { createPlaywrightBrowser, type ScreenshotBrowser } from './browser.ts';
+import { type ScreenshotBrowser } from './browser.ts';
+import { createSharedCapture, defaultSharedCapture, type SharedCapture } from './capture-cache.ts';
 import {
   createAnthropicVisionJudge,
   VisionRateLimitError,
@@ -156,6 +157,10 @@ export interface VisionGateDeps {
   // Overridable factory for the default browser (tests assert the default path without launching
   // Chromium). Only used when `browser` is not injected.
   createBrowser?: () => Promise<ScreenshotBrowser>;
+  // Injected shared capture (tests drive two gates against ONE counting cache). When set it is used
+  // directly and NOT closed by the gate -- the caller (the stage, in production) owns its lifecycle,
+  // exactly like an injected `browser`. Takes precedence over `browser`/`createBrowser`.
+  capture?: SharedCapture;
   // Overridable factory for the default vision judge, mirroring createBrowser: tests assert the
   // config->judge passthrough (model/maxTokens/credential/maxRetries/minIntervalMs) without a real
   // API call. Only used when `judge` is not injected.
@@ -350,9 +355,28 @@ export function createVisionGate(opts: { id: string; profile: VisionRubricProfil
       const viewports = config.viewports && config.viewports.length > 0 ? config.viewports : DEFAULT_SWEEP;
       const criteria = config.criteria ?? [];
 
+      // Resolve the render source. Production routes through the process-wide shared capture so BOTH
+      // vision gates render each (route, viewport) exactly once and consume the same PNG bytes; the
+      // stage (serve-and-gate) owns and closes it, never a gate -- otherwise gate A's finally closes
+      // the browser mid-run of concurrent gate B. Tests inject either a ready `capture`, a fake
+      // `browser`, or a `createBrowser` factory; the latter two are wrapped in a LOCAL shared capture
+      // so each gate run stays isolated with its own fake.
       const injectedBrowser = deps.browser;
-      const browser =
-        injectedBrowser ?? (await (deps.createBrowser ?? createPlaywrightBrowser)());
+      let capture: SharedCapture;
+      // Whether THIS gate closes the capture in finally. Only a capture the gate created from a
+      // `createBrowser` factory is the gate's to close; an injected `capture`/`browser` is the
+      // caller's, and the production singleton is the stage's.
+      let ownsCapture = false;
+      if (deps.capture) {
+        capture = deps.capture;
+      } else if (injectedBrowser) {
+        capture = createSharedCapture({ createBrowser: async () => injectedBrowser });
+      } else if (deps.createBrowser) {
+        capture = createSharedCapture({ createBrowser: deps.createBrowser });
+        ownsCapture = true;
+      } else {
+        capture = defaultSharedCapture;
+      }
       // The vision judge is Anthropic-only, so resolve the model off the 'claude' tier map: an
       // explicit config.model wins, else the tier (default 'standard' -> claude-sonnet-5).
       const resolvedModel = resolveModel('claude', config.modelTier ?? DEFAULT_VISION_MODEL_TIER, config.model);
@@ -402,7 +426,7 @@ export function createVisionGate(opts: { id: string; profile: VisionRubricProfil
           const shots: JudgeShot[] = [];
           for (const viewport of viewports) {
             try {
-              const screenshot: Screenshot = await browser.screenshot(url, viewport);
+              const screenshot: Screenshot = await capture.screenshot(url, viewport);
               shots.push({ viewport, screenshot });
             } catch (err) {
               failures.push(`${viewportLabel(target, viewport)}: could not verify (${errMsg(err)})`);
@@ -448,9 +472,11 @@ export function createVisionGate(opts: { id: string; profile: VisionRubricProfil
           }
         }
       } finally {
-        // Only close a browser this gate created; an injected one is the caller's to manage.
-        if (!injectedBrowser) {
-          await browser.close().catch(() => {});
+        // Only close a capture this gate created (from a `createBrowser` factory). An injected
+        // capture/browser is the caller's, and the production shared capture is the stage's -- a gate
+        // must NEVER close the shared browser, or it breaks the concurrent sibling gate mid-run.
+        if (ownsCapture) {
+          await capture.close().catch(() => {});
         }
       }
 
