@@ -254,11 +254,19 @@ export type ActionResult =
 // get a report, but ci-runner.ts fetches it only for architect/accept/lensed-review. Keyed on the
 // stage KIND rather than on the adapter's current appetite, so a lane wired up later needs no
 // change here -- and so this predicate never has to know which consumers exist.
+// The report file a finalize run reports on, decided from the stage KIND alone -- so the crash
+// path (which has no ActionResult, only inputs) selects the SAME artifact the normal path would.
+// `fix` -> fix-report; any other judgment stage -> judgment-report; a `build`/coding stage ->
+// none (its result travels back as the PR it opened, so it has no report channel to write).
+export function finalizeReportFile(grant: ExecutionGrant): string | undefined {
+  if (grant.stage === 'fix') return FIX_REPORT_FILE;
+  return CODING_STAGES.has(grant.stage) ? undefined : JUDGMENT_REPORT_FILE;
+}
+
 export function reportFileFor(inputs: ActionInputs, result: ActionResult): string | undefined {
   if (result.mode === 'gate' && (inputs.mode === 'gate' || inputs.mode === 'heavy-gate')) return GATE_REPORT_FILE;
   if (result.mode !== 'finalize' || inputs.mode !== 'finalize') return undefined;
-  if (inputs.grant.stage === 'fix') return FIX_REPORT_FILE;
-  return CODING_STAGES.has(inputs.grant.stage) ? undefined : JUDGMENT_REPORT_FILE;
+  return finalizeReportFile(inputs.grant);
 }
 
 // Resolved telemetry, if this result has any yet -- a prepare handing off to the vendor
@@ -281,7 +289,10 @@ export async function runActionEntry(inputs: ActionInputs, deps: RunActionDeps =
     // Durable replay claim for the gate stage: verify the signature, then atomically claim the
     // grant before running (and publishing) any gate. A replayed gate grant re-dispatched into a
     // fresh job would otherwise re-publish a stale verdict; the claim rejects it here. runGateStage
-    // verifies again harmlessly. Fail-open on any non-definitive claim outcome (see replay-claim.ts).
+    // verifies again harmlessly. Fails CLOSED on any non-definitive claim outcome -- `replayed` and
+    // `blocked` (the latter includes a claim store that cannot answer after a bounded retry) reject
+    // the run; only `claimed` and the structural `unavailable` proceed (see replay-claim.ts's GA-A2
+    // header for why an unanswerable claim store now blocks rather than fails open).
     const gateVerification = verifyGrant(inputs.grant, verifyKey, deps.now ?? new Date(), environment);
     if (gateVerification.ok) {
       const sha = await resolveClaimSha(inputs.grant, vcsHost, inputs.target.branch || inputs.target.baseRef);
@@ -490,12 +501,13 @@ export async function main(): Promise<void> {
 
   // Defense-in-depth (independent of serve-and-gate.ts's own per-site catch): ANY unexpected
   // throw out of runActionEntry must still land as reported telemetry, not an unhandled
-  // rejection that silently vanishes with zero logs and no gate-report.json -- the exact crash
+  // rejection that silently vanishes with zero logs and no report artifact -- the exact crash
   // this whole fix removes at the source. Mirrors the parseInputs catch above: log to stderr,
-  // fail the step, and (for gate modes) still write a degraded gate-report.json -- via
-  // crashTelemetry, NOT rejectedTelemetry, so the report carries a real check the fix loop can
-  // act on (see crashTelemetry) rather than an empty array that discards the fallback checks and
-  // burns the whole fix-round budget on a crash no edit can diagnose.
+  // fail the step, and still write a degraded report to the artifact this run reports on (a
+  // gate-report for gate modes, the fix/judgment report for finalize) -- via crashTelemetry, NOT
+  // rejectedTelemetry, so the report carries a real check the fix loop can act on (see
+  // crashTelemetry) rather than an empty array that discards the fallback checks and burns the
+  // whole fix-round budget on a crash no edit can diagnose.
   let result: ActionResult;
   try {
     // Gate mode (fast or heavy): compute the changed-file scope from this checkout. The dispatch
@@ -525,6 +537,18 @@ export async function main(): Promise<void> {
     process.stderr.write(`autopilot thin runner: ${message}\n`);
     if (inputs.mode === 'gate' || inputs.mode === 'heavy-gate') {
       writeFileSync(`${workspaceRoot()}/${GATE_REPORT_FILE}`, JSON.stringify(crashTelemetry(inputs.grant, err)));
+    } else if (inputs.mode === 'finalize') {
+      // A finalize crash is still a billed/spent round, so it must not report a bare `failure`
+      // conclusion with no machine-readable reason (the pre-#431 gap, reopened on the crash path).
+      // Write the SAME structured crashTelemetry to the stage's report artifact the normal finalize
+      // path uses -- fix-report for `fix`, judgment-report for a judgment stage -- so the fix loop /
+      // escalation reads a `runner-crash` check carrying the real message instead of nothing. A
+      // build/coding finalize has no report channel (finalizeReportFile -> undefined), matching the
+      // normal path, so nothing is written there.
+      const reportFile = finalizeReportFile(inputs.grant);
+      if (reportFile !== undefined) {
+        writeFileSync(`${workspaceRoot()}/${reportFile}`, JSON.stringify(crashTelemetry(inputs.grant, err)));
+      }
     }
     process.exitCode = 1;
     return;
