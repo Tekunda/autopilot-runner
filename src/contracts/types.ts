@@ -998,8 +998,7 @@ export interface CheckRunSnapshot {
 // not 'completed', and also on a completed run the host reported without one -- indeterminate,
 // never a pass -- exactly as RunLiveness documents.
 export interface CheckRunConclusion {
-  status: 'queued' | 'in_progress' | 'completed';
-  conclusion: string | null;
+  status: 'queued' | 'in_progress' | 'completed'; conclusion: string | null;
 }
 
 // One check-run the host still holds OPEN (queued/in_progress) on a ref, as returned by
@@ -2498,4 +2497,6 @@ export interface PRStatus {
   // the base head against this confirms the merge has actually settled. Absent until
   // merged / when the adapter doesn't surface it.
   mergeCommitSha?: string;
+  // Whether the PR is a GitHub draft. Absent, never false, when an adapter doesn't surface it.
+  isDraft?: boolean;
 }
