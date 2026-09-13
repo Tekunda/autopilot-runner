@@ -921,6 +921,21 @@ export interface CIRunner {
   // cannot be determined, which callers must treat as "unknown", never as still-running and
   // never as a pass. A runner without it simply has no ghost sweep.
   runLiveness?(repoId: string, runId: number): Promise<RunLiveness | undefined>;
+  // Grant-free: did this (already-completed) run conclude without ever starting a single step of
+  // any of its jobs -- the runner-acquisition-outage signature (see StageResult.errorReason
+  // 'job-not-acquired')? For the blocked-ticket recovery watchdog, which must classify a run from
+  // a persisted run id alone, with no grant to check it against. `undefined` when it cannot be
+  // determined (transport failure, unrecognised repoId) -- callers must treat that as "unknown",
+  // never as true. Optional; a runner without it simply has no recovery for this fault.
+  runNeverStartedJobs?(repoId: string, runId: number): Promise<boolean | undefined>;
+  // Grant-free, name-based: the most recent COMPLETED run for a stage+ticket, for the same
+  // blocked-ticket recovery watchdog -- it runs on tickets whose `inFlight` marker (and any run
+  // id) is long gone, so it must re-derive one from the host by name (mirrors cancelStagesFor's
+  // action+shortId match) rather than by a persisted id. No time bounds: the caller only ever
+  // asks this about a BLOCKED ticket, which dispatches nothing, so the newest match IS the run
+  // that produced the block. `undefined` when none is found or the read fails. Optional; a
+  // runner without it simply has no job-not-acquired blocked recovery.
+  findLatestConcludedRun?(repoId: string, stage: Stage, shortId: string): Promise<{ runId: number; conclusion: string | null } | undefined>;
 }
 
 // The pluggable coding-agent seam the thin runner drives for coding stages

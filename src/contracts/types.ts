@@ -770,6 +770,9 @@ export interface StageResult {
   // gate-report artifact means provisioning/setup died before any gate produced a verdict
   // (e.g. a flaky apt mirror hard-failing the browser install), so it is infra, not a fixable
   // gate failure -- classify it 'error' so it never reaches the Autofixer.
+  // 'job-not-acquired' fires for ANY stage: the run concluded without ever starting a single step
+  // of any of its jobs -- a GitHub runner-acquisition outage, not a content verdict of any kind
+  // (there is no artifact/report to read; nothing ran). See ci-runner.ts's runNeverStarted.
   // 'rate-limited' means the run crossed back reporting a provider (AI credential) rate-limit --
   // a 429/529 on the shared coding-executor token, distinct from 'transient' (a GitHub API blip on
   // a healthy run). Observed by the cross-run rate coordinator (ai-rate-ledger.ts) to record real
@@ -782,7 +785,8 @@ export interface StageResult {
     | 'transient'
     | 'rate-limited'
     | 'no-verdict-clean-run'
-    | 'gate-no-report';
+    | 'gate-no-report'
+    | 'job-not-acquired';
   // Provider-directed backoff (ms) accompanying an errorReason of 'rate-limited', when the 429/529
   // carried a Retry-After. Absent when the provider gave no header (the coordinator falls back to a
   // configured default cooldown) and for every non-rate-limited result.
@@ -1217,6 +1221,12 @@ export interface SubtaskState {
   // re-drives the build while this is under `fix.maxBuildRetries` before
   // blocking the subtask for a human. Reset once a build produces a PR.
   buildAttempts?: number;
+  // Consecutive times this subtask's build stage returned the job-not-acquired infra fault (a
+  // GitHub runner-acquisition outage -- the run concluded without starting) instead of a real
+  // pass/fail. Separate from buildAttempts so an outage never spends the budget a genuine build
+  // failure needs; same cap (fix.maxBuildRetries), same bounded-retry idiom as gateErrorAttempts.
+  // Cleared the moment the build produces a genuine (non-infra) result.
+  buildErrorAttempts?: number;
   // Consecutive ticks this subtask has re-driven through the gate/merge path
   // without completing (its merge stayed pending). The pipeline re-drives while
   // this is under `MAX_REVIEW_ATTEMPTS` before blocking the subtask for a human,
@@ -1588,6 +1598,32 @@ export interface TicketState {
   // ordinary repair budget was already spent. Bounded by fix.maxNewBlockerRepairs. Reset with
   // acceptRepairAttempts.
   newBlockerRepairs?: number;
+  // The findings the MOST RECENTLY dispatched review-repair build carried (repairDispatchFindings),
+  // so a reconcile that finds it hit a GitHub runner-acquisition outage (job-not-acquired) can
+  // re-dispatch the exact same repair rather than blocking -- the round that aggregated these
+  // findings is already cleared (reviewRound: undefined) by the time the repair completes, so this
+  // is the only place they survive.
+  // How many CONSECUTIVE times the most recently dispatched review-repair build hit that infra
+  // fault rather than completing (acceptRepairInfraAttempts) -- a separate, bounded budget from
+  // acceptRepairAttempts (which counts REAL repair rounds) so an outage never spends the repair
+  // budget a genuine content failure needs. Same cap (fix.maxBuildRetries). Neither field bounds
+  // the other; both reset alongside acceptRepairAttempts, and also by any repair that reaches a
+  // real (non-infra) result.
+  // Stamped by the watchdog's job-not-acquired blocked-ticket recovery (watchdog.ts) the ONE time
+  // it either auto-unblocks this ticket (`job-not-acquired`, naming the run it re-derived the
+  // fault from) or CHECKS the block and finds it is not that fault (`checked:not-infra` -- no run
+  // found, or a run that did start): either way the lane has spent its one look at this block and
+  // must not pay the same two host reads again on every tick. Bounds recovery itself to exactly
+  // one per block too: a repeat outage on the SAME block falls through to the ordinary bounded
+  // infra-retry above and escalates like any other, never back through this lane a second time.
+  // Cleared on every FRESH transition into `blocked` (a new blockedReason write) -- see the
+  // block-writers below and in driveAssembledAccept -- so it is scoped to one block, never sticky
+  // across an unrelated later one.
+  //
+  // The three declarations below share one line rather than each getting its own: each already
+  // earns a full paragraph above, and giving each its own line as well pushes this file over the
+  // repo's line-budget lint for a three-field addition that does not otherwise warrant a file split.
+  repairDispatchFindings?: ReviewFinding[]; acceptRepairInfraAttempts?: number; recoveredFrom?: { reason: 'job-not-acquired'; runId: number } | { reason: 'checked:not-infra' };
   // Highest PR review/comment ids the control plane has already acted on, per source, so
   // corrective feedback (a Codex or human `changes_requested`/comment) drives a fix exactly
   // once. Persisted so a control-plane restart doesn't re-fix already-handled feedback.
